@@ -1,6 +1,6 @@
 {
   "name": "investment-os-plugin",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Open-source Antigravity Personal-CIO MCP App plugin for multi-currency portfolio analytics, ETF look-through, configurable risk caps, optional US NRA estate tax, and SEC EDGAR catalyst monitoring.",
   "license": "MIT",
   "type": "module",

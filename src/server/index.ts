@@ -15,7 +15,9 @@ import {
   buildSummaryText,
   formatTimestamp,
   mergePortfolioPositions,
+  recordThesisTest,
   saveOrMergeThesis,
+  upsertSingleHypothesis,
 } from "./engine.js";
 import { pollEdgarFilings } from "./edgar.js";
 import {
@@ -40,7 +42,7 @@ import {
   saveProfile,
 } from "./storage.js";
 
-const APP_URI = "ui://investment-os/dashboard.html";
+const APP_URI = "ui://investment-os/v3/dashboard.html";
 const APP_MIME = "text/html;profile=mcp-app";
 
 const currentDir =
@@ -256,6 +258,29 @@ const TOOLS: Tool[] = [
         core_thesis: { type: "array", items: { type: "string" } },
         kill_switches: { type: "array", items: { type: "string" } },
         decision_log_note: { type: "string" },
+        verdict: {
+          type: ["string", "null"],
+          enum: ["HIGH_CONVICTION", "WATCH", "PROBATION", "EXIT", null],
+        },
+        bear_case_summary: { type: ["string", "null"] },
+        last_tested_date: { type: ["string", "null"] },
+        hypotheses: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string" },
+              claim: { type: "string" },
+              metric: { type: "string" },
+              status: { type: "string", enum: ["untested", "supported", "weakened", "falsified"] },
+              confidence: { type: "string", enum: ["low", "medium", "high"] },
+              evidence: { type: "string" },
+              last_tested: { type: ["string", "null"] },
+              source_url: { type: ["string", "null"] },
+            },
+            required: ["id", "claim"],
+          },
+        },
       },
       required: ["ticker"],
     },
@@ -382,6 +407,71 @@ const TOOLS: Tool[] = [
     },
     _meta: APP_ONLY_META,
   },
+  {
+    name: "record_thesis_test",
+    title: "Record Systematic Thesis Test",
+    description:
+      "Record a systematic Red-Team thesis test for a stock: score falsifiable hypotheses (supported/weakened/falsified/untested), update conviction verdict (HIGH_CONVICTION/WATCH/PROBATION/EXIT), log bear-case rebuttal, update ${PLUGIN_DATA}/theses/<TICKER>.md, and append an immutable entry to ${PLUGIN_DATA}/test_log.jsonl.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        verdict: { type: "string", enum: ["HIGH_CONVICTION", "WATCH", "PROBATION", "EXIT"] },
+        kill_switch_triggered: { type: "boolean" },
+        summary: { type: "string" },
+        bear_case: { type: "string" },
+        tested_at: { type: "string" },
+        price_at_test: { type: ["number", "null"] },
+        currency: { type: "string" },
+        hypotheses_tested: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string" },
+              claim: { type: "string" },
+              metric: { type: "string" },
+              status: { type: "string", enum: ["untested", "supported", "weakened", "falsified"] },
+              confidence: { type: "string", enum: ["low", "medium", "high"] },
+              evidence: { type: "string" },
+              last_tested: { type: ["string", "null"] },
+              source_url: { type: ["string", "null"] },
+            },
+            required: ["id", "claim"],
+          },
+        },
+      },
+      required: ["ticker", "verdict", "summary"],
+    },
+    _meta: INLINE_META,
+  },
+  {
+    name: "app_upsert_hypothesis",
+    title: "App Upsert Falsifiable Hypothesis",
+    description: "Internal UI tool to add or update a single falsifiable hypothesis inside a thesis card.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        hypothesis: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            claim: { type: "string" },
+            metric: { type: "string" },
+            status: { type: "string", enum: ["untested", "supported", "weakened", "falsified"] },
+            confidence: { type: "string", enum: ["low", "medium", "high"] },
+            evidence: { type: "string" },
+            last_tested: { type: ["string", "null"] },
+            source_url: { type: ["string", "null"] },
+          },
+          required: ["id", "claim"],
+        },
+      },
+      required: ["ticker", "hypothesis"],
+    },
+    _meta: APP_ONLY_META,
+  },
 ];
 
 function collectDefaultEdgarTickers(dataDir: string): string[] {
@@ -439,7 +529,7 @@ function mergeProfileUpdate(current: UserProfile, args: Record<string, unknown>)
 }
 
 const server = new Server(
-  { name: "investment-os-dashboard", version: "0.2.0" },
+  { name: "investment-os-dashboard", version: "0.3.0" },
   {
     capabilities: { tools: {}, resources: {} },
     instructions: "Personal-CIO portfolio dashboard and local analytics server for Investment OS.",
@@ -706,6 +796,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               (gateLines.length > 0 ? `\nGates:\n- ${gateLines.join("\n- ")}` : ""),
           },
         ],
+        structuredContent: payload as unknown as Record<string, unknown>,
+      };
+    }
+
+    if (name === "record_thesis_test") {
+      const profile = loadProfile(DATA_DIR);
+      const { thesisPath, record } = recordThesisTest(DATA_DIR, profile, args);
+      const payload = await buildDashboardPayload({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        activeTab: "theses",
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Recorded systematic thesis test for ${record.ticker} (${record.tested_at}): ` +
+              `Verdict=${record.verdict}${record.kill_switch_triggered ? " [KILL-SWITCH TRIGGERED]" : ""} ` +
+              `| Updated ${path.basename(thesisPath)} and test_log.jsonl.\nSummary: ${record.summary}`,
+          },
+        ],
+        structuredContent: payload as unknown as Record<string, unknown>,
+      };
+    }
+
+    if (name === "app_upsert_hypothesis") {
+      const profile = loadProfile(DATA_DIR);
+      const ticker = normalizeTicker(String(args.ticker ?? ""));
+      const writtenPath = upsertSingleHypothesis(DATA_DIR, profile, ticker, args.hypothesis);
+      const payload = await buildDashboardPayload({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        activeTab: "theses",
+      });
+      return {
+        content: [{ type: "text", text: `Saved hypothesis in ${path.basename(writtenPath)}.` }],
         structuredContent: payload as unknown as Record<string, unknown>,
       };
     }

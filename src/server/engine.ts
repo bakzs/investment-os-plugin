@@ -1,20 +1,26 @@
 import yaml from "js-yaml";
+import { z } from "zod";
 import { fetchFxRatesToBase, fetchQuotesBatch, type QuoteResult } from "./market.js";
 import {
   CurrencySchema,
+  HypothesisSchema,
   normalizeTicker,
   PortfolioSchema,
   PositionInputSchema,
   ProfileSchema,
+  ThesisTestRecordSchema,
   type CatalystRecord,
   type EtfWeightsConfig,
+  type HypothesisRecord,
   type PortfolioRecord,
   type PositionRecord,
   type RiskCapRule,
+  type ThesisTestRecord,
   type ThesisUpdateInput,
   type UserProfile,
 } from "./schema.js";
 import {
+  appendThesisTestLog,
   listThesisFiles,
   loadCatalysts,
   loadEdgarCache,
@@ -22,6 +28,7 @@ import {
   loadMarketCache,
   loadPortfolio,
   loadProfile,
+  loadThesisTestLog,
   readThesisFile,
   saveMarketCache,
   type EdgarCacheState,
@@ -260,6 +267,10 @@ export interface ThesisFrontmatter {
   next_catalyst_date?: string | null;
   next_catalyst?: string | null;
   gated?: boolean;
+  verdict?: string | null;
+  bear_case_summary?: string | null;
+  last_tested_date?: string | null;
+  hypotheses?: HypothesisRecord[];
 }
 
 export function classifyTriggerStatus(price: number | null, fm: ThesisFrontmatter): string {
@@ -403,6 +414,10 @@ export function upsertThesisMarkdown(
   }
   if (update.next_catalyst_date !== undefined) fm.next_catalyst_date = update.next_catalyst_date;
   if (update.next_catalyst !== undefined) fm.next_catalyst = update.next_catalyst;
+  if (update.verdict !== undefined) fm.verdict = update.verdict;
+  if (update.bear_case_summary !== undefined) fm.bear_case_summary = update.bear_case_summary;
+  if (update.last_tested_date !== undefined) fm.last_tested_date = update.last_tested_date;
+  if (update.hypotheses !== undefined) fm.hypotheses = update.hypotheses;
 
   if (update.decision_log_note && update.decision_log_note.trim()) {
     const entry = `- **${todayYmd}:** ${update.decision_log_note.trim()}`;
@@ -417,6 +432,46 @@ export function upsertThesisMarkdown(
   return `---\n${newFm}\n---\n${body.trimStart()}`;
 }
 
+export function upsertHypothesesArray(
+  existing: HypothesisRecord[],
+  incoming: HypothesisRecord[],
+): HypothesisRecord[] {
+  const byId = new Map<string, HypothesisRecord>();
+  for (const h of existing) {
+    byId.set(h.id, h);
+  }
+  for (const h of incoming) {
+    byId.set(h.id, h);
+  }
+  return Array.from(byId.values()).slice(0, 12);
+}
+
+function parseHypothesesFromFrontmatter(raw: unknown): HypothesisRecord[] {
+  if (!Array.isArray(raw)) return [];
+  const parsed = z.array(HypothesisSchema).safeParse(raw);
+  return parsed.success ? parsed.data : [];
+}
+
+export function countHypotheses(hypotheses: HypothesisRecord[]): {
+  total: number;
+  supported: number;
+  weakened: number;
+  falsified: number;
+  untested: number;
+} {
+  let supported = 0;
+  let weakened = 0;
+  let falsified = 0;
+  let untested = 0;
+  for (const h of hypotheses) {
+    if (h.status === "supported") supported += 1;
+    else if (h.status === "weakened") weakened += 1;
+    else if (h.status === "falsified") falsified += 1;
+    else untested += 1;
+  }
+  return { total: hypotheses.length, supported, weakened, falsified, untested };
+}
+
 export function saveOrMergeThesis(
   dataDir: string,
   profile: UserProfile,
@@ -426,6 +481,69 @@ export function saveOrMergeThesis(
   const existing = readThesisFile(dataDir, update.ticker);
   const nextMarkdown = upsertThesisMarkdown(existing, update, dateYmd);
   return writeThesisFile(dataDir, update.ticker, nextMarkdown);
+}
+
+export function upsertSingleHypothesis(
+  dataDir: string,
+  profile: UserProfile,
+  ticker: string,
+  rawHypothesis: unknown,
+): string {
+  const sym = normalizeTicker(ticker);
+  const validated = HypothesisSchema.parse(rawHypothesis);
+  const existingRaw = readThesisFile(dataDir, sym);
+  const existingList = existingRaw
+    ? parseHypothesesFromFrontmatter(parseThesisMarkdown(existingRaw)?.fm.hypotheses)
+    : [];
+  const merged = upsertHypothesesArray(existingList, [validated]);
+  return saveOrMergeThesis(dataDir, profile, {
+    ticker: sym,
+    hypotheses: merged,
+  });
+}
+
+export function recordThesisTest(
+  dataDir: string,
+  profile: UserProfile,
+  rawInput: unknown,
+): { thesisPath: string; record: ThesisTestRecord } {
+  const { iso, dateYmd } = formatTimestamp(new Date(), profile.timezone);
+  const inputObj = typeof rawInput === "object" && rawInput !== null ? { ...(rawInput as Record<string, unknown>) } : {};
+  if (!inputObj.tested_at) {
+    inputObj.tested_at = iso;
+  }
+  if (Array.isArray(inputObj.hypotheses_tested)) {
+    inputObj.hypotheses_tested = inputObj.hypotheses_tested.map((h) => {
+      if (typeof h === "object" && h !== null && !(h as Record<string, unknown>).last_tested) {
+        return { ...(h as Record<string, unknown>), last_tested: dateYmd };
+      }
+      return h;
+    });
+  }
+
+  const record = ThesisTestRecordSchema.parse(inputObj);
+  const existingRaw = readThesisFile(dataDir, record.ticker);
+  const existingList = existingRaw
+    ? parseHypothesesFromFrontmatter(parseThesisMarkdown(existingRaw)?.fm.hypotheses)
+    : [];
+  const mergedHypotheses =
+    record.hypotheses_tested.length > 0
+      ? upsertHypothesesArray(existingList, record.hypotheses_tested)
+      : existingList;
+
+  const killFlag = record.kill_switch_triggered ? " · KILL-SWITCH TRIGGERED" : "";
+  const note = `[THESIS TEST · ${record.verdict}${killFlag}] ${record.summary}`;
+  const thesisPath = saveOrMergeThesis(dataDir, profile, {
+    ticker: record.ticker,
+    currency: record.currency,
+    verdict: record.verdict,
+    bear_case_summary: record.bear_case ?? undefined,
+    last_tested_date: dateYmd,
+    hypotheses: mergedHypotheses,
+    decision_log_note: note,
+  });
+  const savedRecord = appendThesisTestLog(dataDir, record);
+  return { thesisPath, record: savedRecord };
 }
 
 export function mergePortfolioPositions(
@@ -550,6 +668,7 @@ function buildDemoState(): {
   portfolio: PortfolioRecord;
   thesesRaw: Array<{ ticker: string; content: string }>;
   catalysts: CatalystRecord[];
+  testLogByTicker: Record<string, ThesisTestRecord[]>;
 } {
   const profile = ProfileSchema.parse({
     base_currency: "USD",
@@ -614,7 +733,7 @@ function buildDemoState(): {
     },
     {
       ticker: "MSFT",
-      content: `---\nticker: MSFT\nyf_symbol: MSFT\ncurrency: USD\nus_situs: true\nrole: Enterprise Compounder\nlast_ref_price: 495.00\nbuy_zone_low: 420.00\nbuy_zone_high: 455.00\ntrim_zone: 530.00\nmax_weight_pct: 12.0\nnext_catalyst_date: "2027-01-28"\nnext_catalyst: "Quarterly cloud & capex discipline check"\ngated: false\n---\n\n# Sample Single-Stock Thesis (MSFT)\n\n## 1. Core Thesis\n- Enterprise workflow software and cloud infrastructure cash generation.\n\n## 3. Hard Kill-Switches\n1. Sustained cloud growth deceleration alongside widening FCF dilution from capex.\n\n## 4. Decision Log\n- **2026-11-23:** Sample single-name trigger template.\n`,
+      content: `---\nticker: MSFT\nyf_symbol: MSFT\ncurrency: USD\nus_situs: true\nrole: Enterprise Compounder\nlast_ref_price: 495.00\nbuy_zone_low: 420.00\nbuy_zone_high: 455.00\ntrim_zone: 530.00\nmax_weight_pct: 12.0\nnext_catalyst_date: "2027-01-28"\nnext_catalyst: "Quarterly cloud & capex discipline check"\ngated: false\nverdict: WATCH\nlast_tested_date: "2026-11-23"\nbear_case_summary: "Rising AI data-center capex outpaces seat-based software ARPU uplift if autonomous agents compress legacy licenses."\nhypotheses:\n  - id: azure-ai-margin\n    claim: "Cloud backlog converts into accelerating gross-profit growth above capex depreciation drag"\n    metric: "Cloud revenue YoY > 22% with flat+ operating margin"\n    status: supported\n    confidence: high\n    evidence: "Recent quarterly cloud growth held mid-20s with commercial remaining performance obligations expanding."\n    last_tested: "2026-11-23"\n  - id: seat-pricing-resilience\n    claim: "AI agent workflows expand per-user enterprise revenue rather than cannibalizing seat licenses"\n    metric: "Productivity suite ARPU + net seat retention >= 100%"\n    status: weakened\n    confidence: medium\n    evidence: "Enterprise pilot upgrades show mixed displacement vs. copilot upsell across knowledge workers."\n    last_tested: "2026-11-23"\n---\n\n# Sample Single-Stock Thesis (MSFT)\n\n## 1. Core Thesis\n- Enterprise workflow software and cloud infrastructure cash generation.\n\n## 3. Hard Kill-Switches\n1. Sustained cloud growth deceleration alongside widening FCF dilution from capex.\n\n## 4. Decision Log\n- **2026-11-23:** Sample single-name trigger & systematic hypothesis test baseline.\n`,
     },
   ];
 
@@ -628,7 +747,23 @@ function buildDemoState(): {
     },
   ];
 
-  return { profile, portfolio, thesesRaw, catalysts };
+  const testLogByTicker: Record<string, ThesisTestRecord[]> = {
+    MSFT: [
+      {
+        ticker: "MSFT",
+        tested_at: "2026-11-23T12:00:00+00:00",
+        verdict: "WATCH",
+        kill_switch_triggered: false,
+        summary: "Cloud demand remains healthy, though agent seat-compression risk keeps conviction at Watch.",
+        bear_case: "Capex depreciation cresting alongside seat consolidation could compress 2027–2028 FCF multiple.",
+        hypotheses_tested: [],
+        price_at_test: 495.0,
+        currency: "USD",
+      },
+    ],
+  };
+
+  return { profile, portfolio, thesesRaw, catalysts, testLogByTicker };
 }
 
 export interface DashboardPositionRow {
@@ -695,6 +830,18 @@ export interface DashboardThesisRow {
   core_summary: string[];
   kill_switches: string[];
   latest_decision: string;
+  verdict: string | null;
+  bear_case_summary: string | null;
+  last_tested_date: string | null;
+  hypotheses: HypothesisRecord[];
+  hypothesis_counts: {
+    total: number;
+    supported: number;
+    weakened: number;
+    falsified: number;
+    untested: number;
+  };
+  recent_tests: ThesisTestRecord[];
 }
 
 export interface DashboardPayload {
@@ -1219,6 +1366,11 @@ export async function buildDashboardPayload(opts: {
         ? fm.max_weight_pct
         : (fm.max_ibkr_weight_pct ?? null);
 
+    const hypotheses = parseHypothesesFromFrontmatter(fm.hypotheses);
+    const recentTests = isDemo
+      ? (demoState?.testLogByTicker[sym] ?? [])
+      : loadThesisTestLog(opts.dataDir, sym, 5);
+
     return {
       ticker: sym,
       yf_symbol: yfSym,
@@ -1243,6 +1395,12 @@ export async function buildDashboardPayload(opts: {
       core_summary: extractSectionBullets(body, "## 1.", 3),
       kill_switches: extractSectionBullets(body, "## 3.", 4),
       latest_decision: extractSectionBullets(body, "## 4.", 1)[0] ?? "",
+      verdict: typeof fm.verdict === "string" ? fm.verdict : null,
+      bear_case_summary: typeof fm.bear_case_summary === "string" ? fm.bear_case_summary : null,
+      last_tested_date: typeof fm.last_tested_date === "string" ? fm.last_tested_date : null,
+      hypotheses,
+      hypothesis_counts: countHypotheses(hypotheses),
+      recent_tests: recentTests,
     };
   });
 

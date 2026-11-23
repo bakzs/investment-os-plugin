@@ -1,7 +1,7 @@
 {
   "name": "investment-os",
   "displayName": "Investment OS",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Personal-CIO sidecar dashboard for multi-currency portfolios: ETF look-through concentration, optional US NRA estate tax (IRC §2101(c)), configurable risk caps, thesis trigger zones, and live SEC EDGAR monitoring.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [

@@ -9,10 +9,12 @@ import {
   classifyTriggerStatus,
   computeUsEstateTaxNra,
   mergePortfolioPositions,
+  recordThesisTest,
   saveOrMergeThesis,
+  upsertSingleHypothesis,
 } from "../src/server/engine.js";
 import { ProfileSchema } from "../src/server/schema.js";
-import { saveMarketCache, savePortfolio, saveProfile } from "../src/server/storage.js";
+import { loadThesisTestLog, saveMarketCache, savePortfolio, saveProfile } from "../src/server/storage.js";
 
 test("computeUsEstateTaxNra matches exact IRC §2101(c) schedule", () => {
   assert.equal(computeUsEstateTaxNra(0).net_estate_tax_usd, 0);
@@ -196,6 +198,115 @@ test("market_cache hydrates sparklines and 1D/1M deltas without altering snapsho
     const demoPayload = await buildDashboardPayload({ dataDir: tempDir, pluginRoot, demo: true });
     assert.equal(demoPayload.vix_sparkline.length > 5, true);
     assert.equal((demoPayload.portfolio.positions[0]?.sparkline.length ?? 0) > 5, true);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("systematic thesis testing upserts hypotheses, updates verdict/frontmatter, and logs to test_log.jsonl", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ios-thesis-test-"));
+  const pluginRoot = path.resolve(process.cwd());
+  try {
+    const profile = ProfileSchema.parse({ base_currency: "USD" });
+    saveProfile(tempDir, profile);
+    savePortfolio(
+      tempDir,
+      mergePortfolioPositions(null, profile, {
+        cash_base: 5000,
+        fx_rates: { USD: 1.0 },
+        positions: [{ ticker: "MSFT", qty: 10, avg_cost: 410, ref_price: 495, currency: "USD" }],
+      }),
+    );
+
+    // 1. Add and update an initial untested hypothesis via upsertSingleHypothesis
+    upsertSingleHypothesis(tempDir, profile, "MSFT", {
+      id: "cloud-margin-floor",
+      claim: "Cloud revenue grows > 20% YoY without operating margin compression",
+      metric: "Intelligent Cloud YoY > 20%",
+      status: "untested",
+      confidence: "high",
+    });
+
+    upsertSingleHypothesis(tempDir, profile, "MSFT", {
+      id: "cloud-margin-floor",
+      claim: "Cloud revenue grows > 22% YoY with stable operating margin",
+      metric: "Intelligent Cloud YoY > 22%",
+      status: "supported",
+      confidence: "high",
+      evidence: "10-Q showed accelerating cloud revenue and expanded commercial bookings.",
+      last_tested: "2026-11-23",
+    });
+
+    let thesisMd = fs.readFileSync(path.join(tempDir, "theses", "MSFT.md"), "utf-8");
+    assert.equal(thesisMd.includes("cloud-margin-floor"), true);
+    assert.equal(thesisMd.includes("status: supported"), true);
+
+    // 2. Score hypotheses and persist a systematic test via recordThesisTest
+    recordThesisTest(tempDir, profile, {
+      ticker: "MSFT",
+      verdict: "PROBATION",
+      kill_switch_triggered: false,
+      summary: "Capex run-rate stepped up sharply while seat monetization slowed.",
+      bear_case: "AI depreciation cresting faster than incremental software cash flows.",
+      price_at_test: 495,
+      currency: "USD",
+      hypotheses_tested: [
+        {
+          id: "cloud-margin-floor",
+          claim: "Cloud revenue grows > 22% YoY with stable operating margin",
+          status: "supported",
+          confidence: "high",
+          evidence: "Cloud growth held above bar.",
+        },
+        {
+          id: "seat-arpu-expansion",
+          claim: "Enterprise seat ARPU rises materially without churn",
+          metric: "Net seat expansion >= 100%",
+          status: "falsified",
+          confidence: "medium",
+          evidence: "Seat growth decelerated two consecutive quarters.",
+        },
+      ],
+    });
+
+    thesisMd = fs.readFileSync(path.join(tempDir, "theses", "MSFT.md"), "utf-8");
+    assert.equal(thesisMd.includes("verdict: PROBATION"), true);
+    assert.equal(thesisMd.includes("bear_case_summary:"), true);
+    assert.equal(thesisMd.includes("[THESIS TEST · PROBATION]"), true);
+
+    // Append second test to verify newest-first sorting in loadThesisTestLog
+    recordThesisTest(tempDir, profile, {
+      ticker: "MSFT",
+      tested_at: "2099-01-01T00:00:00Z",
+      verdict: "WATCH",
+      kill_switch_triggered: false,
+      summary: "Follow-up follow-on check stabilized conviction back to Watch.",
+      hypotheses_tested: [],
+    });
+
+    const logEntries = loadThesisTestLog(tempDir, "MSFT", 10);
+    assert.equal(logEntries.length, 2);
+    assert.equal(logEntries[0]?.verdict, "WATCH");
+    assert.equal(logEntries[1]?.verdict, "PROBATION");
+
+    const payload = await buildDashboardPayload({ dataDir: tempDir, pluginRoot, live: false });
+    const msftThesis = payload.theses.find((t) => t.ticker === "MSFT");
+    assert.ok(msftThesis);
+    assert.equal(msftThesis.verdict, "WATCH");
+    assert.equal(msftThesis.hypotheses.length, 2);
+    assert.equal(msftThesis.hypothesis_counts.total, 2);
+    assert.equal(msftThesis.hypothesis_counts.supported, 1);
+    assert.equal(msftThesis.hypothesis_counts.falsified, 1);
+    assert.equal(msftThesis.recent_tests.length, 2);
+    assert.ok(msftThesis.last_tested_date);
+
+    // Demo payload should also hydrate sample MSFT hypotheses & test log cleanly
+    const demoPayload = await buildDashboardPayload({ dataDir: tempDir, pluginRoot, demo: true });
+    const demoMsft = demoPayload.theses.find((t) => t.ticker === "MSFT");
+    assert.ok(demoMsft);
+    assert.equal(demoMsft.verdict, "WATCH");
+    assert.equal(demoMsft.hypothesis_counts.total, 2);
+    assert.equal(demoMsft.recent_tests.length > 0, true);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

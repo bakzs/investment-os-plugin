@@ -182,6 +182,53 @@ export const CatalystsFileSchema = z.object({
   catalysts: z.array(CatalystSchema).default([]),
 });
 
+export const HypothesisStatusSchema = z.enum(["untested", "supported", "weakened", "falsified"]);
+export const ConfidenceSchema = z.enum(["low", "medium", "high"]);
+export const VerdictSchema = z.enum(["HIGH_CONVICTION", "WATCH", "PROBATION", "EXIT"]);
+
+const SafeHttpsUrlSchema = z
+  .string()
+  .trim()
+  .max(400)
+  .refine((u) => u.startsWith("https://"), { message: "source_url must start with https://" });
+
+export const HypothesisSchema = z.object({
+  id: z
+    .string()
+    .trim()
+    .min(1)
+    .max(64)
+    .regex(/^[a-zA-Z0-9._-]+$/, "Hypothesis id must be alphanumeric/kebab-case"),
+  claim: z.string().trim().min(1).max(300),
+  metric: z.string().trim().max(160).optional(),
+  status: HypothesisStatusSchema.default("untested"),
+  confidence: ConfidenceSchema.default("medium"),
+  evidence: z.string().trim().max(500).optional(),
+  last_tested: z
+    .string()
+    .trim()
+    .regex(ISO_DATE_REGEX, "last_tested must be YYYY-MM-DD")
+    .nullable()
+    .optional(),
+  source_url: SafeHttpsUrlSchema.nullable().optional(),
+});
+
+export type HypothesisRecord = z.infer<typeof HypothesisSchema>;
+
+export const ThesisTestRecordSchema = z.object({
+  ticker: TickerSchema,
+  tested_at: z.string().trim().min(1).max(64),
+  verdict: VerdictSchema,
+  kill_switch_triggered: z.boolean().default(false),
+  summary: z.string().trim().min(1).max(600),
+  bear_case: z.string().trim().max(600).optional(),
+  hypotheses_tested: z.array(HypothesisSchema).max(12).default([]),
+  price_at_test: NonNegativeNumber.nullable().optional(),
+  currency: CurrencySchema.optional(),
+});
+
+export type ThesisTestRecord = z.infer<typeof ThesisTestRecordSchema>;
+
 export const ThesisUpdateSchema = z.object({
   ticker: TickerSchema,
   role: z.string().trim().min(1).max(80).optional(),
@@ -197,6 +244,15 @@ export const ThesisUpdateSchema = z.object({
   max_weight_pct: PctNumber.nullable().optional(),
   next_catalyst_date: z.string().trim().max(32).nullable().optional(),
   next_catalyst: z.string().trim().max(240).nullable().optional(),
+  verdict: VerdictSchema.nullable().optional(),
+  bear_case_summary: z.string().trim().max(600).nullable().optional(),
+  last_tested_date: z
+    .string()
+    .trim()
+    .regex(ISO_DATE_REGEX, "last_tested_date must be YYYY-MM-DD")
+    .nullable()
+    .optional(),
+  hypotheses: z.array(HypothesisSchema).max(12).optional(),
   core_thesis: z.array(z.string().trim().min(1).max(400)).max(8).optional(),
   kill_switches: z.array(z.string().trim().min(1).max(400)).max(8).optional(),
   decision_log_note: z.string().trim().max(4000).optional(),

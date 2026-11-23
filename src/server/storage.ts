@@ -7,9 +7,11 @@ import {
   defaultProfile,
   PortfolioSchema,
   ProfileSchema,
+  ThesisTestRecordSchema,
   type CatalystRecord,
   type EtfWeightsConfig,
   type PortfolioRecord,
+  type ThesisTestRecord,
   type UserProfile,
   normalizeTicker,
 } from "./schema.js";
@@ -300,4 +302,41 @@ export function writeThesisFile(dataDir: string, ticker: string, content: string
   const filePath = getThesisFilePath(dataDir, ticker);
   atomicWriteFile(filePath, content);
   return filePath;
+}
+
+export function appendThesisTestLog(dataDir: string, entry: ThesisTestRecord): ThesisTestRecord {
+  ensureDataDir(dataDir);
+  const validated = ThesisTestRecordSchema.parse(entry);
+  const filePath = safeResolve(dataDir, "test_log.jsonl");
+  const line = JSON.stringify(validated) + "\n";
+  fs.appendFileSync(filePath, line, { encoding: "utf-8", mode: 0o600 });
+  try {
+    fs.chmodSync(filePath, 0o600);
+  } catch {
+    // Ignore on filesystems that do not support POSIX chmod
+  }
+  return validated;
+}
+
+export function loadThesisTestLog(dataDir: string, ticker?: string, limit = 25): ThesisTestRecord[] {
+  const filePath = safeResolve(dataDir, "test_log.jsonl");
+  if (!fs.existsSync(filePath)) {
+    return [];
+  }
+  const filterSym = ticker ? normalizeTicker(ticker) : null;
+  const lines = fs.readFileSync(filePath, "utf-8").split(/\r?\n/);
+  const entries: ThesisTestRecord[] = [];
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = ThesisTestRecordSchema.parse(JSON.parse(trimmed));
+      if (!filterSym || parsed.ticker === filterSym) {
+        entries.push(parsed);
+      }
+    } catch {
+      // Skip malformed line without breaking ledger
+    }
+  }
+  return entries.reverse().slice(0, limit);
 }

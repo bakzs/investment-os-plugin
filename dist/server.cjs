@@ -33670,6 +33670,31 @@ var CatalystSchema = external_exports.object({
 var CatalystsFileSchema = external_exports.object({
   catalysts: external_exports.array(CatalystSchema).default([])
 });
+var HypothesisStatusSchema = external_exports.enum(["untested", "supported", "weakened", "falsified"]);
+var ConfidenceSchema = external_exports.enum(["low", "medium", "high"]);
+var VerdictSchema = external_exports.enum(["HIGH_CONVICTION", "WATCH", "PROBATION", "EXIT"]);
+var SafeHttpsUrlSchema = external_exports.string().trim().max(400).refine((u) => u.startsWith("https://"), { message: "source_url must start with https://" });
+var HypothesisSchema = external_exports.object({
+  id: external_exports.string().trim().min(1).max(64).regex(/^[a-zA-Z0-9._-]+$/, "Hypothesis id must be alphanumeric/kebab-case"),
+  claim: external_exports.string().trim().min(1).max(300),
+  metric: external_exports.string().trim().max(160).optional(),
+  status: HypothesisStatusSchema.default("untested"),
+  confidence: ConfidenceSchema.default("medium"),
+  evidence: external_exports.string().trim().max(500).optional(),
+  last_tested: external_exports.string().trim().regex(ISO_DATE_REGEX, "last_tested must be YYYY-MM-DD").nullable().optional(),
+  source_url: SafeHttpsUrlSchema.nullable().optional()
+});
+var ThesisTestRecordSchema = external_exports.object({
+  ticker: TickerSchema,
+  tested_at: external_exports.string().trim().min(1).max(64),
+  verdict: VerdictSchema,
+  kill_switch_triggered: external_exports.boolean().default(false),
+  summary: external_exports.string().trim().min(1).max(600),
+  bear_case: external_exports.string().trim().max(600).optional(),
+  hypotheses_tested: external_exports.array(HypothesisSchema).max(12).default([]),
+  price_at_test: NonNegativeNumber.nullable().optional(),
+  currency: CurrencySchema.optional()
+});
 var ThesisUpdateSchema = external_exports.object({
   ticker: TickerSchema,
   role: external_exports.string().trim().min(1).max(80).optional(),
@@ -33685,6 +33710,10 @@ var ThesisUpdateSchema = external_exports.object({
   max_weight_pct: PctNumber.nullable().optional(),
   next_catalyst_date: external_exports.string().trim().max(32).nullable().optional(),
   next_catalyst: external_exports.string().trim().max(240).nullable().optional(),
+  verdict: VerdictSchema.nullable().optional(),
+  bear_case_summary: external_exports.string().trim().max(600).nullable().optional(),
+  last_tested_date: external_exports.string().trim().regex(ISO_DATE_REGEX, "last_tested_date must be YYYY-MM-DD").nullable().optional(),
+  hypotheses: external_exports.array(HypothesisSchema).max(12).optional(),
   core_thesis: external_exports.array(external_exports.string().trim().min(1).max(400)).max(8).optional(),
   kill_switches: external_exports.array(external_exports.string().trim().min(1).max(400)).max(8).optional(),
   decision_log_note: external_exports.string().trim().max(4e3).optional()
@@ -33911,6 +33940,39 @@ function writeThesisFile(dataDir, ticker, content) {
   const filePath = getThesisFilePath(dataDir, ticker);
   atomicWriteFile(filePath, content);
   return filePath;
+}
+function appendThesisTestLog(dataDir, entry) {
+  ensureDataDir(dataDir);
+  const validated = ThesisTestRecordSchema.parse(entry);
+  const filePath = safeResolve(dataDir, "test_log.jsonl");
+  const line = JSON.stringify(validated) + "\n";
+  import_node_fs.default.appendFileSync(filePath, line, { encoding: "utf-8", mode: 384 });
+  try {
+    import_node_fs.default.chmodSync(filePath, 384);
+  } catch {
+  }
+  return validated;
+}
+function loadThesisTestLog(dataDir, ticker, limit = 25) {
+  const filePath = safeResolve(dataDir, "test_log.jsonl");
+  if (!import_node_fs.default.existsSync(filePath)) {
+    return [];
+  }
+  const filterSym = ticker ? normalizeTicker(ticker) : null;
+  const lines = import_node_fs.default.readFileSync(filePath, "utf-8").split(/\r?\n/);
+  const entries = [];
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = ThesisTestRecordSchema.parse(JSON.parse(trimmed));
+      if (!filterSym || parsed.ticker === filterSym) {
+        entries.push(parsed);
+      }
+    } catch {
+    }
+  }
+  return entries.reverse().slice(0, limit);
 }
 
 // src/server/edgar.ts
@@ -34375,6 +34437,10 @@ ${killBullets}
   }
   if (update.next_catalyst_date !== void 0) fm.next_catalyst_date = update.next_catalyst_date;
   if (update.next_catalyst !== void 0) fm.next_catalyst = update.next_catalyst;
+  if (update.verdict !== void 0) fm.verdict = update.verdict;
+  if (update.bear_case_summary !== void 0) fm.bear_case_summary = update.bear_case_summary;
+  if (update.last_tested_date !== void 0) fm.last_tested_date = update.last_tested_date;
+  if (update.hypotheses !== void 0) fm.hypotheses = update.hypotheses;
   if (update.decision_log_note && update.decision_log_note.trim()) {
     const entry = `- **${todayYmd}:** ${update.decision_log_note.trim()}`;
     if (body.includes("## 4. Decision Log")) {
@@ -34395,11 +34461,82 @@ ${newFm}
 ---
 ${body.trimStart()}`;
 }
+function upsertHypothesesArray(existing, incoming) {
+  const byId = /* @__PURE__ */ new Map();
+  for (const h of existing) {
+    byId.set(h.id, h);
+  }
+  for (const h of incoming) {
+    byId.set(h.id, h);
+  }
+  return Array.from(byId.values()).slice(0, 12);
+}
+function parseHypothesesFromFrontmatter(raw) {
+  if (!Array.isArray(raw)) return [];
+  const parsed = external_exports.array(HypothesisSchema).safeParse(raw);
+  return parsed.success ? parsed.data : [];
+}
+function countHypotheses(hypotheses) {
+  let supported = 0;
+  let weakened = 0;
+  let falsified = 0;
+  let untested = 0;
+  for (const h of hypotheses) {
+    if (h.status === "supported") supported += 1;
+    else if (h.status === "weakened") weakened += 1;
+    else if (h.status === "falsified") falsified += 1;
+    else untested += 1;
+  }
+  return { total: hypotheses.length, supported, weakened, falsified, untested };
+}
 function saveOrMergeThesis(dataDir, profile, update) {
   const { dateYmd } = formatTimestamp(/* @__PURE__ */ new Date(), profile.timezone);
   const existing = readThesisFile(dataDir, update.ticker);
   const nextMarkdown = upsertThesisMarkdown(existing, update, dateYmd);
   return writeThesisFile(dataDir, update.ticker, nextMarkdown);
+}
+function upsertSingleHypothesis(dataDir, profile, ticker, rawHypothesis) {
+  const sym = normalizeTicker(ticker);
+  const validated = HypothesisSchema.parse(rawHypothesis);
+  const existingRaw = readThesisFile(dataDir, sym);
+  const existingList = existingRaw ? parseHypothesesFromFrontmatter(parseThesisMarkdown(existingRaw)?.fm.hypotheses) : [];
+  const merged = upsertHypothesesArray(existingList, [validated]);
+  return saveOrMergeThesis(dataDir, profile, {
+    ticker: sym,
+    hypotheses: merged
+  });
+}
+function recordThesisTest(dataDir, profile, rawInput) {
+  const { iso, dateYmd } = formatTimestamp(/* @__PURE__ */ new Date(), profile.timezone);
+  const inputObj = typeof rawInput === "object" && rawInput !== null ? { ...rawInput } : {};
+  if (!inputObj.tested_at) {
+    inputObj.tested_at = iso;
+  }
+  if (Array.isArray(inputObj.hypotheses_tested)) {
+    inputObj.hypotheses_tested = inputObj.hypotheses_tested.map((h) => {
+      if (typeof h === "object" && h !== null && !h.last_tested) {
+        return { ...h, last_tested: dateYmd };
+      }
+      return h;
+    });
+  }
+  const record2 = ThesisTestRecordSchema.parse(inputObj);
+  const existingRaw = readThesisFile(dataDir, record2.ticker);
+  const existingList = existingRaw ? parseHypothesesFromFrontmatter(parseThesisMarkdown(existingRaw)?.fm.hypotheses) : [];
+  const mergedHypotheses = record2.hypotheses_tested.length > 0 ? upsertHypothesesArray(existingList, record2.hypotheses_tested) : existingList;
+  const killFlag = record2.kill_switch_triggered ? " \xB7 KILL-SWITCH TRIGGERED" : "";
+  const note = `[THESIS TEST \xB7 ${record2.verdict}${killFlag}] ${record2.summary}`;
+  const thesisPath = saveOrMergeThesis(dataDir, profile, {
+    ticker: record2.ticker,
+    currency: record2.currency,
+    verdict: record2.verdict,
+    bear_case_summary: record2.bear_case ?? void 0,
+    last_tested_date: dateYmd,
+    hypotheses: mergedHypotheses,
+    decision_log_note: note
+  });
+  const savedRecord = appendThesisTestLog(dataDir, record2);
+  return { thesisPath, record: savedRecord };
 }
 function mergePortfolioPositions(existing, profile, input2) {
   const { iso } = formatTimestamp(/* @__PURE__ */ new Date(), profile.timezone);
@@ -34591,6 +34728,24 @@ max_weight_pct: 12.0
 next_catalyst_date: "2027-01-28"
 next_catalyst: "Quarterly cloud & capex discipline check"
 gated: false
+verdict: WATCH
+last_tested_date: "2026-11-23"
+bear_case_summary: "Rising AI data-center capex outpaces seat-based software ARPU uplift if autonomous agents compress legacy licenses."
+hypotheses:
+  - id: azure-ai-margin
+    claim: "Cloud backlog converts into accelerating gross-profit growth above capex depreciation drag"
+    metric: "Cloud revenue YoY > 22% with flat+ operating margin"
+    status: supported
+    confidence: high
+    evidence: "Recent quarterly cloud growth held mid-20s with commercial remaining performance obligations expanding."
+    last_tested: "2026-11-23"
+  - id: seat-pricing-resilience
+    claim: "AI agent workflows expand per-user enterprise revenue rather than cannibalizing seat licenses"
+    metric: "Productivity suite ARPU + net seat retention >= 100%"
+    status: weakened
+    confidence: medium
+    evidence: "Enterprise pilot upgrades show mixed displacement vs. copilot upsell across knowledge workers."
+    last_tested: "2026-11-23"
 ---
 
 # Sample Single-Stock Thesis (MSFT)
@@ -34602,7 +34757,7 @@ gated: false
 1. Sustained cloud growth deceleration alongside widening FCF dilution from capex.
 
 ## 4. Decision Log
-- **2026-11-23:** Sample single-name trigger template.
+- **2026-11-23:** Sample single-name trigger & systematic hypothesis test baseline.
 `
     }
   ];
@@ -34615,7 +34770,22 @@ gated: false
       urgency: "medium"
     }
   ];
-  return { profile, portfolio, thesesRaw, catalysts };
+  const testLogByTicker = {
+    MSFT: [
+      {
+        ticker: "MSFT",
+        tested_at: "2026-11-23T12:00:00+00:00",
+        verdict: "WATCH",
+        kill_switch_triggered: false,
+        summary: "Cloud demand remains healthy, though agent seat-compression risk keeps conviction at Watch.",
+        bear_case: "Capex depreciation cresting alongside seat consolidation could compress 2027\u20132028 FCF multiple.",
+        hypotheses_tested: [],
+        price_at_test: 495,
+        currency: "USD"
+      }
+    ]
+  };
+  return { profile, portfolio, thesesRaw, catalysts, testLogByTicker };
 }
 async function buildDashboardPayload(opts) {
   const isDemo = Boolean(opts.demo);
@@ -34990,6 +35160,8 @@ async function buildDashboardPayload(opts) {
     const ccyFxToBase = fxRates[ccy] ?? fxUsdToBase;
     const priceBase = price !== null ? round(price * ccyFxToBase, 2) : null;
     const maxWeight = fm.max_weight_pct !== void 0 && fm.max_weight_pct !== null ? fm.max_weight_pct : fm.max_ibkr_weight_pct ?? null;
+    const hypotheses = parseHypothesesFromFrontmatter(fm.hypotheses);
+    const recentTests = isDemo ? demoState?.testLogByTicker[sym] ?? [] : loadThesisTestLog(opts.dataDir, sym, 5);
     return {
       ticker: sym,
       yf_symbol: yfSym,
@@ -35013,7 +35185,13 @@ async function buildDashboardPayload(opts) {
       next_catalyst: fm.next_catalyst ?? null,
       core_summary: extractSectionBullets(body, "## 1.", 3),
       kill_switches: extractSectionBullets(body, "## 3.", 4),
-      latest_decision: extractSectionBullets(body, "## 4.", 1)[0] ?? ""
+      latest_decision: extractSectionBullets(body, "## 4.", 1)[0] ?? "",
+      verdict: typeof fm.verdict === "string" ? fm.verdict : null,
+      bear_case_summary: typeof fm.bear_case_summary === "string" ? fm.bear_case_summary : null,
+      last_tested_date: typeof fm.last_tested_date === "string" ? fm.last_tested_date : null,
+      hypotheses,
+      hypothesis_counts: countHypotheses(hypotheses),
+      recent_tests: recentTests
     };
   });
   const edgarState = {
@@ -35116,7 +35294,7 @@ function buildSummaryText(payload) {
 }
 
 // src/server/index.ts
-var APP_URI = "ui://investment-os/dashboard.html";
+var APP_URI = "ui://investment-os/v3/dashboard.html";
 var APP_MIME = "text/html;profile=mcp-app";
 var currentDir = typeof __dirname !== "undefined" ? __dirname : import_node_path2.default.dirname(import_node_path2.default.resolve(process.argv[1] || process.cwd()));
 var inferredRoot = import_node_path2.default.basename(currentDir) === "dist" ? import_node_path2.default.resolve(currentDir, "..") : import_node_path2.default.resolve(currentDir, "..", "..");
@@ -35315,7 +35493,30 @@ var TOOLS = [
         next_catalyst: { type: ["string", "null"] },
         core_thesis: { type: "array", items: { type: "string" } },
         kill_switches: { type: "array", items: { type: "string" } },
-        decision_log_note: { type: "string" }
+        decision_log_note: { type: "string" },
+        verdict: {
+          type: ["string", "null"],
+          enum: ["HIGH_CONVICTION", "WATCH", "PROBATION", "EXIT", null]
+        },
+        bear_case_summary: { type: ["string", "null"] },
+        last_tested_date: { type: ["string", "null"] },
+        hypotheses: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string" },
+              claim: { type: "string" },
+              metric: { type: "string" },
+              status: { type: "string", enum: ["untested", "supported", "weakened", "falsified"] },
+              confidence: { type: "string", enum: ["low", "medium", "high"] },
+              evidence: { type: "string" },
+              last_tested: { type: ["string", "null"] },
+              source_url: { type: ["string", "null"] }
+            },
+            required: ["id", "claim"]
+          }
+        }
       },
       required: ["ticker"]
     },
@@ -35439,6 +35640,70 @@ var TOOLS = [
       required: ["ticker"]
     },
     _meta: APP_ONLY_META
+  },
+  {
+    name: "record_thesis_test",
+    title: "Record Systematic Thesis Test",
+    description: "Record a systematic Red-Team thesis test for a stock: score falsifiable hypotheses (supported/weakened/falsified/untested), update conviction verdict (HIGH_CONVICTION/WATCH/PROBATION/EXIT), log bear-case rebuttal, update ${PLUGIN_DATA}/theses/<TICKER>.md, and append an immutable entry to ${PLUGIN_DATA}/test_log.jsonl.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        verdict: { type: "string", enum: ["HIGH_CONVICTION", "WATCH", "PROBATION", "EXIT"] },
+        kill_switch_triggered: { type: "boolean" },
+        summary: { type: "string" },
+        bear_case: { type: "string" },
+        tested_at: { type: "string" },
+        price_at_test: { type: ["number", "null"] },
+        currency: { type: "string" },
+        hypotheses_tested: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string" },
+              claim: { type: "string" },
+              metric: { type: "string" },
+              status: { type: "string", enum: ["untested", "supported", "weakened", "falsified"] },
+              confidence: { type: "string", enum: ["low", "medium", "high"] },
+              evidence: { type: "string" },
+              last_tested: { type: ["string", "null"] },
+              source_url: { type: ["string", "null"] }
+            },
+            required: ["id", "claim"]
+          }
+        }
+      },
+      required: ["ticker", "verdict", "summary"]
+    },
+    _meta: INLINE_META
+  },
+  {
+    name: "app_upsert_hypothesis",
+    title: "App Upsert Falsifiable Hypothesis",
+    description: "Internal UI tool to add or update a single falsifiable hypothesis inside a thesis card.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        hypothesis: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            claim: { type: "string" },
+            metric: { type: "string" },
+            status: { type: "string", enum: ["untested", "supported", "weakened", "falsified"] },
+            confidence: { type: "string", enum: ["low", "medium", "high"] },
+            evidence: { type: "string" },
+            last_tested: { type: ["string", "null"] },
+            source_url: { type: ["string", "null"] }
+          },
+          required: ["id", "claim"]
+        }
+      },
+      required: ["ticker", "hypothesis"]
+    },
+    _meta: APP_ONLY_META
   }
 ];
 function collectDefaultEdgarTickers(dataDir) {
@@ -35493,7 +35758,7 @@ function mergeProfileUpdate(current, args) {
   return ProfileSchema.parse(next);
 }
 var server = new Server(
-  { name: "investment-os-dashboard", version: "0.2.0" },
+  { name: "investment-os-dashboard", version: "0.3.0" },
   {
     capabilities: { tools: {}, resources: {} },
     instructions: "Personal-CIO portfolio dashboard and local analytics server for Investment OS."
@@ -35730,6 +35995,39 @@ Gates:
 - ${gateLines.join("\n- ")}` : "")
           }
         ],
+        structuredContent: payload
+      };
+    }
+    if (name === "record_thesis_test") {
+      const profile = loadProfile(DATA_DIR);
+      const { thesisPath, record: record2 } = recordThesisTest(DATA_DIR, profile, args);
+      const payload = await buildDashboardPayload({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        activeTab: "theses"
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Recorded systematic thesis test for ${record2.ticker} (${record2.tested_at}): Verdict=${record2.verdict}${record2.kill_switch_triggered ? " [KILL-SWITCH TRIGGERED]" : ""} | Updated ${import_node_path2.default.basename(thesisPath)} and test_log.jsonl.
+Summary: ${record2.summary}`
+          }
+        ],
+        structuredContent: payload
+      };
+    }
+    if (name === "app_upsert_hypothesis") {
+      const profile = loadProfile(DATA_DIR);
+      const ticker = normalizeTicker(String(args.ticker ?? ""));
+      const writtenPath = upsertSingleHypothesis(DATA_DIR, profile, ticker, args.hypothesis);
+      const payload = await buildDashboardPayload({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        activeTab: "theses"
+      });
+      return {
+        content: [{ type: "text", text: `Saved hypothesis in ${import_node_path2.default.basename(writtenPath)}.` }],
         structuredContent: payload
       };
     }

@@ -15,6 +15,7 @@ const INCLUDE_ITEMS = [
   "assets",
   "defaults",
   "dist",
+  "docs",
   "skills",
   "LICENSE",
   "README.md",

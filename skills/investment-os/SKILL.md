@@ -9,7 +9,7 @@ Your job is to handle data updates, live valuation checks, and research automati
 
 ## 1. Drive the Sidecar Automatically
 
-- Server name: `investment-os_dashboard` (UI resource `ui://investment-os/dashboard.html`).
+- Server name: `investment-os_dashboard` (UI resource `ui://investment-os/v3/dashboard.html`).
 - Whenever the user asks to view, refresh, analyze, or update their portfolio, holdings, profile, triggers, or catalysts, call `open_dashboard` (or call `open_dashboard` after persisting updates) so the right-hand sidecar updates in real time.
 
 ## 2. Guided Onboarding When Uninitialized
@@ -27,13 +27,14 @@ Your job is to handle data updates, live valuation checks, and research automati
   3. Open or refresh the dashboard via `open_dashboard` (`tab="holdings"` or `"overview"`).
 - If a broker MCP plugin is installed but not authenticated, give the user the one-click link to `[Interactive Brokers](customization://ibkr)` (using its installed directory name) to authenticate, or accept a manual snapshot/CSV export via `update_portfolio_positions`.
 
-## 4. External Wealth, Cash Reserves & Living Theses
+## 4. Systematic Thesis Testing & Living Theses
 
 - **External Exposure & Liquidity Reserves:** Whenever the user shares or revises external concentrated equity (vested/unvested compensation), near-term cash obligations, or custody details, call `update_external_wealth` (or `update_profile`) and refresh `open_dashboard`. Never treat locked retirement accounts as deployable equity cash unless explicitly instructed.
-- **Thesis Cards & Trigger Zones:** Whenever conviction, buy/trim price zones, binary gates, or catalyst dates change:
-  1. Verify fundamentals and recent filings using `check_sec_edgar` before modifying gates or sizing.
-  2. Run an adversarial challenge (Red-Team check) on bear cases, dilution, capital intensity, and valuation.
-  3. Persist via `update_thesis` and/or `manage_catalysts` cleanly without writing sensitive account credentials or redundant balances into markdown prose, then refresh `open_dashboard` (`tab="theses"`).
+- **Systematic Thesis Testing Protocol (4-Step Falsification Loop):** When testing, challenging, or updating conviction for any ticker:
+  1. **Primary Evidence Gather:** Pull fresh official SEC filings via `check_sec_edgar` (and web/primary company disclosures if needed), verify working capital/OCF quality, and capture current price vs. pre-set trigger zones.
+  2. **Adversarial Red-Team Challenge:** Construct the sharpest disconfirming bear case and test each explicit claim and metric on the thesis card (`supported`, `weakened`, `falsified`, or `untested`), checking hard kill-switches objectively without anchoring to purchase price.
+  3. **Hypothesis Scoring & Audit Persistence:** Call `record_thesis_test` with `verdict` (`HIGH_CONVICTION`, `WATCH`, `PROBATION`, or `EXIT`), `kill_switch_triggered`, `summary`, `bear_case`, and scored `hypotheses_tested` (`id`, `claim`, `metric`, `status`, `confidence`, `evidence`, `source_url`)—persisting updates to both `${PLUGIN_DATA}/theses/<TICKER>.md` and `${PLUGIN_DATA}/test_log.jsonl`.
+  4. **Sync Visuals:** Call `open_dashboard` (`tab="theses"`) so the hypothesis health scoreboard, trigger ruler, and audit ledger update cleanly in the sidecar.
 
 ## 5. Analytical Discipline
 

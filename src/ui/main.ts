@@ -86,6 +86,29 @@ interface RiskCapRow {
   status: "PASS" | "BREACH";
 }
 
+interface HypothesisRow {
+  id: string;
+  claim: string;
+  metric?: string;
+  status: "untested" | "supported" | "weakened" | "falsified";
+  confidence: "low" | "medium" | "high";
+  evidence?: string;
+  last_tested?: string | null;
+  source_url?: string | null;
+}
+
+interface ThesisTestRow {
+  ticker: string;
+  tested_at: string;
+  verdict: "HIGH_CONVICTION" | "WATCH" | "PROBATION" | "EXIT";
+  kill_switch_triggered: boolean;
+  summary: string;
+  bear_case?: string;
+  hypotheses_tested: HypothesisRow[];
+  price_at_test?: number | null;
+  currency?: string;
+}
+
 interface ThesisRow {
   ticker: string;
   yf_symbol: string;
@@ -109,6 +132,18 @@ interface ThesisRow {
   core_summary: string[];
   kill_switches: string[];
   latest_decision: string;
+  verdict: string | null;
+  bear_case_summary: string | null;
+  last_tested_date: string | null;
+  hypotheses: HypothesisRow[];
+  hypothesis_counts: {
+    total: number;
+    supported: number;
+    weakened: number;
+    falsified: number;
+    untested: number;
+  };
+  recent_tests: ThesisTestRow[];
 }
 
 interface CatalystRow {
@@ -358,6 +393,23 @@ function statusChip(status: string): string {
   return `<span class="status-tag quiet"><span class="dot"></span>${esc(status)}</span>`;
 }
 
+function verdictTag(verdict: string | null | undefined): string {
+  if (!verdict) return "";
+  const v = verdict.toUpperCase();
+  const label = v.replace(/_/g, " ");
+  if (v === "HIGH_CONVICTION") return `<span class="status-tag"><span class="dot ok"></span>${esc(label)}</span>`;
+  if (v === "EXIT") return `<span class="status-tag"><span class="dot bad"></span>${esc(label)}</span>`;
+  if (v === "PROBATION") return `<span class="status-tag"><span class="dot warn"></span>${esc(label)}</span>`;
+  return `<span class="status-tag quiet"><span class="dot"></span>${esc(label)}</span>`;
+}
+
+function hypothesisStateBadge(status: string): string {
+  if (status === "supported") return `<span class="hyp-state-supported">● Supported</span>`;
+  if (status === "weakened") return `<span class="hyp-state-weakened">◐ Weakened</span>`;
+  if (status === "falsified") return `<span class="hyp-state-falsified">✕ Falsified</span>`;
+  return `<span class="hyp-state-untested">○ Untested</span>`;
+}
+
 function daysUntilLabel(isoDate: string): { label: string; cls: string } {
   const target = Date.parse(`${isoDate}T00:00:00Z`);
   if (Number.isNaN(target)) return { label: isoDate, cls: "muted" };
@@ -421,40 +473,6 @@ interface DonutSegment {
   pct: number;
   valueBase: number;
   color: string;
-}
-
-function renderDonutSvg(segments: DonutSegment[], centerTop: string, centerBottom: string): string {
-  const size = 144;
-  const cx = 72;
-  const cy = 72;
-  const r = 52;
-  const circ = 2 * Math.PI * r;
-  let offset = 0;
-
-  const circles = segments
-    .filter((s) => s.pct > 0.2)
-    .map((s) => {
-      const sliceLen = (s.pct / 100) * circ;
-      const visibleLen = Math.max(1.5, sliceLen - 2);
-      const curOffset = offset;
-      offset += sliceLen;
-      const attr = s.ticker ? `data-inspect-ticker="${esc(s.ticker)}" style="cursor:pointer"` : "";
-      return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${s.color}" stroke-width="17" stroke-dasharray="${visibleLen.toFixed(2)} ${(circ - visibleLen).toFixed(2)}" stroke-dashoffset="${(-curOffset).toFixed(2)}" transform="rotate(-90 ${cx} ${cy})" ${attr}><title>${esc(s.label)}: ${s.pct.toFixed(1)}%</title></circle>`;
-    })
-    .join("");
-
-  return `
-    <div class="donut-svg-box">
-      <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" role="img" aria-label="Portfolio Allocation Ring: ${esc(centerBottom)} ${esc(centerTop)}">
-        <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--bg-inset)" stroke-width="17" />
-        ${circles}
-      </svg>
-      <div class="donut-center">
-        <span class="micro-label">${esc(centerTop)}</span>
-        <span class="donut-center-val">${esc(centerBottom)}</span>
-      </div>
-    </div>
-  `;
 }
 
 function renderTriggerRuler(
@@ -686,7 +704,7 @@ function renderOverview(data: DashboardPayload): string {
     .join("");
 
   const thirdHeroLabel = data.summary.us_situs_enabled
-    ? "Est. US NRA Estate Tax"
+    ? "Est. Estate Tax"
     : ext.enabled
       ? `${ext.ticker || "External"} % Wealth`
       : "Invested Holdings";
@@ -711,16 +729,90 @@ function renderOverview(data: DashboardPayload): string {
     ? `Portfolio: ${fmtPct(data.summary.primary_bucket_portfolio_pct)}`
     : `${ccy !== "USD" ? `USD/${ccy} ${data.usd_to_base_fx.toFixed(4)} · ` : ""}${fmtPct(data.portfolio.cash_pct)} cash`;
 
-  const legendHtml = segments
-    .map(
-      (s) => `
-      <button type="button" class="legend-btn" ${s.ticker ? `data-inspect-ticker="${esc(s.ticker)}"` : "disabled"}>
-        <span class="legend-left"><span class="swatch" style="background:${s.color}"></span><span>${esc(s.label)}</span></span>
-        <span class="legend-right">${fmtPct(s.pct)} · ${fmtCompact(s.valueBase, ccy)}</span>
+  interface QueueItem {
+    ticker: string;
+    title: string;
+    detail: string;
+    badgeLabel: string;
+    dotCls: "ok" | "warn" | "bad" | "";
+  }
+  const queueItems: QueueItem[] = [];
+  const seenKeys = new Set<string>();
+  const pushQueue = (key: string, item: QueueItem) => {
+    if (seenKeys.has(key) || queueItems.length >= 6) return;
+    seenKeys.add(key);
+    queueItems.push(item);
+  };
+
+  for (const t of data.theses) {
+    if (t.hypothesis_counts?.falsified > 0) {
+      pushQueue(`falsified:${t.ticker}`, {
+        ticker: t.ticker,
+        title: `${t.ticker} · Falsified Claim`,
+        detail: `${t.hypothesis_counts.falsified} falsified hypothesis · ${t.verdict ? t.verdict.replace(/_/g, " ") : "Review required"}`,
+        badgeLabel: "FALSIFIED",
+        dotCls: "bad",
+      });
+    }
+    if (t.verdict === "PROBATION" || t.verdict === "EXIT") {
+      pushQueue(`verdict:${t.ticker}`, {
+        ticker: t.ticker,
+        title: `${t.ticker} · ${t.verdict.replace(/_/g, " ")}`,
+        detail: t.bear_case_summary || `${t.hypothesis_counts?.weakened ?? 0} weakened hypothesis`,
+        badgeLabel: t.verdict === "EXIT" ? "EXIT" : "PROBATION",
+        dotCls: t.verdict === "EXIT" ? "bad" : "warn",
+      });
+    }
+    const st = t.status.toUpperCase();
+    if (st.includes("BUY") || st.includes("DEEP") || st.includes("TRIM") || st.includes("EXIT")) {
+      pushQueue(`zone:${t.ticker}`, {
+        ticker: t.ticker,
+        title: `${t.ticker} · ${t.status}`,
+        detail: `${t.role || "Active trigger"}${t.price !== null ? ` · ${fmtMoney(t.price, t.currency, 2)}` : ""}`,
+        badgeLabel: t.status,
+        dotCls: st.includes("TRIM") || st.includes("EXIT") ? "bad" : st.includes("DEEP") ? "warn" : "ok",
+      });
+    }
+  }
+
+  for (const g of data.edgar.gate_evaluations) {
+    if (!g.cleared) {
+      pushQueue(`gate:${g.ticker}:${g.form}`, {
+        ticker: g.ticker,
+        title: `${g.ticker} · ${g.form} Gate Open`,
+        detail: `Waiting after ${g.filed_after} · ${g.description}`,
+        badgeLabel: "OPEN GATE",
+        dotCls: "warn",
+      });
+    }
+  }
+
+  for (const c of data.catalysts.slice(0, 3)) {
+    const due = daysUntilLabel(c.date);
+    pushQueue(`cat:${c.ticker}:${c.date}:${c.title}`, {
+      ticker: c.ticker,
+      title: `${c.ticker} · ${c.title}`,
+      detail: `${c.date}${c.detail ? ` · ${c.detail}` : ""}`,
+      badgeLabel: due.label,
+      dotCls: due.cls === "bad" ? "bad" : due.cls === "warn" ? "warn" : "",
+    });
+  }
+
+  const queueHtml = queueItems.length
+    ? queueItems
+        .map(
+          (q) => `
+      <button type="button" class="queue-btn" data-inspect-ticker="${esc(q.ticker)}">
+        <div class="queue-main">
+          <span class="queue-title">${esc(q.title)}</span>
+          <span class="queue-sub">${esc(q.detail)}</span>
+        </div>
+        <span class="status-tag ${q.dotCls ? "" : "quiet"}">${q.dotCls ? `<span class="dot ${q.dotCls}"></span>` : ""}${esc(q.badgeLabel)}</span>
       </button>
     `,
-    )
-    .join("");
+        )
+        .join("")
+    : `<div class="muted-sub" style="padding:0.4rem 0">All theses holding steady · No active buy/trim triggers or open SEC gates.</div>`;
 
   const maxLtPct = Math.max(1, ...data.lookthrough.slice(0, 8).map((r) => r.pct_nav));
   const ltBarsHtml = data.lookthrough.slice(0, 8).map((r) => {
@@ -864,14 +956,14 @@ function renderOverview(data: DashboardPayload): string {
 
         <div class="hero-metrics-bar">
           <div class="metric-cell">
-            <span class="micro-label">Liquid Cash</span>
+            <span class="micro-label">Cash</span>
             <span class="metric-val">${fmtMoney(data.portfolio.cash_base, ccy)}</span>
             <span class="muted-sub">${fmtPct(data.portfolio.cash_pct)} of NAV</span>
           </div>
           <div class="metric-cell">
-            <span class="micro-label">Unrealized Cost Delta</span>
+            <span class="micro-label">Unrealized P&amp;L</span>
             <span class="metric-val ${data.portfolio.total_unrealized_pnl_usd >= 0 ? "pos-ok" : "pos-bad"}">${data.portfolio.total_unrealized_pnl_usd >= 0 ? "+" : ""}${fmtMoney(data.portfolio.total_unrealized_pnl_usd, "USD", 0)}</span>
-            <span class="muted-sub">USD cost basis delta</span>
+            <span class="muted-sub">USD vs cost basis</span>
           </div>
           <div class="metric-cell">
             <span class="micro-label">${esc(thirdHeroLabel)}</span>
@@ -889,13 +981,10 @@ function renderOverview(data: DashboardPayload): string {
       <div class="hub-grid">
         <div class="card">
           <div class="section-head">
-            <h2 class="section-title">Portfolio Allocation Ring</h2>
-            <span class="muted-sub">Click slice to inspect</span>
+            <h2 class="section-title">Thesis &amp; Catalyst Action Queue</h2>
+            <button type="button" class="small ghost" data-jump-tab="theses">Theses &rarr;</button>
           </div>
-          <div class="donut-layout">
-            ${renderDonutSvg(segments, `${data.portfolio.positions.length} Positions`, fmtCompact(data.portfolio.nav_base, ccy))}
-            <div class="donut-legend">${legendHtml}</div>
-          </div>
+          <div class="action-queue">${queueHtml}</div>
         </div>
 
         <div class="card">
@@ -1071,15 +1160,20 @@ function renderTheses(data: DashboardPayload, canMessage: boolean): string {
 
   const cards = shown.length
     ? shown
-        .map(
-          (t) => `
+        .map((t) => {
+          const hc = t.hypothesis_counts;
+          const hypHealthHtml =
+            hc && hc.total > 0
+              ? `<div class="hyp-summary-line">${hc.total} claim${hc.total === 1 ? "" : "s"} · ${hc.supported} supported${hc.weakened > 0 ? ` · ${hc.weakened} weakened` : ""}${hc.falsified > 0 ? ` · <span class="pos-bad">${hc.falsified} falsified</span>` : ""}${t.last_tested_date ? ` · Tested ${esc(t.last_tested_date)}` : ""}</div>`
+              : `<div class="hyp-summary-line">No claims tested yet</div>`;
+          return `
           <article class="thesis-card">
             <div class="thesis-head">
               <div>
                 <button type="button" class="ticker-link" data-inspect-ticker="${esc(t.ticker)}">${esc(t.ticker)}</button>
                 ${t.role ? `<div class="muted-sub">${esc(t.role)}</div>` : ""}
               </div>
-              <div>${statusChip(t.status)}</div>
+              <div class="actions-row" style="gap:4px">${verdictTag(t.verdict)}${statusChip(t.status)}</div>
             </div>
             <div class="thesis-price-row">
               <div>
@@ -1089,14 +1183,15 @@ function renderTheses(data: DashboardPayload, canMessage: boolean): string {
               ${renderSparklineSvg(t.sparkline, { width: 88, height: 28, positive: t.change_1m_pct !== null ? t.change_1m_pct >= 0 : null, fillArea: true, label: `${t.ticker} 30-day trend` })}
             </div>
             ${renderTriggerRuler(t.price, t.buy_zone_low, t.buy_zone_high, t.trim_zone, t.currency)}
+            ${hypHealthHtml}
             ${t.next_catalyst ? `<div class="muted-sub">${esc(t.next_catalyst_date || "")} · ${esc(t.next_catalyst)}</div>` : ""}
             <div class="actions-row" style="justify-content:space-between;margin-top:auto">
               <button type="button" class="small" data-inspect-ticker="${esc(t.ticker)}">Inspect &amp; Edit Triggers</button>
-              ${canMessage ? `<button type="button" class="small ghost ask-redteam" data-ticker="${esc(t.ticker)}">Red-Team</button>` : ""}
+              ${canMessage ? `<button type="button" class="small ghost ask-redteam" data-ticker="${esc(t.ticker)}">Run Test</button>` : ""}
             </div>
           </article>
-        `,
-        )
+        `;
+        })
         .join("")
     : `<div class="card empty-state">No theses match current filter.</div>`;
 
@@ -1226,6 +1321,7 @@ function renderInspectorDialog(ticker: string): void {
         <h1 id="inspector-title">${esc(sym)} · ${esc(titleName)}</h1>
         <div class="actions-row" style="margin-top:4px">
           ${pos ? `<span class="status-tag quiet">${esc(pos.asset_type)} · ${esc(pos.domicile)}</span>` : ""}
+          ${verdictTag(thesis?.verdict)}
           ${thesis ? statusChip(thesis.status) : ""}
           ${state.summary.us_situs_enabled && (pos || thesis) ? `<span class="status-tag"><span class="dot ${(pos?.us_situs ?? thesis?.us_situs) ? "warn" : "ok"}"></span>${(pos?.us_situs ?? thesis?.us_situs) ? "US-Situs" : "Exempt"}</span>` : ""}
         </div>
@@ -1291,6 +1387,101 @@ function renderInspectorDialog(ticker: string): void {
         </div>
       </div>
 
+      <div class="drawer-section">
+        <div class="section-head" style="margin-bottom:0">
+          <div class="micro-label">Falsifiable Hypotheses (${thesis?.hypotheses?.length ?? 0})</div>
+          ${thesis?.last_tested_date ? `<span class="muted-sub">Tested ${esc(thesis.last_tested_date)}</span>` : ""}
+        </div>
+        ${
+          thesis?.hypotheses && thesis.hypotheses.length > 0
+            ? `<div class="hypothesis-list">
+                ${thesis.hypotheses
+                  .map((h) => {
+                    const safeSrc = h.source_url && h.source_url.startsWith("https://") ? h.source_url : "";
+                    return `
+                      <div class="hypothesis-item">
+                        <div class="hypothesis-head">
+                          <span>${hypothesisStateBadge(h.status)} · <span class="muted-sub">${esc(h.id)} (${esc(h.confidence)})</span></span>
+                          ${h.last_tested ? `<span class="muted-sub">${esc(h.last_tested)}</span>` : ""}
+                        </div>
+                        <div>${esc(h.claim)}</div>
+                        ${h.metric ? `<div class="muted-sub">Metric: ${esc(h.metric)}</div>` : ""}
+                        ${h.evidence ? `<div class="muted-sub">Evidence: ${esc(h.evidence)}</div>` : ""}
+                        ${canOpenLinks && safeSrc ? `<div><button type="button" class="small ghost open-hyp-src" data-url="${esc(safeSrc)}">Source &rarr;</button></div>` : ""}
+                      </div>
+                    `;
+                  })
+                  .join("")}
+              </div>`
+            : `<div class="muted-sub">No falsifiable claims recorded yet. Add one below or run a systematic test.</div>`
+        }
+        ${
+          !state.is_demo
+            ? `
+          <details class="add-hyp-details">
+            <summary>Add / Update Hypothesis</summary>
+            <div class="add-hyp-form">
+              <div class="add-hyp-grid">
+                <label>ID (slug) <input type="text" id="hyp-id" placeholder="e.g. cloud-margin-floor" /></label>
+                <label>Confidence
+                  <select id="hyp-conf">
+                    <option value="high">high</option>
+                    <option value="medium" selected>medium</option>
+                    <option value="low">low</option>
+                  </select>
+                </label>
+                <label>Status
+                  <select id="hyp-status">
+                    <option value="untested" selected>untested</option>
+                    <option value="supported">supported</option>
+                    <option value="weakened">weakened</option>
+                    <option value="falsified">falsified</option>
+                  </select>
+                </label>
+                <label>Metric <input type="text" id="hyp-metric" placeholder="e.g. YoY rev > 20%" /></label>
+              </div>
+              <label>Falsifiable Claim <input type="text" id="hyp-claim" placeholder="Specific statement that evidence can disprove..." /></label>
+              <label>Evidence / Citation <input type="text" id="hyp-evidence" placeholder="10-Q note, filing figure, or observation..." /></label>
+              <label>Source URL (https:// optional) <input type="url" id="hyp-url" placeholder="https://www.sec.gov/..." /></label>
+              <div class="actions-row">
+                <button type="button" class="small primary" id="btn-save-hypothesis">Save Hypothesis</button>
+              </div>
+            </div>
+          </details>
+        `
+            : ""
+        }
+      </div>
+
+      <div class="drawer-section">
+        <div class="micro-label">Test Audit Ledger</div>
+        ${
+          thesis?.bear_case_summary
+            ? `<div class="bear-box"><div class="micro-label">Steelman Bear Case</div><div>${esc(thesis.bear_case_summary)}</div></div>`
+            : ""
+        }
+        ${
+          thesis?.recent_tests && thesis.recent_tests.length > 0
+            ? `<div class="test-ledger-list">
+                ${thesis.recent_tests
+                  .slice(0, 5)
+                  .map(
+                    (rec) => `
+                  <div class="test-ledger-item">
+                    <div class="hypothesis-head">
+                      <span>${verdictTag(rec.verdict)} ${rec.kill_switch_triggered ? `<span class="status-tag"><span class="dot bad"></span>KILL-SWITCH</span>` : ""}</span>
+                      <span class="muted-sub">${esc(rec.tested_at)}${rec.price_at_test !== null && rec.price_at_test !== undefined ? ` · ${fmtMoney(rec.price_at_test, rec.currency || currency, 2)}` : ""}</span>
+                    </div>
+                    <div>${esc(rec.summary)}</div>
+                  </div>
+                `,
+                  )
+                  .join("")}
+              </div>`
+            : `<div class="muted-sub">No systematic tests logged yet in <code>test_log.jsonl</code>.</div>`
+        }
+      </div>
+
       ${
         filings.length > 0
           ? `
@@ -1316,7 +1507,7 @@ function renderInspectorDialog(ticker: string): void {
 
     <div class="drawer-foot">
       <span class="muted-sub">Esc or click outside to dismiss</span>
-      ${canMessage ? `<button type="button" class="primary small" id="btn-inspector-redteam">Ask Agent: Red-Team ${esc(sym)}</button>` : ""}
+      ${canMessage ? `<button type="button" class="primary small" id="btn-inspector-redteam">Run Systematic Thesis Test</button>` : ""}
     </div>
   `;
 
@@ -1345,16 +1536,49 @@ function renderInspectorDialog(ticker: string): void {
     );
   });
 
+  dlg.querySelector<HTMLButtonElement>("#btn-save-hypothesis")?.addEventListener("click", async () => {
+    const rawId = dlg.querySelector<HTMLInputElement>("#hyp-id")?.value.trim() ?? "";
+    const claim = dlg.querySelector<HTMLInputElement>("#hyp-claim")?.value.trim() ?? "";
+    const metric = dlg.querySelector<HTMLInputElement>("#hyp-metric")?.value.trim() ?? "";
+    const status = dlg.querySelector<HTMLSelectElement>("#hyp-status")?.value ?? "untested";
+    const confidence = dlg.querySelector<HTMLSelectElement>("#hyp-conf")?.value ?? "medium";
+    const evidence = dlg.querySelector<HTMLInputElement>("#hyp-evidence")?.value.trim() ?? "";
+    const rawUrl = dlg.querySelector<HTMLInputElement>("#hyp-url")?.value.trim() ?? "";
+    if (!claim) {
+      toastMessage = "Please enter a falsifiable claim first.";
+      render();
+      return;
+    }
+    const slugSource = rawId || claim.slice(0, 32);
+    const id = slugSource
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48) || `hyp-${Date.now()}`;
+    const todayYmd = new Date().toISOString().slice(0, 10);
+    const hypothesis: Record<string, unknown> = {
+      id,
+      claim,
+      status,
+      confidence,
+      last_tested: status === "untested" ? null : todayYmd,
+    };
+    if (metric) hypothesis.metric = metric;
+    if (evidence) hypothesis.evidence = evidence;
+    if (rawUrl.startsWith("https://")) hypothesis.source_url = rawUrl;
+    await runAppTool("app_upsert_hypothesis", { ticker: sym, hypothesis }, `Saved hypothesis "${id}" for ${sym}.`);
+  });
+
   dlg.querySelector<HTMLButtonElement>("#btn-inspector-redteam")?.addEventListener("click", async () => {
     await sendAgentPrompt(
-      `Run an adversarial Red-Team review of ${sym} using latest filings and live market price, then update ${sym}'s thesis card if warranted.`,
+      `Run a systematic Red-Team thesis test for ${sym}: verify falsifiable hypotheses against live market data and SEC filings (check_sec_edgar), steelman the bear case, check hard kill-switches, and persist the scored result using record_thesis_test.`,
     );
   });
 
-  dlg.querySelectorAll<HTMLButtonElement>(".open-sec").forEach((btn) => {
+  dlg.querySelectorAll<HTMLButtonElement>(".open-sec, .open-hyp-src").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const url = btn.dataset.url;
-      if (url && url.startsWith("https://www.sec.gov/")) {
+      if (url && url.startsWith("https://")) {
         await app.openLink({ url });
       }
     });
@@ -1514,7 +1738,7 @@ function render(): void {
               <path d="M78 40 H96 V58" stroke="currentColor" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
             <div class="brand-text">
-              <div class="brand-title-row"><h1>Investment OS</h1><span class="status-tag"><span class="dot"></span>Setup</span></div>
+              <div class="brand-title-row"><h1>Investment OS</h1><span class="ver-badge">v0.3</span><span class="status-tag"><span class="dot"></span>Setup</span></div>
               <div class="meta-line">Local data vault ready</div>
             </div>
           </div>
@@ -1560,6 +1784,7 @@ function render(): void {
           <div class="brand-text">
             <div class="brand-title-row">
               <h1>Investment OS</h1>
+              <span class="ver-badge">v0.3</span>
               <span class="status-tag"><span class="dot ${statusDotCls}"></span>${statusLbl}</span>
             </div>
             <div class="meta-line">Base ${esc(state.base_currency)} · ${esc(state.generated_at)}</div>
@@ -1570,7 +1795,7 @@ function render(): void {
             <input id="search-ticker" class="search-input" type="search" value="${esc(searchQuery)}" placeholder="Jump / filter..." aria-label="Filter or jump to ticker" />
             <span class="kbd-hint">/</span>
           </div>
-          <button type="button" class="primary small" id="btn-refresh-live" ${busyMessage || state.is_demo ? "disabled" : ""}>${busyMessage ? esc(busyMessage) : "Refresh Live"}</button>
+          <button type="button" class="primary small" id="btn-refresh-live" ${busyMessage || state.is_demo ? "disabled" : ""}>${busyMessage ? esc(busyMessage) : "Live"}</button>
           ${syncBtn}
         </div>
       </header>
@@ -1682,6 +1907,15 @@ function bindPanelEvents(root: HTMLElement): void {
       e.stopPropagation();
       const sym = el.dataset.inspectTicker;
       if (sym) openInspector(sym);
+    });
+  });
+
+  root.querySelectorAll<HTMLElement>("[data-jump-tab]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const next = el.dataset.jumpTab as TabId | undefined;
+      if (next && TABS.some((t) => t.id === next)) {
+        selectTab(next, true);
+      }
     });
   });
 
@@ -1799,7 +2033,7 @@ function bindPanelEvents(root: HTMLElement): void {
       const sym = btn.dataset.ticker;
       if (!sym) return;
       await sendAgentPrompt(
-        `Run an adversarial Red-Team review of ${sym} using latest filings and price, then update ${sym}'s thesis card if needed.`,
+        `Run a systematic Red-Team thesis test for ${sym}: verify falsifiable hypotheses against live market data and SEC filings (check_sec_edgar), steelman the bear case, check hard kill-switches, and persist the scored result using record_thesis_test.`,
       );
     });
   });
