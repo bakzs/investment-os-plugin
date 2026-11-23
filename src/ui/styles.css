@@ -34,11 +34,11 @@
   --violet-dark: #a78bfa;
 
   --bg-page: var(--color-background-primary, var(--bg-page-light));
-  --bg-card: var(--color-background-secondary, var(--bg-card-light));
-  --bg-inset: var(--color-background-tertiary, var(--bg-inset-light));
+  --bg-card: color-mix(in oklab, var(--color-background-secondary, var(--bg-card-light)) 95%, white 5%);
+  --bg-inset: color-mix(in oklab, var(--color-background-primary, var(--bg-inset-light)) 93%, black 7%);
   --fg-primary: var(--color-text-primary, var(--fg-primary-light));
   --fg-muted: var(--color-text-secondary, var(--fg-muted-light));
-  --border-color: var(--color-border-primary, var(--border-light));
+  --border-color: color-mix(in oklab, var(--color-border-primary, var(--border-light)) 88%, var(--fg-muted-light) 12%);
   --control-border: var(--control-border-light);
   --accent: var(--accent-light);
   --ok: var(--color-text-success, var(--ok-light));
@@ -52,11 +52,11 @@
 
   @media (prefers-color-scheme: dark) {
     --bg-page: var(--color-background-primary, var(--bg-page-dark));
-    --bg-card: var(--color-background-secondary, var(--bg-card-dark));
-    --bg-inset: var(--color-background-tertiary, var(--bg-inset-dark));
+    --bg-card: color-mix(in oklab, var(--color-background-secondary, var(--bg-card-dark)) 95%, white 5%);
+    --bg-inset: color-mix(in oklab, var(--color-background-primary, var(--bg-inset-dark)) 92%, black 8%);
     --fg-primary: var(--color-text-primary, var(--fg-primary-dark));
     --fg-muted: var(--color-text-secondary, var(--fg-muted-dark));
-    --border-color: var(--color-border-primary, var(--border-dark));
+    --border-color: color-mix(in oklab, var(--color-border-primary, var(--border-dark)) 85%, var(--fg-muted-dark) 15%);
     --control-border: var(--control-border-dark);
     --accent: var(--accent-dark);
     --ok: var(--color-text-success, var(--ok-dark));
@@ -71,11 +71,11 @@
 
   @supports (color: light-dark(white, black)) {
     --bg-page: var(--color-background-primary, light-dark(var(--bg-page-light), var(--bg-page-dark)));
-    --bg-card: var(--color-background-secondary, light-dark(var(--bg-card-light), var(--bg-card-dark)));
-    --bg-inset: var(--color-background-tertiary, light-dark(var(--bg-inset-light), var(--bg-inset-dark)));
+    --bg-card: color-mix(in oklab, var(--color-background-secondary, light-dark(var(--bg-card-light), var(--bg-card-dark))) 95%, white 5%);
+    --bg-inset: color-mix(in oklab, var(--color-background-primary, light-dark(var(--bg-inset-light), var(--bg-inset-dark))) 93%, black 7%);
     --fg-primary: var(--color-text-primary, light-dark(var(--fg-primary-light), var(--fg-primary-dark)));
     --fg-muted: var(--color-text-secondary, light-dark(var(--fg-muted-light), var(--fg-muted-dark)));
-    --border-color: var(--color-border-primary, light-dark(var(--border-light), var(--border-dark)));
+    --border-color: color-mix(in oklab, var(--color-border-primary, light-dark(var(--border-light), var(--border-dark))) 86%, var(--fg-muted) 14%);
     --control-border: light-dark(var(--control-border-light), var(--control-border-dark));
     --accent: light-dark(var(--accent-light), var(--accent-dark));
     --ok: var(--color-text-success, light-dark(var(--ok-light), var(--ok-dark)));

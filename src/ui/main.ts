@@ -240,6 +240,7 @@ let thesisFilter: ThesisFilter = "all";
 let simExtBase = 0;
 let simReserveBase = 0;
 let inspectorTicker: string | null = null;
+let hasInitializedFromResult = false;
 let svgIdSeq = 0;
 let supportsDisplayTransitionCache: boolean | undefined;
 
@@ -546,6 +547,7 @@ function ingestPayload(payload: unknown): void {
   if (!payload || typeof payload !== "object") return;
   const p = payload as DashboardPayload;
   if (!p.profile || !p.portfolio) return;
+  hasInitializedFromResult = true;
   state = p;
   simExtBase = p.profile.external_exposure.enabled ? p.profile.external_exposure.amount_base : 0;
   simReserveBase = p.profile.liquidity_reserve.enabled ? p.profile.liquidity_reserve.amount_base : 0;
@@ -655,7 +657,7 @@ function renderOverview(data: DashboardPayload): string {
   const allocStripHtml = segments
     .map(
       (s) =>
-        `<button type="button" class="alloc-seg" style="--seg-color:${s.color};background:${s.color};flex-basis:${Math.max(1.5, s.pct).toFixed(2)}%" ${s.ticker ? `data-inspect-ticker="${esc(s.ticker)}"` : ""} title="${esc(s.label)} (${fmtPct(s.pct)})" aria-label="${esc(s.label)} ${fmtPct(s.pct)}"></button>`,
+        `<button type="button" class="alloc-seg" style="--seg-color:${s.color};background:${s.color};flex:${Math.max(1.5, s.pct).toFixed(2)} 1 0%" ${s.ticker ? `data-inspect-ticker="${esc(s.ticker)}"` : ""} title="${esc(s.label)} (${fmtPct(s.pct)})" aria-label="${esc(s.label)} ${fmtPct(s.pct)}"></button>`,
     )
     .join("");
 
@@ -1913,10 +1915,23 @@ async function bootstrap() {
   };
   app.onhostcontextchanged = (ctx) => applyThemeContext(ctx);
 
-  await app.connect();
-  hostCaps = app.getHostCapabilities();
-  applyThemeContext(app.getHostContext());
-  render();
+  try {
+    await app.connect();
+    hostCaps = app.getHostCapabilities();
+    applyThemeContext(app.getHostContext());
+    render();
+    // Fallback fetch if sidecar was opened standalone via '+' menu or left sidebar without a fresh tool result
+    if (!hasInitializedFromResult && hostCaps?.serverTools) {
+      setTimeout(() => {
+        if (!hasInitializedFromResult) {
+          void runServerRefresh("Loading Investment OS...", { live: false, tab: "overview" });
+        }
+      }, 250);
+    }
+  } catch (err) {
+    busyMessage = `Connection failed: ${err instanceof Error ? err.message : String(err)}`;
+    render();
+  }
 }
 
 void bootstrap();
