@@ -1,0 +1,163 @@
+{
+  "as_of": "2026-11-20",
+  "note": "Public reference top-constituent weights for common broad equity ETFs. Override or extend via ${PLUGIN_DATA}/etf_weights.json.",
+  "etf_weights": {
+    "SPY": {
+      "as_of": "2026-11-20",
+      "source": "Public S&P 500 top-constituent reference weights",
+      "AAPL": 0.0782,
+      "NVDA": 0.0509,
+      "MSFT": 0.0573,
+      "AMZN": 0.0427,
+      "GOOGL": 0.0273,
+      "GOOG": 0.0257,
+      "AVGO": 0.0235,
+      "META": 0.0231,
+      "TSLA": 0.0222,
+      "BRK-B": 0.0175,
+      "LLY": 0.0145,
+      "JPM": 0.0142,
+      "AMD": 0.0114,
+      "MU": 0.01124,
+      "WMT": 0.0108,
+      "QCOM": 0.0026
+    },
+    "VOO": {
+      "as_of": "2026-11-20",
+      "source": "Public Vanguard VOO top-constituent reference weights",
+      "AAPL": 0.0782,
+      "NVDA": 0.0509,
+      "MSFT": 0.0573,
+      "AMZN": 0.0427,
+      "GOOGL": 0.0273,
+      "GOOG": 0.0257,
+      "AVGO": 0.0235,
+      "META": 0.0231,
+      "TSLA": 0.0222,
+      "BRK-B": 0.0175,
+      "LLY": 0.0145,
+      "JPM": 0.0142,
+      "AMD": 0.0114,
+      "MU": 0.01124,
+      "WMT": 0.0108,
+      "QCOM": 0.0026
+    },
+    "VTI": {
+      "as_of": "2026-11-20",
+      "source": "Public Vanguard VTI top-constituent reference weights",
+      "AAPL": 0.075058,
+      "NVDA": 0.04317,
+      "MSFT": 0.054073,
+      "AMZN": 0.036023,
+      "GOOGL": 0.023413,
+      "GOOG": 0.018561,
+      "AVGO": 0.02173,
+      "META": 0.018536,
+      "TSLA": 0.014651,
+      "BRK-B": 0.0155,
+      "LLY": 0.0128,
+      "JPM": 0.0124,
+      "AMD": 0.010382,
+      "MU": 0.01006,
+      "WMT": 0.0095,
+      "QCOM": 0.002486
+    },
+    "QQQ": {
+      "as_of": "2026-11-20",
+      "source": "Public Invesco QQQ top-constituent reference weights",
+      "AAPL": 0.092,
+      "MSFT": 0.0662,
+      "NVDA": 0.0557,
+      "AMZN": 0.049,
+      "AMD": 0.0352,
+      "MU": 0.0341,
+      "TSLA": 0.0334,
+      "META": 0.0307,
+      "GOOGL": 0.0286,
+      "GOOG": 0.0268,
+      "AVGO": 0.0266,
+      "QCOM": 0.0082
+    },
+    "VWRA": {
+      "as_of": "2026-11-20",
+      "source": "Public FTSE All-World UCITS (IE00BK5BQT80) reference weights",
+      "AAPL": 0.051395,
+      "MSFT": 0.037356,
+      "NVDA": 0.030392,
+      "AMZN": 0.024844,
+      "GOOGL": 0.016344,
+      "TSM": 0.015281,
+      "AVGO": 0.014699,
+      "META": 0.012795,
+      "GOOG": 0.012718,
+      "TSLA": 0.010486,
+      "BRK-B": 0.0098,
+      "LLY": 0.0085,
+      "JPM": 0.0082,
+      "MU": 0.006958,
+      "AMD": 0.006873,
+      "QCOM": 0.001686
+    },
+    "VT": {
+      "as_of": "2026-11-20",
+      "source": "Public FTSE Global All Cap (VT) reference weights",
+      "AAPL": 0.0465,
+      "MSFT": 0.0338,
+      "NVDA": 0.0275,
+      "AMZN": 0.0225,
+      "GOOGL": 0.0148,
+      "TSM": 0.0138,
+      "AVGO": 0.0133,
+      "META": 0.0116,
+      "GOOG": 0.0115,
+      "TSLA": 0.0095,
+      "BRK-B": 0.0089
+    }
+  },
+  "etf_metadata": {
+    "SPY": {
+      "domicile": "US",
+      "us_situs": true,
+      "ocf_pct": 0.09,
+      "us_weight": 1.0,
+      "other_semis_residual": 0.025
+    },
+    "VOO": {
+      "domicile": "US",
+      "us_situs": true,
+      "ocf_pct": 0.03,
+      "us_weight": 1.0,
+      "other_semis_residual": 0.025
+    },
+    "VTI": {
+      "domicile": "US",
+      "us_situs": true,
+      "ocf_pct": 0.03,
+      "us_weight": 1.0,
+      "other_semis_residual": 0.023
+    },
+    "QQQ": {
+      "domicile": "US",
+      "us_situs": true,
+      "ocf_pct": 0.2,
+      "us_weight": 0.965,
+      "other_semis_residual": 0.06
+    },
+    "VWRA": {
+      "isin": "IE00BK5BQT80",
+      "domicile": "Ireland",
+      "us_situs": false,
+      "ocf_pct": 0.14,
+      "us_weight": 0.6283,
+      "taiwan_weight": 0.0331,
+      "other_semis_residual": 0.028
+    },
+    "VT": {
+      "domicile": "US",
+      "us_situs": true,
+      "ocf_pct": 0.07,
+      "us_weight": 0.635,
+      "other_semis_residual": 0.025
+    }
+  }
+}

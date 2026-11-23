@@ -1,0 +1,31 @@
+{
+  "name": "investment-os-plugin",
+  "version": "0.2.0",
+  "description": "Open-source Antigravity Personal-CIO MCP App plugin for multi-currency portfolio analytics, ETF look-through, configurable risk caps, optional US NRA estate tax, and SEC EDGAR catalyst monitoring.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bakzs/investment-os-plugin"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "privacy-check": "node scripts/privacy-check.mjs",
+    "stage-plugin": "node scripts/stage-plugin.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^2.0.4",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "js-yaml": "^4.1.0",
+    "zod": "^4.2.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.25.12",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

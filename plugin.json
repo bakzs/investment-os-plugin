@@ -1,0 +1,18 @@
+{
+  "name": "investment-os",
+  "displayName": "Investment OS",
+  "version": "0.2.0",
+  "description": "Personal-CIO sidecar dashboard for multi-currency portfolios: ETF look-through concentration, optional US NRA estate tax (IRC §2101(c)), configurable risk caps, thesis trigger zones, and live SEC EDGAR monitoring.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Open my Investment OS dashboard and help me onboard my portfolio",
+    "Refresh live prices and audit my look-through concentration and risk caps",
+    "Poll SEC EDGAR filings for my watchlist and review my thesis trigger zones"
+  ],
+  "author": {
+    "name": "bakzs",
+    "url": "https://github.com/bakzs"
+  },
+  "homepage": "https://github.com/bakzs/investment-os-plugin",
+  "repository": "https://github.com/bakzs/investment-os-plugin"
+}
