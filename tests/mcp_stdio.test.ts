@@ -62,6 +62,8 @@ test("bundled dist/server.cjs passes end-to-end stdio MCP App lifecycle", async 
     assert.ok(item && "text" in item);
     assert.equal(item.mimeType, "text/html;profile=mcp-app");
     assert.equal(item.text.includes("Investment OS"), true);
+    assert.equal(item.text.includes("<dialog id=\"stock-inspector\""), true);
+    assert.equal(Buffer.byteLength(item.text, "utf-8") < 1_000_000, true);
 
     // 3. Empty data directory boots cleanly without initializing files
     const emptyCall = await client.callTool({ name: "open_dashboard", arguments: {} });

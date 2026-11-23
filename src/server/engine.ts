@@ -19,10 +19,13 @@ import {
   loadCatalysts,
   loadEdgarCache,
   loadEtfWeights,
+  loadMarketCache,
   loadPortfolio,
   loadProfile,
   readThesisFile,
+  saveMarketCache,
   type EdgarCacheState,
+  type MarketCacheEntry,
   writeThesisFile,
 } from "./storage.js";
 import { evaluateSecGates } from "./edgar.js";
@@ -503,6 +506,45 @@ export function mergePortfolioPositions(
   return PortfolioSchema.parse(current);
 }
 
+const DEMO_MARKET_CACHE: {
+  vix: number;
+  vix_sparkline: number[];
+  quotes: Record<string, MarketCacheEntry>;
+} = {
+  vix: 18.4,
+  vix_sparkline: [21.2, 20.8, 22.1, 21.5, 20.2, 19.7, 19.3, 18.9, 19.4, 18.7, 18.4],
+  quotes: {
+    "VWRA.L": {
+      price: 176.5,
+      currency: "USD",
+      change_1d_pct: 0.74,
+      change_1m_pct: 3.1,
+      sparkline: [171.2, 171.8, 172.4, 171.9, 172.7, 173.3, 174.1, 173.8, 174.6, 175.2, 176.5],
+    },
+    VTI: {
+      price: 348.0,
+      currency: "USD",
+      change_1d_pct: 1.05,
+      change_1m_pct: 4.18,
+      sparkline: [334.0, 335.6, 337.2, 336.4, 338.8, 340.5, 341.9, 343.0, 344.2, 344.4, 348.0],
+    },
+    AAPL: {
+      price: 230.0,
+      currency: "USD",
+      change_1d_pct: 0.92,
+      change_1m_pct: 5.02,
+      sparkline: [219.0, 220.4, 221.8, 223.1, 222.5, 224.0, 225.7, 226.9, 227.4, 227.9, 230.0],
+    },
+    MSFT: {
+      price: 495.0,
+      currency: "USD",
+      change_1d_pct: -0.42,
+      change_1m_pct: -1.78,
+      sparkline: [504.0, 502.5, 501.2, 499.8, 500.4, 498.6, 497.9, 496.5, 497.8, 497.1, 495.0],
+    },
+  },
+};
+
 function buildDemoState(): {
   profile: UserProfile;
   portfolio: PortfolioRecord;
@@ -601,6 +643,9 @@ export interface DashboardPositionRow {
   avg_cost: number;
   price: number;
   stale: boolean;
+  sparkline: number[];
+  change_1d_pct: number | null;
+  change_1m_pct: number | null;
   mv_trading: number;
   mv_usd: number;
   mv_base: number;
@@ -635,6 +680,9 @@ export interface DashboardThesisRow {
   price: number | null;
   price_base: number | null;
   stale: boolean;
+  sparkline: number[];
+  change_1d_pct: number | null;
+  change_1m_pct: number | null;
   last_ref_price: number | null;
   buy_zone_low: number | null;
   buy_zone_high: number | null;
@@ -660,6 +708,8 @@ export interface DashboardPayload {
   usd_to_base_fx: number;
   fx_rates: Record<string, number>;
   vix: number | null;
+  vix_sparkline: number[];
+  market_cache_updated_at: string | null;
   stale_tickers: string[];
   profile: UserProfile;
   portfolio: {
@@ -746,6 +796,8 @@ export async function buildDashboardPayload(opts: {
       usd_to_base_fx: profile.base_currency === "USD" ? 1.0 : 1.0,
       fx_rates: { [profile.base_currency]: 1.0 },
       vix: null,
+      vix_sparkline: [],
+      market_cache_updated_at: null,
       stale_tickers: [],
       profile,
       portfolio: {
@@ -806,8 +858,17 @@ export async function buildDashboardPayload(opts: {
     fxRates.USD = 1.0;
   }
 
+  const existingMarketCache = isDemo ? null : loadMarketCache(opts.dataDir);
   let liveQuotes = new Map<string, QuoteResult>();
-  let vixVal: number | null = null;
+  let vixVal: number | null = isDemo
+    ? DEMO_MARKET_CACHE.vix
+    : (existingMarketCache?.vix ?? null);
+  let vixSparkline: number[] = isDemo
+    ? DEMO_MARKET_CACHE.vix_sparkline
+    : (existingMarketCache?.vix_sparkline ?? []);
+  let marketCacheUpdatedAt: string | null = isDemo
+    ? nowIso
+    : (existingMarketCache?.updated_at ?? null);
   const staleTickers = new Set<string>();
 
   if (opts.live && !isDemo) {
@@ -835,8 +896,36 @@ export async function buildDashboardPayload(opts: {
     const vixQ = liveQuotes.get("^VIX");
     if (vixQ) {
       vixVal = round(vixQ.price, 2);
+      if (vixQ.sparkline.length > 0) {
+        vixSparkline = vixQ.sparkline;
+      }
     }
+
+    const nextQuotesCache: Record<string, MarketCacheEntry> = {
+      ...(existingMarketCache?.quotes ?? {}),
+    };
+    for (const [sym, q] of liveQuotes.entries()) {
+      if (sym === "^VIX") continue;
+      nextQuotesCache[sym] = {
+        price: round(q.price, 4),
+        currency: q.currency,
+        sparkline: q.sparkline,
+        change_1d_pct: q.change_1d_pct,
+        change_1m_pct: q.change_1m_pct,
+      };
+    }
+    marketCacheUpdatedAt = nowIso;
+    saveMarketCache(opts.dataDir, {
+      updated_at: nowIso,
+      vix: vixVal,
+      vix_sparkline: vixSparkline,
+      quotes: nextQuotesCache,
+    });
   }
+
+  const cachedQuotesMap: Record<string, MarketCacheEntry> = isDemo
+    ? DEMO_MARKET_CACHE.quotes
+    : (existingMarketCache?.quotes ?? {});
 
   const fxUsdToBase = fxRates.USD ?? 1.0;
 
@@ -846,15 +935,22 @@ export async function buildDashboardPayload(opts: {
 
   const positionsOut: DashboardPositionRow[] = portfolio.positions.map((p) => {
     const yfSym = p.yf_symbol || p.ticker;
+    const cachedQ = cachedQuotesMap[yfSym];
     let priceTrading = p.ref_price;
     let tradingCcy = p.currency;
     let isStale = false;
+    let sparkline: number[] = cachedQ?.sparkline ?? [];
+    let change1d: number | null = cachedQ?.change_1d_pct ?? null;
+    let change1m: number | null = cachedQ?.change_1m_pct ?? null;
 
     if (opts.live && !isDemo) {
       const q = liveQuotes.get(yfSym);
       if (q) {
         priceTrading = q.price;
         tradingCcy = q.currency || p.currency;
+        sparkline = q.sparkline;
+        change1d = q.change_1d_pct;
+        change1m = q.change_1m_pct;
       } else {
         isStale = true;
         staleTickers.add(p.ticker);
@@ -886,6 +982,9 @@ export async function buildDashboardPayload(opts: {
       avg_cost: round(p.avg_cost, 4),
       price: round(priceTrading, 4),
       stale: isStale,
+      sparkline,
+      change_1d_pct: change1d,
+      change_1m_pct: change1m,
       mv_trading: round(mvTrading, 2),
       mv_usd: round(mvUsd, 2),
       mv_base: round(mvBase, 2),
@@ -1091,15 +1190,22 @@ export async function buildDashboardPayload(opts: {
     const yfSym = String(fm.yf_symbol || sym);
     const thesisCcy = String(fm.currency || "USD").toUpperCase();
     const refP = typeof fm.last_ref_price === "number" ? fm.last_ref_price : null;
+    const cachedQ = cachedQuotesMap[yfSym];
     let price = refP;
     let ccy = thesisCcy;
     let isStale = false;
+    let sparkline: number[] = cachedQ?.sparkline ?? [];
+    let change1d: number | null = cachedQ?.change_1d_pct ?? null;
+    let change1m: number | null = cachedQ?.change_1m_pct ?? null;
 
     if (opts.live && !isDemo) {
       const q = liveQuotes.get(yfSym);
       if (q) {
         price = q.price;
         ccy = q.currency || thesisCcy;
+        sparkline = q.sparkline;
+        change1d = q.change_1d_pct;
+        change1m = q.change_1m_pct;
       } else if (refP !== null) {
         isStale = true;
         staleTickers.add(sym);
@@ -1122,6 +1228,9 @@ export async function buildDashboardPayload(opts: {
       price: price !== null ? round(price, 4) : null,
       price_base: priceBase,
       stale: isStale,
+      sparkline,
+      change_1d_pct: change1d,
+      change_1m_pct: change1m,
       last_ref_price: refP,
       buy_zone_low: fm.buy_zone_low ?? null,
       buy_zone_high: fm.buy_zone_high ?? null,
@@ -1158,6 +1267,8 @@ export async function buildDashboardPayload(opts: {
     usd_to_base_fx: round(fxUsdToBase, 5),
     fx_rates: fxRates,
     vix: vixVal,
+    vix_sparkline: vixSparkline,
+    market_cache_updated_at: marketCacheUpdatedAt,
     stale_tickers: Array.from(staleTickers).sort(),
     profile,
     portfolio: {

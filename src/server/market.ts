@@ -3,6 +3,9 @@ export interface QuoteResult {
   price: number;
   currency: string;
   marketState?: string;
+  sparkline: number[];
+  change_1d_pct: number | null;
+  change_1m_pct: number | null;
 }
 
 const YF_HEADERS = {
@@ -10,8 +13,16 @@ const YF_HEADERS = {
   Accept: "application/json",
 };
 
+function round4(n: number): number {
+  return Math.round((n + Number.EPSILON) * 10000) / 10000;
+}
+
+function round2(n: number): number {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
 export async function fetchYahooChartQuote(symbol: string, timeoutMs = 7000): Promise<QuoteResult | null> {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1mo`;
   try {
     const resp = await fetch(url, {
       headers: YF_HEADERS,
@@ -28,10 +39,16 @@ export async function fetchYahooChartQuote(symbol: string, timeoutMs = 7000): Pr
             currency?: string;
             marketState?: string;
           };
+          indicators?: {
+            quote?: Array<{
+              close?: Array<number | null>;
+            }>;
+          };
         }>;
       };
     };
-    const meta = data?.chart?.result?.[0]?.meta;
+    const result = data?.chart?.result?.[0];
+    const meta = result?.meta;
     if (!meta) return null;
 
     let price = meta.regularMarketPrice ?? meta.previousClose ?? meta.chartPreviousClose;
@@ -39,19 +56,47 @@ export async function fetchYahooChartQuote(symbol: string, timeoutMs = 7000): Pr
       return null;
     }
 
+    let scale = 1.0;
     let currency = (meta.currency ?? "USD").trim();
     if (currency === "GBp" || currency === "GBX") {
-      price = price / 100.0;
+      scale = 0.01;
+      price = price * scale;
       currency = "GBP";
     } else {
       currency = currency.toUpperCase();
     }
+
+    const rawCloses = result?.indicators?.quote?.[0]?.close ?? [];
+    const sparkline = rawCloses
+      .filter((v): v is number => typeof v === "number" && Number.isFinite(v) && v > 0)
+      .map((v) => round4(v * scale))
+      .slice(-22);
+
+    let prevClose: number | null = null;
+    if (sparkline.length >= 2) {
+      const lastPt = sparkline[sparkline.length - 1];
+      const sameAsLast = Math.abs(price - lastPt) / price < 0.0005;
+      prevClose = sameAsLast ? sparkline[sparkline.length - 2] : lastPt;
+    } else if (typeof meta.previousClose === "number" && meta.previousClose > 0) {
+      prevClose = meta.previousClose * scale;
+    }
+
+    const anchor1mRaw =
+      typeof meta.chartPreviousClose === "number" && meta.chartPreviousClose > 0
+        ? meta.chartPreviousClose * scale
+        : sparkline[0];
+
+    const change1d = prevClose && prevClose > 0 ? round2(((price - prevClose) / prevClose) * 100) : null;
+    const change1m = anchor1mRaw && anchor1mRaw > 0 ? round2(((price - anchor1mRaw) / anchor1mRaw) * 100) : null;
 
     return {
       symbol,
       price,
       currency,
       marketState: meta.marketState,
+      sparkline,
+      change_1d_pct: change1d,
+      change_1m_pct: change1m,
     };
   } catch {
     return null;

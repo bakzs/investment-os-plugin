@@ -60,7 +60,8 @@ const html = `<!doctype html>
 <style>${cssCode}</style>
 </head>
 <body>
-<div id="app">Loading Investment OS dashboard...</div>
+<main id="app">Loading Investment OS dashboard...</main>
+<dialog id="stock-inspector" closedby="any" aria-labelledby="inspector-title"></dialog>
 <script>${jsCode}</script>
 </body>
 </html>

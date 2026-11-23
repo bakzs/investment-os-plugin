@@ -12,7 +12,7 @@ import {
   saveOrMergeThesis,
 } from "../src/server/engine.js";
 import { ProfileSchema } from "../src/server/schema.js";
-import { savePortfolio, saveProfile } from "../src/server/storage.js";
+import { saveMarketCache, savePortfolio, saveProfile } from "../src/server/storage.js";
 
 test("computeUsEstateTaxNra matches exact IRC §2101(c) schedule", () => {
   assert.equal(computeUsEstateTaxNra(0).net_estate_tax_usd, 0);
@@ -151,4 +151,52 @@ test("classifyTriggerStatus covers all states cleanly", () => {
   assert.equal(classifyTriggerStatus(135, fm), "HOLD / WAIT");
   assert.equal(classifyTriggerStatus(155, fm), "TRIM / EXIT ZONE");
   assert.equal(classifyTriggerStatus(100, { ticker: "NONE" }), "NO ACTIVE ZONE");
+});
+
+test("market_cache hydrates sparklines and 1D/1M deltas without altering snapshot NAV reconciliation", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ios-cache-"));
+  const pluginRoot = path.resolve(process.cwd());
+  try {
+    const profile = ProfileSchema.parse({ base_currency: "USD" });
+    saveProfile(tempDir, profile);
+
+    const portfolio = mergePortfolioPositions(null, profile, {
+      cash_base: 2500,
+      accruals_base: 0,
+      fx_rates: { USD: 1.0 },
+      positions: [{ ticker: "MSFT", qty: 10, avg_cost: 400, ref_price: 500, currency: "USD" }],
+    });
+    savePortfolio(tempDir, portfolio);
+
+    saveMarketCache(tempDir, {
+      updated_at: "2026-11-24T01:00:00Z",
+      vix: 24.5,
+      vix_sparkline: [26.1, 25.4, 24.5],
+      quotes: {
+        MSFT: {
+          price: 512.0,
+          currency: "USD",
+          sparkline: [480.0, 492.5, 512.0],
+          change_1d_pct: 1.85,
+          change_1m_pct: 6.67,
+        },
+      },
+    });
+
+    const snapPayload = await buildDashboardPayload({ dataDir: tempDir, pluginRoot, live: false });
+    // Snapshot NAV must reconcile exact ref_price (10 * $500 + $2,500 = $7,500), never overridden by cache price
+    assert.equal(snapPayload.portfolio.nav_base, 7500);
+    assert.equal(snapPayload.vix, 24.5);
+    assert.deepEqual(snapPayload.vix_sparkline, [26.1, 25.4, 24.5]);
+    assert.deepEqual(snapPayload.portfolio.positions[0]?.sparkline, [480.0, 492.5, 512.0]);
+    assert.equal(snapPayload.portfolio.positions[0]?.change_1d_pct, 1.85);
+    assert.equal(snapPayload.portfolio.positions[0]?.change_1m_pct, 6.67);
+
+    // Demo preview must include populated synthetic sparklines & VIX trend
+    const demoPayload = await buildDashboardPayload({ dataDir: tempDir, pluginRoot, demo: true });
+    assert.equal(demoPayload.vix_sparkline.length > 5, true);
+    assert.equal((demoPayload.portfolio.positions[0]?.sparkline.length ?? 0) > 5, true);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });

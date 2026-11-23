@@ -216,6 +216,55 @@ export function saveEdgarCache(dataDir: string, state: EdgarCacheState): void {
   atomicWriteFile(filePath, JSON.stringify(state, null, 2) + "\n");
 }
 
+export interface MarketCacheEntry {
+  price: number;
+  currency: string;
+  sparkline: number[];
+  change_1d_pct: number | null;
+  change_1m_pct: number | null;
+}
+
+export interface MarketCacheState {
+  updated_at: string | null;
+  vix: number | null;
+  vix_sparkline: number[];
+  quotes: Record<string, MarketCacheEntry>;
+}
+
+export function loadMarketCache(dataDir: string): MarketCacheState {
+  const filePath = safeResolve(dataDir, "market_cache.json");
+  if (!fs.existsSync(filePath)) {
+    return {
+      updated_at: null,
+      vix: null,
+      vix_sparkline: [],
+      quotes: {},
+    };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8")) as Partial<MarketCacheState>;
+    return {
+      updated_at: parsed.updated_at ?? null,
+      vix: typeof parsed.vix === "number" ? parsed.vix : null,
+      vix_sparkline: Array.isArray(parsed.vix_sparkline) ? parsed.vix_sparkline : [],
+      quotes: parsed.quotes ?? {},
+    };
+  } catch {
+    return {
+      updated_at: null,
+      vix: null,
+      vix_sparkline: [],
+      quotes: {},
+    };
+  }
+}
+
+export function saveMarketCache(dataDir: string, state: MarketCacheState): void {
+  ensureDataDir(dataDir);
+  const filePath = safeResolve(dataDir, "market_cache.json");
+  atomicWriteFile(filePath, JSON.stringify(state, null, 2) + "\n");
+}
+
 export function listThesisFiles(dataDir: string): { ticker: string; filePath: string; content: string }[] {
   const thesesDir = safeResolve(dataDir, "theses");
   if (!fs.existsSync(thesesDir)) {

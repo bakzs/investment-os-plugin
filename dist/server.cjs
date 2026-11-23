@@ -33429,8 +33429,14 @@ var YF_HEADERS = {
   "User-Agent": "Mozilla/5.0 (compatible; InvestmentOS-Plugin/0.2.0)",
   Accept: "application/json"
 };
+function round4(n) {
+  return Math.round((n + Number.EPSILON) * 1e4) / 1e4;
+}
+function round2(n) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
 async function fetchYahooChartQuote(symbol2, timeoutMs = 7e3) {
-  const url2 = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol2)}?interval=1d&range=5d`;
+  const url2 = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol2)}?interval=1d&range=1mo`;
   try {
     const resp = await fetch(url2, {
       headers: YF_HEADERS,
@@ -33438,24 +33444,43 @@ async function fetchYahooChartQuote(symbol2, timeoutMs = 7e3) {
     });
     if (!resp.ok) return null;
     const data = await resp.json();
-    const meta3 = data?.chart?.result?.[0]?.meta;
+    const result = data?.chart?.result?.[0];
+    const meta3 = result?.meta;
     if (!meta3) return null;
     let price = meta3.regularMarketPrice ?? meta3.previousClose ?? meta3.chartPreviousClose;
     if (typeof price !== "number" || !Number.isFinite(price) || price <= 0) {
       return null;
     }
+    let scale = 1;
     let currency = (meta3.currency ?? "USD").trim();
     if (currency === "GBp" || currency === "GBX") {
-      price = price / 100;
+      scale = 0.01;
+      price = price * scale;
       currency = "GBP";
     } else {
       currency = currency.toUpperCase();
     }
+    const rawCloses = result?.indicators?.quote?.[0]?.close ?? [];
+    const sparkline = rawCloses.filter((v) => typeof v === "number" && Number.isFinite(v) && v > 0).map((v) => round4(v * scale)).slice(-22);
+    let prevClose = null;
+    if (sparkline.length >= 2) {
+      const lastPt = sparkline[sparkline.length - 1];
+      const sameAsLast = Math.abs(price - lastPt) / price < 5e-4;
+      prevClose = sameAsLast ? sparkline[sparkline.length - 2] : lastPt;
+    } else if (typeof meta3.previousClose === "number" && meta3.previousClose > 0) {
+      prevClose = meta3.previousClose * scale;
+    }
+    const anchor1mRaw = typeof meta3.chartPreviousClose === "number" && meta3.chartPreviousClose > 0 ? meta3.chartPreviousClose * scale : sparkline[0];
+    const change1d = prevClose && prevClose > 0 ? round2((price - prevClose) / prevClose * 100) : null;
+    const change1m = anchor1mRaw && anchor1mRaw > 0 ? round2((price - anchor1mRaw) / anchor1mRaw * 100) : null;
     return {
       symbol: symbol2,
       price,
       currency,
-      marketState: meta3.marketState
+      marketState: meta3.marketState,
+      sparkline,
+      change_1d_pct: change1d,
+      change_1m_pct: change1m
     };
   } catch {
     return null;
@@ -33823,6 +33848,38 @@ function loadEdgarCache(dataDir) {
 function saveEdgarCache(dataDir, state) {
   ensureDataDir(dataDir);
   const filePath = safeResolve(dataDir, "edgar_latest.json");
+  atomicWriteFile(filePath, JSON.stringify(state, null, 2) + "\n");
+}
+function loadMarketCache(dataDir) {
+  const filePath = safeResolve(dataDir, "market_cache.json");
+  if (!import_node_fs.default.existsSync(filePath)) {
+    return {
+      updated_at: null,
+      vix: null,
+      vix_sparkline: [],
+      quotes: {}
+    };
+  }
+  try {
+    const parsed = JSON.parse(import_node_fs.default.readFileSync(filePath, "utf-8"));
+    return {
+      updated_at: parsed.updated_at ?? null,
+      vix: typeof parsed.vix === "number" ? parsed.vix : null,
+      vix_sparkline: Array.isArray(parsed.vix_sparkline) ? parsed.vix_sparkline : [],
+      quotes: parsed.quotes ?? {}
+    };
+  } catch {
+    return {
+      updated_at: null,
+      vix: null,
+      vix_sparkline: [],
+      quotes: {}
+    };
+  }
+}
+function saveMarketCache(dataDir, state) {
+  ensureDataDir(dataDir);
+  const filePath = safeResolve(dataDir, "market_cache.json");
   atomicWriteFile(filePath, JSON.stringify(state, null, 2) + "\n");
 }
 function listThesisFiles(dataDir) {
@@ -34398,6 +34455,40 @@ function mergePortfolioPositions(existing, profile, input2) {
   current.source = input2.source ?? current.source;
   return PortfolioSchema.parse(current);
 }
+var DEMO_MARKET_CACHE = {
+  vix: 18.4,
+  vix_sparkline: [21.2, 20.8, 22.1, 21.5, 20.2, 19.7, 19.3, 18.9, 19.4, 18.7, 18.4],
+  quotes: {
+    "VWRA.L": {
+      price: 176.5,
+      currency: "USD",
+      change_1d_pct: 0.74,
+      change_1m_pct: 3.1,
+      sparkline: [171.2, 171.8, 172.4, 171.9, 172.7, 173.3, 174.1, 173.8, 174.6, 175.2, 176.5]
+    },
+    VTI: {
+      price: 348,
+      currency: "USD",
+      change_1d_pct: 1.05,
+      change_1m_pct: 4.18,
+      sparkline: [334, 335.6, 337.2, 336.4, 338.8, 340.5, 341.9, 343, 344.2, 344.4, 348]
+    },
+    AAPL: {
+      price: 230,
+      currency: "USD",
+      change_1d_pct: 0.92,
+      change_1m_pct: 5.02,
+      sparkline: [219, 220.4, 221.8, 223.1, 222.5, 224, 225.7, 226.9, 227.4, 227.9, 230]
+    },
+    MSFT: {
+      price: 495,
+      currency: "USD",
+      change_1d_pct: -0.42,
+      change_1m_pct: -1.78,
+      sparkline: [504, 502.5, 501.2, 499.8, 500.4, 498.6, 497.9, 496.5, 497.8, 497.1, 495]
+    }
+  }
+};
 function buildDemoState() {
   const profile = ProfileSchema.parse({
     base_currency: "USD",
@@ -34549,6 +34640,8 @@ async function buildDashboardPayload(opts) {
       usd_to_base_fx: profile.base_currency === "USD" ? 1 : 1,
       fx_rates: { [profile.base_currency]: 1 },
       vix: null,
+      vix_sparkline: [],
+      market_cache_updated_at: null,
       stale_tickers: [],
       profile,
       portfolio: {
@@ -34604,8 +34697,11 @@ async function buildDashboardPayload(opts) {
   if (profile.base_currency === "USD") {
     fxRates.USD = 1;
   }
+  const existingMarketCache = isDemo ? null : loadMarketCache(opts.dataDir);
   let liveQuotes = /* @__PURE__ */ new Map();
-  let vixVal = null;
+  let vixVal = isDemo ? DEMO_MARKET_CACHE.vix : existingMarketCache?.vix ?? null;
+  let vixSparkline = isDemo ? DEMO_MARKET_CACHE.vix_sparkline : existingMarketCache?.vix_sparkline ?? [];
+  let marketCacheUpdatedAt = isDemo ? nowIso : existingMarketCache?.updated_at ?? null;
   const staleTickers = /* @__PURE__ */ new Set();
   if (opts.live && !isDemo) {
     const quoteSymbols = ["^VIX"];
@@ -34629,22 +34725,53 @@ async function buildDashboardPayload(opts) {
     const vixQ = liveQuotes.get("^VIX");
     if (vixQ) {
       vixVal = round(vixQ.price, 2);
+      if (vixQ.sparkline.length > 0) {
+        vixSparkline = vixQ.sparkline;
+      }
     }
+    const nextQuotesCache = {
+      ...existingMarketCache?.quotes ?? {}
+    };
+    for (const [sym, q] of liveQuotes.entries()) {
+      if (sym === "^VIX") continue;
+      nextQuotesCache[sym] = {
+        price: round(q.price, 4),
+        currency: q.currency,
+        sparkline: q.sparkline,
+        change_1d_pct: q.change_1d_pct,
+        change_1m_pct: q.change_1m_pct
+      };
+    }
+    marketCacheUpdatedAt = nowIso;
+    saveMarketCache(opts.dataDir, {
+      updated_at: nowIso,
+      vix: vixVal,
+      vix_sparkline: vixSparkline,
+      quotes: nextQuotesCache
+    });
   }
+  const cachedQuotesMap = isDemo ? DEMO_MARKET_CACHE.quotes : existingMarketCache?.quotes ?? {};
   const fxUsdToBase = fxRates.USD ?? 1;
   let totPosBase = 0;
   let totPosUsd = 0;
   let totCostUsd = 0;
   const positionsOut = portfolio.positions.map((p) => {
     const yfSym = p.yf_symbol || p.ticker;
+    const cachedQ = cachedQuotesMap[yfSym];
     let priceTrading = p.ref_price;
     let tradingCcy = p.currency;
     let isStale = false;
+    let sparkline = cachedQ?.sparkline ?? [];
+    let change1d = cachedQ?.change_1d_pct ?? null;
+    let change1m = cachedQ?.change_1m_pct ?? null;
     if (opts.live && !isDemo) {
       const q = liveQuotes.get(yfSym);
       if (q) {
         priceTrading = q.price;
         tradingCcy = q.currency || p.currency;
+        sparkline = q.sparkline;
+        change1d = q.change_1d_pct;
+        change1m = q.change_1m_pct;
       } else {
         isStale = true;
         staleTickers.add(p.ticker);
@@ -34673,6 +34800,9 @@ async function buildDashboardPayload(opts) {
       avg_cost: round(p.avg_cost, 4),
       price: round(priceTrading, 4),
       stale: isStale,
+      sparkline,
+      change_1d_pct: change1d,
+      change_1m_pct: change1m,
       mv_trading: round(mvTrading, 2),
       mv_usd: round(mvUsd, 2),
       mv_base: round(mvBase, 2),
@@ -34837,14 +34967,21 @@ async function buildDashboardPayload(opts) {
     const yfSym = String(fm.yf_symbol || sym);
     const thesisCcy = String(fm.currency || "USD").toUpperCase();
     const refP = typeof fm.last_ref_price === "number" ? fm.last_ref_price : null;
+    const cachedQ = cachedQuotesMap[yfSym];
     let price = refP;
     let ccy = thesisCcy;
     let isStale = false;
+    let sparkline = cachedQ?.sparkline ?? [];
+    let change1d = cachedQ?.change_1d_pct ?? null;
+    let change1m = cachedQ?.change_1m_pct ?? null;
     if (opts.live && !isDemo) {
       const q = liveQuotes.get(yfSym);
       if (q) {
         price = q.price;
         ccy = q.currency || thesisCcy;
+        sparkline = q.sparkline;
+        change1d = q.change_1d_pct;
+        change1m = q.change_1m_pct;
       } else if (refP !== null) {
         isStale = true;
         staleTickers.add(sym);
@@ -34862,6 +34999,9 @@ async function buildDashboardPayload(opts) {
       price: price !== null ? round(price, 4) : null,
       price_base: priceBase,
       stale: isStale,
+      sparkline,
+      change_1d_pct: change1d,
+      change_1m_pct: change1m,
       last_ref_price: refP,
       buy_zone_low: fm.buy_zone_low ?? null,
       buy_zone_high: fm.buy_zone_high ?? null,
@@ -34894,6 +35034,8 @@ async function buildDashboardPayload(opts) {
     usd_to_base_fx: round(fxUsdToBase, 5),
     fx_rates: fxRates,
     vix: vixVal,
+    vix_sparkline: vixSparkline,
+    market_cache_updated_at: marketCacheUpdatedAt,
     stale_tickers: Array.from(staleTickers).sort(),
     profile,
     portfolio: {
