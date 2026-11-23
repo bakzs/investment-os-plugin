@@ -1,4 +1,4 @@
-/* Investment OS — Modern Institutional Finance Hub Styles
+/* Investment OS — Linear-Minimalist Institutional Finance Hub
  * Implements modern-web-guidance: dark-mode, color, visual-effects,
  * content-first-noise-reduction, tabs, responsive-table, dialog, animate-to-from-top-layer
  */
@@ -7,86 +7,143 @@
   color-scheme: light dark;
 
   --in-oklab: ;
-  --bg-page-light: #f9fafb;
-  --bg-page-dark: #09090b;
+  --bg-page-light: #fafafa;
+  --bg-page-dark: #0a0a0c;
   --bg-card-light: #ffffff;
   --bg-card-dark: #111114;
-  --bg-inset-light: #f3f4f6;
-  --bg-inset-dark: #18181c;
-  --fg-primary-light: #09090b;
-  --fg-primary-dark: #fafafa;
-  --fg-muted-light: #52525b;
-  --fg-muted-dark: #a1a1aa;
-  --border-light: #d4d4d8;
-  --border-dark: #27272a;
+  --bg-inset-light: #f4f4f5;
+  --bg-inset-dark: #17171b;
+  --fg-primary-light: #111113;
+  --fg-primary-dark: #f4f4f5;
+  --fg-muted-light: #5c5c66;
+  --fg-muted-dark: #94949e;
+  --border-light: #e4e4e7;
+  --border-dark: #24242b;
   --control-border-light: #71717a;
-  --control-border-dark: #52525b;
+  --control-border-dark: #3f3f46;
 
-  --accent-light: #2563eb;
-  --accent-dark: #3b82f6;
-  --ok-light: #15803d;
-  --ok-dark: #22c55e;
-  --warn-light: #b45309;
-  --warn-dark: #f59e0b;
-  --bad-light: #dc2626;
-  --bad-dark: #ef4444;
-  --violet-light: #6d28d9;
-  --violet-dark: #a78bfa;
+  --btn-primary-bg-light: #18181b;
+  --btn-primary-bg-dark: #f4f4f5;
+  --btn-primary-fg-light: #fafafa;
+  --btn-primary-fg-dark: #09090b;
+
+  --accent-light: #18181b;
+  --accent-dark: #e4e4e7;
+  --ok-light: #166534;
+  --ok-dark: #52c48c;
+  --warn-light: #92400e;
+  --warn-dark: #d4a04a;
+  --bad-light: #b91c1c;
+  --bad-dark: #e06c75;
+
+  --viz-1-light: #18181b;
+  --viz-2-light: #3f3f46;
+  --viz-3-light: #52525b;
+  --viz-4-light: #71717a;
+  --viz-5-light: #8f8f99;
+  --viz-6-light: #a1a1aa;
+  --viz-7-light: #c4c4cc;
+  --viz-8-light: #d4d4d8;
+
+  --viz-1-dark: #f4f4f5;
+  --viz-2-dark: #a1a1aa;
+  --viz-3-dark: #71717a;
+  --viz-4-dark: #52525b;
+  --viz-5-dark: #3f3f46;
+  --viz-6-dark: #323238;
+  --viz-7-dark: #27272e;
+  --viz-8-dark: #202026;
 
   --bg-page: var(--color-background-primary, var(--bg-page-light));
   --bg-card: color-mix(in oklab, var(--color-background-secondary, var(--bg-card-light)) 95%, white 5%);
-  --bg-inset: color-mix(in oklab, var(--color-background-primary, var(--bg-inset-light)) 93%, black 7%);
+  --bg-inset: color-mix(in oklab, var(--color-background-primary, var(--bg-inset-light)) 94%, black 6%);
   --fg-primary: var(--color-text-primary, var(--fg-primary-light));
   --fg-muted: var(--color-text-secondary, var(--fg-muted-light));
-  --border-color: color-mix(in oklab, var(--color-border-primary, var(--border-light)) 88%, var(--fg-muted-light) 12%);
+  --border-color: color-mix(in oklab, var(--color-border-primary, var(--border-light)) 90%, var(--fg-muted-light) 10%);
   --control-border: var(--control-border-light);
+
+  --btn-primary-bg: var(--btn-primary-bg-light);
+  --btn-primary-fg: var(--btn-primary-fg-light);
   --accent: var(--accent-light);
-  --ok: var(--color-text-success, var(--ok-light));
-  --warn: var(--color-text-warning, var(--warn-light));
-  --bad: var(--color-text-danger, var(--bad-light));
-  --violet: var(--violet-light);
-  --card-shadow: 0 1px 2px rgb(0 0 0 / 0.05), 0 4px 12px rgb(0 0 0 / 0.03);
-  --drawer-shadow: -8px 0 32px rgb(0 0 0 / 0.18);
-  --scrollbar-track: #e4e4e7;
-  --scrollbar-thumb: #71717a;
+  --ok: var(--ok-light);
+  --warn: var(--warn-light);
+  --bad: var(--bad-light);
+
+  --viz-1: var(--viz-1-light);
+  --viz-2: var(--viz-2-light);
+  --viz-3: var(--viz-3-light);
+  --viz-4: var(--viz-4-light);
+  --viz-5: var(--viz-5-light);
+  --viz-6: var(--viz-6-light);
+  --viz-7: var(--viz-7-light);
+  --viz-8: var(--viz-8-light);
+
+  --card-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+  --drawer-shadow: -8px 0 28px rgb(0 0 0 / 0.14);
+  --scrollbar-track: #f4f4f5;
+  --scrollbar-thumb: #a1a1aa;
 
   @media (prefers-color-scheme: dark) {
     --bg-page: var(--color-background-primary, var(--bg-page-dark));
-    --bg-card: color-mix(in oklab, var(--color-background-secondary, var(--bg-card-dark)) 95%, white 5%);
-    --bg-inset: color-mix(in oklab, var(--color-background-primary, var(--bg-inset-dark)) 92%, black 8%);
+    --bg-card: color-mix(in oklab, var(--color-background-secondary, var(--bg-card-dark)) 96%, white 4%);
+    --bg-inset: color-mix(in oklab, var(--color-background-primary, var(--bg-inset-dark)) 93%, black 7%);
     --fg-primary: var(--color-text-primary, var(--fg-primary-dark));
     --fg-muted: var(--color-text-secondary, var(--fg-muted-dark));
-    --border-color: color-mix(in oklab, var(--color-border-primary, var(--border-dark)) 85%, var(--fg-muted-dark) 15%);
+    --border-color: color-mix(in oklab, var(--color-border-primary, var(--border-dark)) 88%, var(--fg-muted-dark) 12%);
     --control-border: var(--control-border-dark);
+
+    --btn-primary-bg: var(--btn-primary-bg-dark);
+    --btn-primary-fg: var(--btn-primary-fg-dark);
     --accent: var(--accent-dark);
-    --ok: var(--color-text-success, var(--ok-dark));
-    --warn: var(--color-text-warning, var(--warn-dark));
-    --bad: var(--color-text-danger, var(--bad-dark));
-    --violet: var(--violet-dark);
-    --card-shadow: 0 1px 2px rgb(0 0 0 / 0.35), inset 0 1px 0 rgb(255 255 255 / 0.04);
-    --drawer-shadow: -12px 0 40px rgb(0 0 0 / 0.55);
-    --scrollbar-track: #18181b;
-    --scrollbar-thumb: #52525b;
+    --ok: var(--ok-dark);
+    --warn: var(--warn-dark);
+    --bad: var(--bad-dark);
+
+    --viz-1: var(--viz-1-dark);
+    --viz-2: var(--viz-2-dark);
+    --viz-3: var(--viz-3-dark);
+    --viz-4: var(--viz-4-dark);
+    --viz-5: var(--viz-5-dark);
+    --viz-6: var(--viz-6-dark);
+    --viz-7: var(--viz-7-dark);
+    --viz-8: var(--viz-8-dark);
+
+    --card-shadow: none;
+    --drawer-shadow: -12px 0 36px rgb(0 0 0 / 0.55);
+    --scrollbar-track: #141418;
+    --scrollbar-thumb: #3f3f46;
   }
 
   @supports (color: light-dark(white, black)) {
     --bg-page: var(--color-background-primary, light-dark(var(--bg-page-light), var(--bg-page-dark)));
     --bg-card: color-mix(in oklab, var(--color-background-secondary, light-dark(var(--bg-card-light), var(--bg-card-dark))) 95%, white 5%);
-    --bg-inset: color-mix(in oklab, var(--color-background-primary, light-dark(var(--bg-inset-light), var(--bg-inset-dark))) 93%, black 7%);
+    --bg-inset: color-mix(in oklab, var(--color-background-primary, light-dark(var(--bg-inset-light), var(--bg-inset-dark))) 94%, black 6%);
     --fg-primary: var(--color-text-primary, light-dark(var(--fg-primary-light), var(--fg-primary-dark)));
     --fg-muted: var(--color-text-secondary, light-dark(var(--fg-muted-light), var(--fg-muted-dark)));
-    --border-color: color-mix(in oklab, var(--color-border-primary, light-dark(var(--border-light), var(--border-dark))) 86%, var(--fg-muted) 14%);
+    --border-color: color-mix(in oklab, var(--color-border-primary, light-dark(var(--border-light), var(--border-dark))) 88%, var(--fg-muted) 12%);
     --control-border: light-dark(var(--control-border-light), var(--control-border-dark));
+
+    --btn-primary-bg: light-dark(var(--btn-primary-bg-light), var(--btn-primary-bg-dark));
+    --btn-primary-fg: light-dark(var(--btn-primary-fg-light), var(--btn-primary-fg-dark));
     --accent: light-dark(var(--accent-light), var(--accent-dark));
-    --ok: var(--color-text-success, light-dark(var(--ok-light), var(--ok-dark)));
-    --warn: var(--color-text-warning, light-dark(var(--warn-light), var(--warn-dark)));
-    --bad: var(--color-text-danger, light-dark(var(--bad-light), var(--bad-dark)));
-    --violet: light-dark(var(--violet-light), var(--violet-dark));
-    --scrollbar-track: light-dark(#e4e4e7, #18181b);
-    --scrollbar-thumb: light-dark(#71717a, #52525b);
+    --ok: light-dark(var(--ok-light), var(--ok-dark));
+    --warn: light-dark(var(--warn-light), var(--warn-dark));
+    --bad: light-dark(var(--bad-light), var(--bad-dark));
+
+    --viz-1: light-dark(var(--viz-1-light), var(--viz-1-dark));
+    --viz-2: light-dark(var(--viz-2-light), var(--viz-2-dark));
+    --viz-3: light-dark(var(--viz-3-light), var(--viz-3-dark));
+    --viz-4: light-dark(var(--viz-4-light), var(--viz-4-dark));
+    --viz-5: light-dark(var(--viz-5-light), var(--viz-5-dark));
+    --viz-6: light-dark(var(--viz-6-light), var(--viz-6-dark));
+    --viz-7: light-dark(var(--viz-7-light), var(--viz-7-dark));
+    --viz-8: light-dark(var(--viz-8-light), var(--viz-8-dark));
+
+    --scrollbar-track: light-dark(#f4f4f5, #141418);
+    --scrollbar-thumb: light-dark(#a1a1aa, #3f3f46);
   }
 
-  accent-color: var(--accent);
+  accent-color: var(--fg-primary);
   scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
 }
 
@@ -102,14 +159,14 @@ html {
 
 html[data-theme="dark"] {
   color-scheme: dark;
-  --card-shadow: 0 1px 2px rgb(0 0 0 / 0.35), inset 0 1px 0 rgb(255 255 255 / 0.04);
-  --drawer-shadow: -12px 0 40px rgb(0 0 0 / 0.55);
+  --card-shadow: none;
+  --drawer-shadow: -12px 0 36px rgb(0 0 0 / 0.55);
 }
 
 html[data-theme="light"] {
   color-scheme: light;
-  --card-shadow: 0 1px 2px rgb(0 0 0 / 0.05), 0 4px 12px rgb(0 0 0 / 0.03);
-  --drawer-shadow: -8px 0 32px rgb(0 0 0 / 0.18);
+  --card-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+  --drawer-shadow: -8px 0 28px rgb(0 0 0 / 0.14);
 }
 
 *,
@@ -138,7 +195,7 @@ body {
   container-type: inline-size;
 }
 
-/* Compact Sticky Header with Auto-Hide on Scroll Down */
+/* Compact Sticky Header */
 .topbar {
   position: sticky;
   top: 0;
@@ -150,9 +207,9 @@ body {
   gap: 0.5rem;
   padding: 0.55rem 0.75rem;
   margin-inline: -0.75rem;
-  background: color-mix(in oklab, var(--bg-page) 88%, transparent);
-  backdrop-filter: blur(12px);
-  border-bottom: 1px solid color-mix(in oklab, var(--border-color) 80%, transparent);
+  background: color-mix(in oklab, var(--bg-page) 92%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border-color);
   transition: transform 0.2s ease;
 }
 
@@ -174,10 +231,10 @@ body {
 }
 
 .brand-mark {
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   flex: none;
-  border-radius: 6px;
+  color: var(--fg-primary);
 }
 
 .brand-text {
@@ -189,61 +246,30 @@ body {
 .brand-title-row {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.45rem;
 }
 
 .brand-block h1 {
   margin: 0;
-  font-size: 0.92rem;
-  font-weight: 700;
+  font-size: 0.9rem;
+  font-weight: 600;
   letter-spacing: -0.02em;
   white-space: nowrap;
 }
 
-.status-dot {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0.1rem 0.42rem;
-  border-radius: 999px;
-  font-size: 0.64rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  background: color-mix(in oklab, var(--accent) 14%, transparent);
-  color: var(--accent);
-}
-
-.status-dot.live {
-  background: color-mix(in oklab, var(--ok) 15%, transparent);
-  color: var(--ok);
-}
-
-.status-dot.demo {
-  background: color-mix(in oklab, var(--warn) 16%, transparent);
-  color: var(--warn);
-}
-
-.status-dot::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
 .meta-line {
-  font-size: 0.7rem;
+  font-size: 0.69rem;
   color: var(--fg-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
 }
 
 .cmd-actions {
   display: flex;
   align-items: center;
-  gap: 0.38rem;
+  gap: 0.35rem;
   flex: none;
 }
 
@@ -254,53 +280,54 @@ body {
 }
 
 .search-input {
-  width: 148px;
-  padding: 0.34rem 1.65rem 0.34rem 0.55rem;
+  width: 146px;
+  padding: 0.32rem 1.55rem 0.32rem 0.55rem;
   font-family: inherit;
-  font-size: 0.75rem;
+  font-size: 0.74rem;
   border-radius: 6px;
   border: 1px solid var(--control-border);
   background: var(--bg-card);
   color: var(--fg-primary);
-  transition: width 0.18s ease, border-color 0.15s ease;
+  transition: width 0.16s ease, border-color 0.15s ease;
 }
 
 .search-input:focus {
-  outline: 2px solid color-mix(in oklab, var(--accent) 35%, transparent);
-  border-color: var(--accent);
-  width: 185px;
+  outline: 1.5px solid var(--fg-primary);
+  outline-offset: 0;
+  border-color: var(--fg-primary);
+  width: 180px;
 }
 
 .kbd-hint {
   position: absolute;
   right: 6px;
-  font-size: 0.64rem;
+  font-size: 0.62rem;
   font-weight: 600;
   color: var(--fg-muted);
   padding: 0 4px;
   border: 1px solid var(--border-color);
-  border-radius: 4px;
+  border-radius: 3px;
   pointer-events: none;
 }
 
 @container (width < 520px) {
   .search-input {
-    width: 96px;
+    width: 92px;
   }
   .search-input:focus {
-    width: 132px;
+    width: 128px;
   }
   .meta-line {
     display: none;
   }
 }
 
-/* Controls & Buttons */
+/* Restrained Hairline & Inverted Monochrome Buttons */
 button {
   font-family: inherit;
-  font-size: 0.76rem;
-  font-weight: 600;
-  padding: 0.38rem 0.7rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.36rem 0.68rem;
   border-radius: 6px;
   border: 1px solid var(--control-border);
   background: var(--bg-card);
@@ -310,7 +337,7 @@ button {
   align-items: center;
   justify-content: center;
   gap: 0.3rem;
-  transition: background-color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+  transition: background-color 0.14s ease, border-color 0.14s ease, opacity 0.14s ease;
 }
 
 button:hover:not(:disabled) {
@@ -319,23 +346,25 @@ button:hover:not(:disabled) {
 }
 
 button:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--fg-primary);
   outline-offset: 1px;
 }
 
 button:disabled {
-  opacity: 0.48;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
 button.primary {
-  background: var(--accent);
-  color: #ffffff;
-  border-color: var(--accent);
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-fg);
+  border-color: var(--btn-primary-bg);
+  font-weight: 600;
 }
 
 button.primary:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--accent) 88%, black);
+  opacity: 0.88;
+  background: var(--btn-primary-bg);
 }
 
 button.small {
@@ -346,25 +375,28 @@ button.small {
 button.ghost {
   border-color: transparent;
   background: transparent;
+  color: var(--fg-muted);
 }
 
 button.ghost:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--fg-muted) 12%, transparent);
+  background: var(--bg-inset);
+  color: var(--fg-primary);
 }
 
 button.ticker-link {
-  padding: 0.12rem 0.32rem;
-  margin-left: -0.32rem;
+  padding: 0.1rem 0.3rem;
+  margin-left: -0.3rem;
   border-color: transparent;
   background: transparent;
-  font-weight: 700;
-  font-size: 0.8rem;
+  font-weight: 600;
+  font-size: 0.79rem;
   color: var(--fg-primary);
 }
 
 button.ticker-link:hover {
-  background: color-mix(in oklab, var(--accent) 12%, transparent);
-  color: var(--accent);
+  background: var(--bg-inset);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .actions-row {
@@ -375,11 +407,11 @@ button.ticker-link:hover {
 }
 
 .toast {
-  font-size: 0.76rem;
-  padding: 0.45rem 0.7rem;
-  border-radius: 8px;
-  background: color-mix(in oklab, var(--accent) 10%, var(--bg-card));
-  border: 1px solid color-mix(in oklab, var(--accent) 45%, transparent);
+  font-size: 0.75rem;
+  padding: 0.44rem 0.7rem;
+  border-radius: 6px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-color);
   color: var(--fg-primary);
 }
 
@@ -389,19 +421,19 @@ button.ticker-link:hover {
   justify-content: space-between;
   align-items: center;
   gap: 0.5rem;
-  font-size: 0.76rem;
-  padding: 0.48rem 0.75rem;
-  border-radius: 8px;
-  background: color-mix(in oklab, var(--warn) 10%, var(--bg-card));
-  border: 1px solid color-mix(in oklab, var(--warn) 50%, transparent);
+  font-size: 0.75rem;
+  padding: 0.45rem 0.72rem;
+  border-radius: 7px;
+  background: var(--bg-inset);
+  border: 1px solid color-mix(in oklab, var(--warn) 45%, var(--border-color));
   color: var(--fg-primary);
 }
 
-/* Segmented Toggle & Tabs */
+/* Segmented Controls & Tabs */
 .seg-switch {
   display: inline-flex;
   padding: 2px;
-  border-radius: 7px;
+  border-radius: 6px;
   background: var(--bg-inset);
   border: 1px solid var(--border-color);
   gap: 2px;
@@ -410,23 +442,24 @@ button.ticker-link:hover {
 .seg-switch button {
   border: none;
   background: transparent;
-  padding: 0.22rem 0.55rem;
-  font-size: 0.71rem;
+  padding: 0.2rem 0.54rem;
+  font-size: 0.7rem;
   color: var(--fg-muted);
-  border-radius: 5px;
+  border-radius: 4px;
 }
 
 .seg-switch button[aria-pressed="true"] {
   background: var(--bg-card);
   color: var(--fg-primary);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.12);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.1);
 }
 
 .tablist {
   display: flex;
   flex-wrap: nowrap;
   overflow-x: auto;
-  gap: 0.2rem;
+  gap: 0.15rem;
   border-bottom: 1px solid var(--border-color);
   scrollbar-width: thin;
 }
@@ -436,43 +469,44 @@ button.ticker-link:hover {
   flex: none;
   background: transparent;
   border: none;
-  border-radius: 6px 6px 0 0;
-  padding: 0.48rem 0.8rem;
-  font-size: 0.78rem;
-  font-weight: 600;
+  border-radius: 5px 5px 0 0;
+  padding: 0.46rem 0.76rem;
+  font-size: 0.77rem;
+  font-weight: 500;
   color: var(--fg-muted);
   white-space: nowrap;
 }
 
 .tablist [role="tab"]:hover {
   color: var(--fg-primary);
-  background: color-mix(in oklab, var(--fg-muted) 8%, transparent);
+  background: var(--bg-inset);
 }
 
 .tablist [role="tab"][aria-selected="true"] {
   color: var(--fg-primary);
+  font-weight: 600;
 }
 
 .tablist [role="tab"][aria-selected="true"]::after {
   content: "";
   position: absolute;
   inset: auto 0 0;
-  border-block-end: 2.5px solid var(--accent);
+  border-block-end: 2px solid var(--fg-primary);
 }
 
 /* Keep padding strictly on .panel-body, never on [role="tabpanel"] */
 .panel-body {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 0.72rem;
   padding-top: 0.1rem;
 }
 
-/* Surface Cards & Grids */
+/* Flat Hairline Cards */
 .card {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: 8px;
   padding: 0.75rem 0.85rem;
   box-shadow: var(--card-shadow);
 }
@@ -480,7 +514,7 @@ button.ticker-link:hover {
 .hub-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
-  gap: 0.75rem;
+  gap: 0.72rem;
 }
 
 .section-head {
@@ -494,36 +528,35 @@ button.ticker-link:hover {
 
 .section-title {
   margin: 0;
-  font-size: 0.84rem;
-  font-weight: 700;
+  font-size: 0.82rem;
+  font-weight: 600;
   letter-spacing: -0.01em;
 }
 
 .micro-label {
-  font-size: 0.68rem;
+  font-size: 0.66rem;
   color: var(--fg-muted);
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
 }
 
 .muted-sub {
-  font-size: 0.73rem;
+  font-size: 0.72rem;
   color: var(--fg-muted);
   font-variant-numeric: tabular-nums;
 }
 
-/* Hero Wealth Card */
+/* Linear-Style Hero Summary */
 .hero-card {
-  background:
-    linear-gradient(135deg var(--in-oklab), color-mix(in oklab, var(--accent) 8%, var(--bg-card)), var(--bg-card) 55%);
-  border: 1px solid color-mix(in oklab, var(--accent) 24%, var(--border-color));
-  border-radius: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
   padding: 0.9rem 1rem;
   box-shadow: var(--card-shadow);
   display: flex;
   flex-direction: column;
-  gap: 0.7rem;
+  gap: 0.72rem;
 }
 
 .hero-top {
@@ -538,13 +571,13 @@ button.ticker-link:hover {
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
-  gap: 0.55rem;
+  gap: 0.6rem;
   margin-top: 0.25rem;
 }
 
 .hero-nav {
-  font-size: 1.82rem;
-  font-weight: 700;
+  font-size: 1.88rem;
+  font-weight: 600;
   letter-spacing: -0.03em;
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
@@ -553,7 +586,7 @@ button.ticker-link:hover {
 .hero-right {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.55rem;
+  gap: 0.5rem;
   align-items: center;
 }
 
@@ -561,8 +594,8 @@ button.ticker-link:hover {
   display: flex;
   align-items: center;
   gap: 0.55rem;
-  padding: 0.42rem 0.6rem;
-  border-radius: 8px;
+  padding: 0.36rem 0.58rem;
+  border-radius: 6px;
   background: var(--bg-inset);
   border: 1px solid var(--border-color);
 }
@@ -570,9 +603,9 @@ button.ticker-link:hover {
 .hero-metrics-bar {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
-  gap: 0.55rem;
-  padding-top: 0.6rem;
-  border-top: 1px solid color-mix(in oklab, var(--border-color) 75%, transparent);
+  gap: 0.65rem;
+  padding-top: 0.68rem;
+  border-top: 1px solid var(--border-color);
 }
 
 .metric-cell {
@@ -582,21 +615,21 @@ button.ticker-link:hover {
 }
 
 .metric-val {
-  font-size: 0.94rem;
-  font-weight: 700;
+  font-size: 0.92rem;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
-/* Interactive Multi-Segment Allocation Strip */
+/* Monochrome Tonal Allocation Strip */
 .alloc-wrap {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.38rem;
 }
 
 .alloc-strip {
   display: flex;
-  height: 10px;
+  height: 7px;
   width: 100%;
   border-radius: 999px;
   overflow: hidden;
@@ -610,22 +643,21 @@ button.ticker-link:hover {
   margin: 0;
   height: 100%;
   min-width: 6px;
-  border-radius: 2px;
+  border-radius: 1.5px;
   cursor: pointer;
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  transition: opacity 0.14s ease;
 }
 
 .alloc-seg:hover:not(:disabled) {
-  opacity: 0.85;
-  transform: scaleY(1.18);
+  opacity: 0.72;
   background: var(--seg-color);
 }
 
 .alloc-legend-mini {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.35rem 0.7rem;
-  font-size: 0.7rem;
+  gap: 0.25rem 0.65rem;
+  font-size: 0.69rem;
   color: var(--fg-muted);
 }
 
@@ -637,65 +669,79 @@ button.ticker-link:hover {
   background: transparent;
   padding: 1px 4px;
   border-radius: 4px;
-  font-size: 0.7rem;
+  font-size: 0.69rem;
   color: var(--fg-muted);
   font-variant-numeric: tabular-nums;
 }
 
 .alloc-tag:hover:not(:disabled) {
   color: var(--fg-primary);
-  background: color-mix(in oklab, var(--fg-muted) 10%, transparent);
+  background: var(--bg-inset);
 }
 
 .swatch {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 2px;
   flex: none;
 }
 
-/* Soft Tinted Semantic Chips (WCAG accessible text + icon paired) */
-.chip {
+/* Restrained Linear Status Tags & Bare Numeric Deltas */
+.status-tag {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  padding: 0.14rem 0.48rem;
-  border-radius: 999px;
+  gap: 5px;
+  padding: 0.12rem 0.45rem;
+  border-radius: 5px;
   font-size: 0.67rem;
-  font-weight: 700;
+  font-weight: 500;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
-  border: 1px solid transparent;
-}
-
-.chip.ok {
-  background: color-mix(in oklab, var(--ok) 14%, transparent);
-  color: var(--ok);
-  border-color: color-mix(in oklab, var(--ok) 28%, transparent);
-}
-
-.chip.warn {
-  background: color-mix(in oklab, var(--warn) 15%, transparent);
-  color: var(--warn);
-  border-color: color-mix(in oklab, var(--warn) 30%, transparent);
-}
-
-.chip.bad {
-  background: color-mix(in oklab, var(--bad) 14%, transparent);
-  color: var(--bad);
-  border-color: color-mix(in oklab, var(--bad) 28%, transparent);
-}
-
-.chip.accent {
-  background: color-mix(in oklab, var(--accent) 14%, transparent);
-  color: var(--accent);
-  border-color: color-mix(in oklab, var(--accent) 28%, transparent);
-}
-
-.chip.muted {
   background: var(--bg-inset);
+  border: 1px solid var(--border-color);
+  color: var(--fg-primary);
+}
+
+.status-tag.quiet {
+  border-color: transparent;
+  background: transparent;
   color: var(--fg-muted);
-  border-color: var(--border-color);
+  padding-inline: 0.2rem;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--fg-muted);
+}
+
+.dot.ok {
+  background: var(--ok);
+}
+
+.dot.warn {
+  background: var(--warn);
+}
+
+.dot.bad {
+  background: var(--bad);
+}
+
+.delta-text {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 0.74rem;
+  white-space: nowrap;
+}
+
+.pos-ok {
+  color: var(--ok);
+}
+
+.pos-bad {
+  color: var(--bad);
 }
 
 /* Donut Ring & Legend */
@@ -726,8 +772,8 @@ button.ticker-link:hover {
 }
 
 .donut-center-val {
-  font-size: 0.88rem;
-  font-weight: 700;
+  font-size: 0.86rem;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
@@ -735,7 +781,7 @@ button.ticker-link:hover {
   flex: 1 1 180px;
   display: flex;
   flex-direction: column;
-  gap: 0.22rem;
+  gap: 0.18rem;
   margin: 0;
 }
 
@@ -744,11 +790,11 @@ button.ticker-link:hover {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 0.25rem 0.4rem;
-  border-radius: 6px;
+  padding: 0.24rem 0.42rem;
+  border-radius: 5px;
   border: 1px solid transparent;
   background: transparent;
-  font-size: 0.74rem;
+  font-size: 0.73rem;
   font-weight: 500;
 }
 
@@ -769,11 +815,11 @@ button.ticker-link:hover {
   color: var(--fg-muted);
 }
 
-/* Dual-Tone Look-Through Stacked Bars */
+/* Monochrome Dual-Tone Look-Through Bars */
 .lt-list {
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+  gap: 0.34rem;
 }
 
 .lt-btn {
@@ -782,8 +828,8 @@ button.ticker-link:hover {
   flex-direction: column;
   align-items: stretch;
   gap: 4px;
-  padding: 0.34rem 0.45rem;
-  border-radius: 6px;
+  padding: 0.32rem 0.42rem;
+  border-radius: 5px;
   border: 1px solid transparent;
   background: transparent;
 }
@@ -797,12 +843,12 @@ button.ticker-link:hover {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 0.74rem;
+  font-size: 0.73rem;
   font-variant-numeric: tabular-nums;
 }
 
 .lt-track {
-  height: 7px;
+  height: 5px;
   width: 100%;
   border-radius: 999px;
   background: var(--bg-inset);
@@ -813,29 +859,29 @@ button.ticker-link:hover {
 
 .lt-direct {
   height: 100%;
-  background: var(--accent);
+  background: var(--viz-1);
 }
 
 .lt-etf {
   height: 100%;
-  background: color-mix(in oklab, var(--violet) 72%, transparent);
+  background: var(--viz-3);
 }
 
-/* Risk Guardrail Meters with Threshold Notch */
+/* Risk Guardrails (Calm Neutral Steel vs Muted Crimson Breach) */
 .cap-list {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-  gap: 0.6rem 0.85rem;
+  gap: 0.55rem 0.75rem;
 }
 
 .cap-row {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 0.35rem 0.45rem;
-  border-radius: 7px;
-  background: color-mix(in oklab, var(--bg-inset) 55%, transparent);
-  border: 1px solid color-mix(in oklab, var(--border-color) 70%, transparent);
+  gap: 5px;
+  padding: 0.42rem 0.52rem;
+  border-radius: 6px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-color);
 }
 
 .cap-row.clickable {
@@ -843,7 +889,7 @@ button.ticker-link:hover {
 }
 
 .cap-row.clickable:hover {
-  border-color: var(--accent);
+  border-color: var(--fg-muted);
 }
 
 .cap-head {
@@ -851,16 +897,16 @@ button.ticker-link:hover {
   justify-content: space-between;
   align-items: center;
   gap: 0.35rem;
-  font-size: 0.74rem;
+  font-size: 0.73rem;
   font-variant-numeric: tabular-nums;
 }
 
 .cap-meter {
   position: relative;
-  height: 7px;
+  height: 5px;
   width: 100%;
   border-radius: 999px;
-  background: var(--bg-inset);
+  background: color-mix(in oklab, var(--border-color) 65%, transparent);
   overflow: visible;
 }
 
@@ -870,7 +916,7 @@ button.ticker-link:hover {
 }
 
 .cap-fill.pass {
-  background: var(--ok);
+  background: var(--viz-3);
 }
 
 .cap-fill.breach {
@@ -881,9 +927,9 @@ button.ticker-link:hover {
   position: absolute;
   top: -2px;
   bottom: -2px;
-  width: 2px;
+  width: 1.5px;
   background: var(--fg-primary);
-  opacity: 0.65;
+  opacity: 0.7;
   border-radius: 1px;
 }
 
@@ -903,13 +949,13 @@ button.ticker-link:hover {
 .sim-field label {
   display: flex;
   justify-content: space-between;
-  font-size: 0.76rem;
+  font-size: 0.75rem;
   font-weight: 600;
 }
 
 .sim-field input[type="range"] {
   width: 100%;
-  height: 6px;
+  height: 5px;
   cursor: pointer;
 }
 
@@ -928,17 +974,17 @@ button.ticker-link:hover {
   border-top: 1px solid var(--border-color);
 }
 
-/* Price-to-Trigger Zone Ruler */
+/* Minimalist Hairline Trigger Ruler */
 .ruler-block {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  margin-top: 0.35rem;
+  margin-top: 0.3rem;
 }
 
 .ruler-track {
   position: relative;
-  height: 8px;
+  height: 5px;
   width: 100%;
   border-radius: 999px;
   background: var(--bg-inset);
@@ -950,14 +996,14 @@ button.ticker-link:hover {
   top: 0;
   bottom: 0;
   border-radius: 999px;
-  background: color-mix(in oklab, var(--ok) 38%, transparent);
+  background: color-mix(in oklab, var(--ok) 45%, transparent);
 }
 
 .ruler-trim-tick {
   position: absolute;
   top: -3px;
   bottom: -3px;
-  width: 2px;
+  width: 1.5px;
   background: var(--bad);
   border-radius: 1px;
 }
@@ -965,24 +1011,24 @@ button.ticker-link:hover {
 .ruler-pin {
   position: absolute;
   top: 50%;
-  width: 11px;
-  height: 11px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   transform: translate(-50%, -50%);
   background: var(--fg-primary);
   border: 2px solid var(--bg-card);
-  box-shadow: 0 0 0 1px var(--accent);
+  box-shadow: 0 0 0 1px var(--fg-primary);
 }
 
 .ruler-labels {
   display: flex;
   justify-content: space-between;
-  font-size: 0.68rem;
+  font-size: 0.67rem;
   color: var(--fg-muted);
   font-variant-numeric: tabular-nums;
 }
 
-/* Tables with @container & Clickable Rows */
+/* Clean Institutional Tables */
 .desk-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -994,10 +1040,10 @@ button.ticker-link:hover {
 .table-wrapper {
   overflow: auto;
   max-inline-size: 100%;
-  max-block-size: min(490px, 68vh);
+  max-block-size: min(500px, 68vh);
   container-type: inline-size;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--bg-card);
   box-shadow: var(--card-shadow);
 }
@@ -1006,22 +1052,23 @@ table {
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
-  font-size: 0.76rem;
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
 }
 
 caption {
   text-align: left;
-  padding: 0.5rem 0.7rem;
-  font-weight: 700;
-  font-size: 0.79rem;
+  padding: 0.48rem 0.68rem;
+  font-weight: 600;
+  font-size: 0.76rem;
+  color: var(--fg-muted);
   background: var(--bg-inset);
   border-bottom: 1px solid var(--border-color);
 }
 
 th,
 td {
-  padding: 0.45rem 0.6rem;
+  padding: 0.44rem 0.6rem;
   border-bottom: 1px solid var(--border-color);
   text-align: left;
   white-space: nowrap;
@@ -1033,22 +1080,22 @@ thead th {
   inset-block-start: 0;
   z-index: 2;
   background: var(--bg-inset);
-  font-weight: 700;
-  font-size: 0.7rem;
+  font-weight: 600;
+  font-size: 0.67rem;
   color: var(--fg-muted);
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.04em;
 }
 
 th button.sort-btn {
   border: none;
   background: transparent;
   padding: 0;
-  font-size: 0.7rem;
-  font-weight: 700;
+  font-size: 0.67rem;
+  font-weight: 600;
   color: var(--fg-muted);
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.04em;
 }
 
 th button.sort-btn:hover {
@@ -1061,7 +1108,7 @@ tbody th {
   inset-inline-start: 0;
   z-index: 1;
   background: var(--bg-card);
-  font-weight: 700;
+  font-weight: 600;
 }
 
 tbody tr.clickable-row {
@@ -1070,7 +1117,7 @@ tbody tr.clickable-row {
 
 tbody tr.clickable-row:hover td,
 tbody tr.clickable-row:hover th {
-  background: color-mix(in oklab, var(--accent) 6%, var(--bg-card));
+  background: var(--bg-inset);
 }
 
 .num {
@@ -1078,7 +1125,7 @@ tbody tr.clickable-row:hover th {
 }
 
 .spark-cell {
-  width: 84px;
+  width: 82px;
 }
 
 @container (width < 520px) {
@@ -1098,7 +1145,7 @@ tbody tr.clickable-row:hover th {
   tr {
     margin: 0.45rem;
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: 7px;
     overflow: hidden;
   }
 
@@ -1120,7 +1167,7 @@ tbody tr.clickable-row:hover th {
 
   td::before {
     content: attr(data-label) ": ";
-    font-weight: 600;
+    font-weight: 500;
     color: var(--fg-muted);
   }
 
@@ -1139,17 +1186,17 @@ tbody tr.clickable-row:hover th {
 .thesis-card {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
-  border-radius: 10px;
-  padding: 0.7rem 0.78rem;
+  border-radius: 8px;
+  padding: 0.72rem 0.8rem;
   box-shadow: var(--card-shadow);
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
-  transition: border-color 0.15s ease;
+  transition: border-color 0.14s ease;
 }
 
 .thesis-card:hover {
-  border-color: color-mix(in oklab, var(--accent) 55%, var(--border-color));
+  border-color: var(--fg-muted);
 }
 
 .thesis-head {
@@ -1168,7 +1215,7 @@ tbody tr.clickable-row:hover th {
 
 .thesis-price {
   font-size: 1.05rem;
-  font-weight: 700;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1180,7 +1227,7 @@ tbody tr.clickable-row:hover th {
   gap: 0.6rem;
   padding: 0.48rem 0;
   border-bottom: 1px solid var(--border-color);
-  font-size: 0.75rem;
+  font-size: 0.74rem;
 }
 
 .timeline-item:last-child {
@@ -1194,7 +1241,7 @@ tbody tr.clickable-row:hover th {
   gap: 0.4rem;
   padding: 0.36rem 0;
   border-bottom: 1px solid var(--border-color);
-  font-size: 0.74rem;
+  font-size: 0.73rem;
 }
 
 .filing-item:last-child {
@@ -1205,7 +1252,7 @@ tbody tr.clickable-row:hover th {
 .onboarding-card {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: 8px;
   padding: 1.35rem;
   box-shadow: var(--card-shadow);
   display: flex;
@@ -1215,7 +1262,8 @@ tbody tr.clickable-row:hover th {
 
 .onboarding-card h2 {
   margin: 0;
-  font-size: 1.08rem;
+  font-size: 1.05rem;
+  font-weight: 600;
 }
 
 .onboarding-card p {
@@ -1227,21 +1275,13 @@ tbody tr.clickable-row:hover th {
   margin: 0;
   padding-left: 1.2rem;
   color: var(--fg-muted);
-  font-size: 0.8rem;
+  font-size: 0.79rem;
 }
 
 .empty-state {
   padding: 1.35rem;
   text-align: center;
   color: var(--fg-muted);
-}
-
-.pos-ok {
-  color: var(--ok);
-}
-
-.pos-bad {
-  color: var(--bad);
 }
 
 /* Slide-Over Stock Inspector Drawer (dialog + animate-to-from-top-layer) */
@@ -1330,8 +1370,8 @@ dialog#stock-inspector::backdrop {
 
 .drawer-head h1 {
   margin: 0;
-  font-size: 1.05rem;
-  font-weight: 700;
+  font-size: 1rem;
+  font-weight: 600;
   letter-spacing: -0.02em;
 }
 
@@ -1341,13 +1381,13 @@ dialog#stock-inspector::backdrop {
   padding: 0.9rem 1rem;
   display: flex;
   flex-direction: column;
-  gap: 0.85rem;
+  gap: 0.8rem;
 }
 
 .drawer-section {
   background: var(--bg-inset);
   border: 1px solid var(--border-color);
-  border-radius: 9px;
+  border-radius: 7px;
   padding: 0.7rem 0.8rem;
   display: flex;
   flex-direction: column;
@@ -1363,7 +1403,7 @@ dialog#stock-inspector::backdrop {
 .drawer-list {
   margin: 0;
   padding-left: 1.15rem;
-  font-size: 0.76rem;
+  font-size: 0.75rem;
 }
 
 .drawer-list li + li {
@@ -1380,14 +1420,14 @@ dialog#stock-inspector::backdrop {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  font-size: 0.71rem;
+  font-size: 0.7rem;
   font-weight: 600;
   color: var(--fg-muted);
 }
 
 .drawer-edit-grid input[type="number"] {
   padding: 0.34rem 0.45rem;
-  font-size: 0.78rem;
+  font-size: 0.77rem;
   border-radius: 6px;
   border: 1px solid var(--control-border);
   background: var(--bg-card);
@@ -1410,7 +1450,7 @@ dialog#stock-inspector::backdrop {
   .hero-card,
   .thesis-card,
   .drawer-section,
-  .chip,
+  .status-tag,
   .cap-meter,
   .ruler-track,
   .table-wrapper,
@@ -1423,7 +1463,8 @@ dialog#stock-inspector::backdrop {
   .lt-direct,
   .lt-etf,
   .alloc-seg,
-  .ruler-pin {
+  .ruler-pin,
+  .dot {
     forced-color-adjust: none;
     background: Highlight;
   }

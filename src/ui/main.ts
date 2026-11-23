@@ -215,14 +215,14 @@ const TABS: { id: TabId; label: string }[] = [
 ];
 
 const SLICE_PALETTE = [
-  "#3b82f6",
-  "#10b981",
-  "#8b5cf6",
-  "#f59e0b",
-  "#06b6d4",
-  "#ec4899",
-  "#64748b",
-  "#a1a1aa",
+  "var(--viz-1)",
+  "var(--viz-2)",
+  "var(--viz-3)",
+  "var(--viz-4)",
+  "var(--viz-5)",
+  "var(--viz-6)",
+  "var(--viz-7)",
+  "var(--viz-8)",
 ];
 
 const app = new App({ name: "Investment OS", version: "0.2.0" }, {});
@@ -289,13 +289,22 @@ function fmtPct(n: number | null | undefined, digits = 1): string {
   return `${n.toFixed(digits)}%`;
 }
 
-function fmtDeltaChip(pct: number | null | undefined, suffix = ""): string {
+function fmtDeltaText(pct: number | null | undefined, suffix = ""): string {
   if (pct === null || pct === undefined || Number.isNaN(pct)) {
-    return `<span class="chip muted">—</span>`;
+    return `<span class="delta-text muted-sub">—</span>`;
   }
-  const cls = pct > 0.01 ? "ok" : pct < -0.01 ? "bad" : "muted";
-  const arrow = pct > 0.01 ? "▲ +" : pct < -0.01 ? "▼ " : "";
-  return `<span class="chip ${cls}">${arrow}${pct.toFixed(2)}%${suffix ? ` ${esc(suffix)}` : ""}</span>`;
+  const cls = pct > 0.01 ? "pos-ok" : pct < -0.01 ? "pos-bad" : "muted-sub";
+  const prefix = pct > 0.01 ? "+" : "";
+  return `<span class="delta-text ${cls}">${prefix}${pct.toFixed(2)}%${suffix ? ` ${esc(suffix)}` : ""}</span>`;
+}
+
+function fmtDeltaTag(pct: number | null | undefined, suffix = ""): string {
+  if (pct === null || pct === undefined || Number.isNaN(pct)) {
+    return `<span class="status-tag quiet"><span class="dot"></span>—</span>`;
+  }
+  const dotCls = pct > 0.01 ? "ok" : pct < -0.01 ? "bad" : "";
+  const prefix = pct > 0.01 ? "+" : "";
+  return `<span class="status-tag"><span class="dot ${dotCls}"></span>${prefix}${pct.toFixed(2)}%${suffix ? ` ${esc(suffix)}` : ""}</span>`;
 }
 
 function computeUsEstateTaxUsd(usSitusUsd: number): { netTaxUsd: number; marginalPct: number } {
@@ -343,10 +352,10 @@ function applyThemeContext(ctx?: McpUiHostContext): void {
 
 function statusChip(status: string): string {
   const s = status.toUpperCase();
-  if (s.includes("BUY")) return `<span class="chip ok">● ${esc(status)}</span>`;
-  if (s.includes("TRIM") || s.includes("EXIT")) return `<span class="chip bad">▲ ${esc(status)}</span>`;
-  if (s.includes("GATE") || s.includes("DEEP")) return `<span class="chip warn">■ ${esc(status)}</span>`;
-  return `<span class="chip muted">${esc(status)}</span>`;
+  if (s.includes("BUY")) return `<span class="status-tag"><span class="dot ok"></span>${esc(status)}</span>`;
+  if (s.includes("TRIM") || s.includes("EXIT")) return `<span class="status-tag"><span class="dot bad"></span>${esc(status)}</span>`;
+  if (s.includes("GATE") || s.includes("DEEP")) return `<span class="status-tag"><span class="dot warn"></span>${esc(status)}</span>`;
+  return `<span class="status-tag quiet"><span class="dot"></span>${esc(status)}</span>`;
 }
 
 function daysUntilLabel(isoDate: string): { label: string; cls: string } {
@@ -357,18 +366,25 @@ function daysUntilLabel(isoDate: string): { label: string; cls: string } {
   const diffDays = Math.round((target - todayUtc) / 86_400_000);
   if (diffDays === 0) return { label: "Today", cls: "bad" };
   if (diffDays > 0 && diffDays <= 14) return { label: `In ${diffDays}d`, cls: "warn" };
-  if (diffDays > 14) return { label: `In ${diffDays}d`, cls: "accent" };
+  if (diffDays > 14) return { label: `In ${diffDays}d`, cls: "" };
   return { label: `${Math.abs(diffDays)}d ago`, cls: "muted" };
 }
 
 function renderSparklineSvg(
   points: number[],
-  opts: { width: number; height: number; positive?: boolean | null; fillArea?: boolean; label: string },
+  opts: {
+    width: number;
+    height: number;
+    positive?: boolean | null;
+    fillArea?: boolean;
+    neutral?: boolean;
+    label: string;
+  },
 ): string {
-  const { width, height, positive, fillArea, label } = opts;
+  const { width, height, positive, fillArea, neutral, label } = opts;
   if (!points || points.length < 2) {
     const midY = (height / 2).toFixed(1);
-    return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(label)}: No 30-day trend cached"><line x1="2" y1="${midY}" x2="${width - 2}" y2="${midY}" stroke="currentColor" stroke-opacity="0.25" stroke-width="1.5" stroke-dasharray="3 3" /></svg>`;
+    return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(label)}: No 30-day trend cached"><line x1="2" y1="${midY}" x2="${width - 2}" y2="${midY}" stroke="currentColor" stroke-opacity="0.22" stroke-width="1.2" stroke-dasharray="3 3" /></svg>`;
   }
 
   const min = Math.min(...points);
@@ -388,15 +404,15 @@ function renderSparklineSvg(
   const linePath = coords.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x} ${y}`).join(" ");
   const last = coords[coords.length - 1];
   const inferredUp = positive ?? points[points.length - 1] >= points[0];
-  const colorVar = inferredUp ? "var(--ok)" : "var(--bad)";
+  const colorVar = neutral ? "var(--fg-muted)" : inferredUp ? "var(--ok)" : "var(--bad)";
   svgIdSeq += 1;
   const gradId = `sg-${svgIdSeq}`;
 
   const areaEl = fillArea
-    ? `<defs><linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${colorVar}" stop-opacity="0.28"/><stop offset="100%" stop-color="${colorVar}" stop-opacity="0"/></linearGradient></defs><path d="${linePath} L${last[0]} ${height} L${coords[0][0]} ${height} Z" fill="url(#${gradId})" />`
+    ? `<defs><linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${colorVar}" stop-opacity="0.11"/><stop offset="100%" stop-color="${colorVar}" stop-opacity="0"/></linearGradient></defs><path d="${linePath} L${last[0]} ${height} L${coords[0][0]} ${height} Z" fill="url(#${gradId})" />`
     : "";
 
-  return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(label)}">${areaEl}<path d="${linePath}" fill="none" stroke="${colorVar}" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" /><circle cx="${last[0]}" cy="${last[1]}" r="2.4" fill="${colorVar}" /></svg>`;
+  return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(label)}">${areaEl}<path d="${linePath}" fill="none" stroke="${colorVar}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /><circle cx="${last[0]}" cy="${last[1]}" r="2" fill="${colorVar}" /></svg>`;
 }
 
 interface DonutSegment {
@@ -648,9 +664,9 @@ function renderOverview(data: DashboardPayload): string {
     : "";
 
   const vixSvg = renderSparklineSvg(data.vix_sparkline, {
-    width: 68,
-    height: 22,
-    positive: data.vix !== null && data.vix < 25,
+    width: 64,
+    height: 20,
+    neutral: true,
     label: "VIX 30-day trend",
   });
 
@@ -735,8 +751,8 @@ function renderOverview(data: DashboardPayload): string {
           const isPass = c.status === "PASS";
           const delta = c.value_pct - c.cap_pct;
           const badge = isPass
-            ? `<span class="chip ok">✓ PASS</span>`
-            : `<span class="chip bad">▲ OVER +${delta.toFixed(1)}%</span>`;
+            ? `<span class="muted-sub">PASS</span>`
+            : `<span class="status-tag"><span class="dot bad"></span>OVER +${delta.toFixed(1)}%</span>`;
           const capRule = data.profile.risk_caps.find((r) => r.id === c.id);
           const inspAttr = capRule?.kind === "ticker" && capRule.ticker ? `data-inspect-ticker="${esc(capRule.ticker)}"` : "";
           return `
@@ -822,7 +838,7 @@ function renderOverview(data: DashboardPayload): string {
             <div class="micro-label">${esc(heroLabel)}</div>
             <div class="hero-nav-row">
               <div class="hero-nav">${fmtMoney(heroVal, ccy)}</div>
-              ${fmtDeltaChip(data.portfolio.total_unrealized_pnl_pct, "Unrealized P&L")}
+              ${fmtDeltaTag(data.portfolio.total_unrealized_pnl_pct, "Unrealized P&L")}
             </div>
             <div class="muted-sub" style="margin-top:3px">
               ${ccy !== "USD" ? `${fmtMoney(data.portfolio.nav_usd, "USD", 0)} IBKR · USD/${ccy} ${data.usd_to_base_fx.toFixed(4)}` : `${fmtMoney(data.portfolio.positions_base, ccy)} invested`}
@@ -885,7 +901,7 @@ function renderOverview(data: DashboardPayload): string {
         <div class="card">
           <div class="section-head">
             <h2 class="section-title">True Look-Through Top Exposure</h2>
-            <span class="muted-sub"><span class="chip accent">Direct</span> + <span class="chip muted">Via ETF</span></span>
+            <span class="muted-sub"><span class="swatch" style="display:inline-block;background:var(--viz-1)"></span> Direct · <span class="swatch" style="display:inline-block;background:var(--viz-3)"></span> Via ETF</span>
           </div>
           <div class="lt-list">${ltBarsHtml}</div>
         </div>
@@ -930,15 +946,15 @@ function renderHoldings(data: DashboardPayload): string {
           <tr class="clickable-row" data-inspect-ticker="${esc(p.ticker)}">
             <th scope="row">
               <button type="button" class="ticker-link" data-inspect-ticker="${esc(p.ticker)}">${esc(p.ticker)}</button>
-              ${p.stale ? '<span class="chip warn">STALE</span>' : ""}
+              ${p.stale ? '<span class="status-tag"><span class="dot warn"></span>STALE</span>' : ""}
               ${showSitus ? `<div class="muted-sub">${p.us_situs ? "US-Situs" : "Exempt"} · ${esc(p.domicile)}</div>` : `<div class="muted-sub">${esc(p.asset_type)}</div>`}
             </th>
             <td class="num" data-label="Price">${fmtMoney(p.price, p.currency, p.price < 10 ? 4 : 2)}</td>
-            <td class="num" data-label="1D %">${fmtDeltaChip(p.change_1d_pct)}</td>
-            <td class="spark-cell" data-label="30D">${renderSparklineSvg(p.sparkline, { width: 76, height: 22, positive: p.change_1m_pct !== null ? p.change_1m_pct >= 0 : null, label: `${p.ticker} 30-day trend` })}</td>
+            <td class="num" data-label="1D %">${fmtDeltaText(p.change_1d_pct)}</td>
+            <td class="spark-cell" data-label="30D">${renderSparklineSvg(p.sparkline, { width: 74, height: 20, positive: p.change_1m_pct !== null ? p.change_1m_pct >= 0 : null, label: `${p.ticker} 30-day trend` })}</td>
             <td class="num" data-label="Value ${esc(ccy)}">${fmtMoney(p.mv_base, ccy)}</td>
             <td class="num" data-label="Wt %"><strong>${fmtPct(p.weight_nav_pct, 2)}</strong></td>
-            <td class="num" data-label="P&L %">${fmtDeltaChip(p.pnl_pct)}</td>
+            <td class="num" data-label="P&L %">${fmtDeltaText(p.pnl_pct)}</td>
           </tr>
         `,
         )
@@ -1068,7 +1084,7 @@ function renderTheses(data: DashboardPayload, canMessage: boolean): string {
             <div class="thesis-price-row">
               <div>
                 <div class="thesis-price">${fmtMoney(t.price, t.currency, 2)}</div>
-                <div class="actions-row">${fmtDeltaChip(t.change_1d_pct, "1D")} ${t.max_weight_pct !== null ? `<span class="muted-sub">Cap ${t.max_weight_pct}%</span>` : ""}</div>
+                <div class="actions-row">${fmtDeltaText(t.change_1d_pct, "1D")} ${t.max_weight_pct !== null ? `<span class="muted-sub">· Cap ${t.max_weight_pct}%</span>` : ""}</div>
               </div>
               ${renderSparklineSvg(t.sparkline, { width: 88, height: 28, positive: t.change_1m_pct !== null ? t.change_1m_pct >= 0 : null, fillArea: true, label: `${t.ticker} 30-day trend` })}
             </div>
@@ -1107,7 +1123,7 @@ function renderEdgar(data: DashboardPayload, canOpenLinks: boolean): string {
       (g) => `
       <div class="timeline-item">
         <div>
-          <span class="chip ${g.cleared ? "ok" : "warn"}">${g.cleared ? "✓ CLEARED" : "⏳ OPEN GATE"}</span>
+          <span class="status-tag"><span class="dot ${g.cleared ? "ok" : "warn"}"></span>${g.cleared ? "Cleared" : "Open Gate"}</span>
           <button type="button" class="ticker-link" data-inspect-ticker="${esc(g.ticker)}" style="margin-left:0.25rem">${esc(g.ticker)}</button>
           <span class="muted-sub">(${esc(g.form)} &gt; ${esc(g.filed_after)})</span>
           <div class="muted-sub">${esc(g.description)}${g.latest_matching_date ? ` · Filed ${esc(g.latest_matching_date)}` : ""}</div>
@@ -1129,8 +1145,8 @@ function renderEdgar(data: DashboardPayload, canOpenLinks: boolean): string {
                 <div class="muted-sub">${esc(c.date)} · ${esc(c.detail)}</div>
               </div>
               <div class="actions-row">
-                <span class="chip ${countdown.cls}">${esc(countdown.label)}</span>
-                <span class="chip ${c.urgency === "high" ? "bad" : c.urgency === "medium" ? "warn" : "muted"}">${esc(c.urgency.toUpperCase())}</span>
+                <span class="status-tag ${countdown.cls === "muted" ? "quiet" : ""}"><span class="dot ${countdown.cls}"></span>${esc(countdown.label)}</span>
+                <span class="status-tag ${c.urgency === "low" ? "quiet" : ""}"><span class="dot ${c.urgency === "high" ? "bad" : c.urgency === "medium" ? "warn" : ""}"></span>${esc(c.urgency.toUpperCase())}</span>
               </div>
             </div>
           `;
@@ -1209,9 +1225,9 @@ function renderInspectorDialog(ticker: string): void {
       <div>
         <h1 id="inspector-title">${esc(sym)} · ${esc(titleName)}</h1>
         <div class="actions-row" style="margin-top:4px">
-          ${pos ? `<span class="chip muted">${esc(pos.asset_type)} · ${esc(pos.domicile)}</span>` : ""}
+          ${pos ? `<span class="status-tag quiet">${esc(pos.asset_type)} · ${esc(pos.domicile)}</span>` : ""}
           ${thesis ? statusChip(thesis.status) : ""}
-          ${state.summary.us_situs_enabled && (pos || thesis) ? `<span class="chip ${(pos?.us_situs ?? thesis?.us_situs) ? "warn" : "ok"}">${(pos?.us_situs ?? thesis?.us_situs) ? "US-Situs" : "Exempt"}</span>` : ""}
+          ${state.summary.us_situs_enabled && (pos || thesis) ? `<span class="status-tag"><span class="dot ${(pos?.us_situs ?? thesis?.us_situs) ? "warn" : "ok"}"></span>${(pos?.us_situs ?? thesis?.us_situs) ? "US-Situs" : "Exempt"}</span>` : ""}
         </div>
       </div>
       <button type="button" class="small" id="btn-close-inspector" autofocus aria-label="Close inspector">✕ Close</button>
@@ -1223,7 +1239,7 @@ function renderInspectorDialog(ticker: string): void {
           <div>
             <div class="micro-label">Latest Price (${esc(currency)})</div>
             <div class="hero-nav" style="font-size:1.45rem">${price !== null ? fmtMoney(price, currency, price < 10 ? 4 : 2) : "N/A"}</div>
-            <div class="actions-row" style="margin-top:4px">${fmtDeltaChip(ch1d, "1D")} ${fmtDeltaChip(ch1m, "1M")}</div>
+            <div class="actions-row" style="margin-top:4px">${fmtDeltaTag(ch1d, "1D")} ${fmtDeltaTag(ch1m, "1M")}</div>
           </div>
           ${renderSparklineSvg(sparkline, { width: 148, height: 48, positive: ch1m !== null ? ch1m >= 0 : null, fillArea: true, label: `${sym} 30-day area chart` })}
         </div>
@@ -1493,12 +1509,12 @@ function render(): void {
         <header class="topbar">
           <div class="brand-cluster brand-block">
             <svg class="brand-mark" viewBox="0 0 128 128" fill="none" aria-hidden="true">
-              <rect x="6" y="6" width="116" height="116" rx="24" fill="#0F172A" stroke="#38BDF8" stroke-width="5"/>
-              <path d="M30 84 L50 62 L66 72 L96 38" stroke="#38BDF8" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M78 38 H96 V56" stroke="#38BDF8" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+              <rect x="8" y="8" width="112" height="112" rx="22" stroke="currentColor" stroke-width="6"/>
+              <path d="M32 82 L52 62 L68 72 L96 40" stroke="currentColor" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M78 40 H96 V58" stroke="currentColor" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
             <div class="brand-text">
-              <div class="brand-title-row"><h1>Investment OS</h1><span class="status-dot">Setup</span></div>
+              <div class="brand-title-row"><h1>Investment OS</h1><span class="status-tag"><span class="dot"></span>Setup</span></div>
               <div class="meta-line">Local data vault ready</div>
             </div>
           </div>
@@ -1520,7 +1536,7 @@ function render(): void {
     ? `<button type="button" class="small" id="btn-sync-broker" ${busyMessage ? "disabled" : ""}>Sync</button>`
     : "";
 
-  const statusCls = state.is_demo ? "demo" : state.mode === "live_yahoo" ? "live" : "";
+  const statusDotCls = state.is_demo ? "warn" : state.mode === "live_yahoo" ? "ok" : "";
   const statusLbl = state.is_demo ? "Demo" : state.mode === "live_yahoo" ? "Live" : "Snapshot";
 
   const demoBanner = state.is_demo
@@ -1537,14 +1553,14 @@ function render(): void {
       <header class="topbar">
         <div class="brand-cluster brand-block">
           <svg class="brand-mark" viewBox="0 0 128 128" fill="none" aria-hidden="true">
-            <rect x="6" y="6" width="116" height="116" rx="24" fill="#0F172A" stroke="#38BDF8" stroke-width="5"/>
-            <path d="M30 84 L50 62 L66 72 L96 38" stroke="#38BDF8" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M78 38 H96 V56" stroke="#38BDF8" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+            <rect x="8" y="8" width="112" height="112" rx="22" stroke="currentColor" stroke-width="6"/>
+            <path d="M32 82 L52 62 L68 72 L96 40" stroke="currentColor" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M78 40 H96 V58" stroke="currentColor" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
           <div class="brand-text">
             <div class="brand-title-row">
               <h1>Investment OS</h1>
-              <span class="status-dot ${statusCls}">${statusLbl}</span>
+              <span class="status-tag"><span class="dot ${statusDotCls}"></span>${statusLbl}</span>
             </div>
             <div class="meta-line">Base ${esc(state.base_currency)} · ${esc(state.generated_at)}</div>
           </div>
