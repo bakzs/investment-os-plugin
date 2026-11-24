@@ -18,4 +18,4 @@ npm test
 npm run privacy-check
 ```
 
-If you modify anything under `src/`, commit the rebuilt `dist/server.cjs` and `dist/dashboard.html` artifacts so users installing the plugin directly via GitHub do not need a build step. CI enforces `git diff --exit-code dist/`.
+If you modify anything under `src/`, commit the rebuilt `dist/server.cjs` and `dist/dashboard.html` artifacts so users installing the plugin directly via GitHub do not need a build step. Before opening a pull request, confirm `git diff --exit-code dist/` passes cleanly.
