@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+staged_files="$(git diff --cached --name-only --diff-filter=ACMR || true)"
+if [[ -n "$staged_files" ]]; then
+  forbidden="$(printf '%s\n' "$staged_files" | grep -E '(\.(csv|pdf|xlsx|xls|pem|key)$|(^|/)(portfolio\.json|profile\.yaml|catalysts\.yaml|etf_weights\.json|market_cache\.json|edgar_cache\.json|test_log\.jsonl)$|^(theses|notes|local|scratch)/)' || true)"
+  if [[ -n "$forbidden" ]]; then
+    echo "ERROR: Refusing to commit personal/private data file(s):" >&2
+    printf '%s\n' "$forbidden" >&2
+    echo "Store private exports and research dossiers strictly inside \${PLUGIN_DATA}." >&2
+    exit 1
+  fi
+fi
+
+npm run privacy-check

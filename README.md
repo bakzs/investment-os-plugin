@@ -63,17 +63,17 @@ Then ask Antigravity:
 - **[Vision & Product Philosophy](docs/VISION.md):** Why Investment OS exists, core design principles, explicit non-goals, and roadmap.
 - **[Architecture & Design](docs/DESIGN.md):** System topology, `${PLUGIN_ROOT}` vs. `${PLUGIN_DATA}` schema isolation, look-through math, Linear monochrome token system, and security model.
 - **[Systematic Thesis Testing Manual](docs/THESIS_TESTING.md):** The 4-step falsification methodology, hypothesis schema, verdict taxonomy, and generic walkthrough.
-- **[Contributing Guidelines](CONTRIBUTING.md):** Development setup, build checks, and strict privacy rules.
+- **[Architecture Decision Records](docs/adr/README.md):** Core governance invariants (`Read-Only Sovereignty`, `Local Vault Isolation`, `Monochrome UI`).
+- **[Changelog](CHANGELOG.md):** Release history across `0.2.0` and `0.3.0`.
+- **[Contributing Guidelines](CONTRIBUTING.md):** Development setup, automated git hooks, verification gates, and strict privacy rules.
 - **[Security & Privacy Policy](SECURITY.md):** Vulnerability reporting and sandboxing guarantees.
 
 ## Development & Verification
 
 ```bash
-npm ci
-npm run typecheck
-npm run build
-npm test
-npm run privacy-check
+npm ci                 # Also activates .githooks/ via prepare script
+npm run verify         # typecheck + build + bundle/contract checks + tests + privacy scan
+npm run stage-plugin   # Stage clean runtime bundle locally for dogfooding
 ```
 
 ## License

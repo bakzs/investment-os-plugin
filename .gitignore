@@ -5,3 +5,22 @@ node_modules/
 .DS_Store
 coverage/
 *.tmp
+
+# Personal brokerage exports, private vault state, and local notes
+*.csv
+*.pdf
+*.xlsx
+*.xls
+*.pem
+*.key
+portfolio.json
+profile.yaml
+catalysts.yaml
+etf_weights.json
+market_cache.json
+edgar_cache.json
+test_log.jsonl
+theses/
+notes/
+local/
+scratch/

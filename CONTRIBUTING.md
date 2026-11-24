@@ -11,11 +11,9 @@ Thank you for contributing to Investment OS!
 ## Development Workflow
 
 ```bash
-npm ci
-npm run typecheck
-npm run build
-npm test
-npm run privacy-check
+npm ci            # Activates .githooks/ (pre-commit privacy check & pre-push verify:ci)
+npm run verify    # Typecheck, build, bundle/contract validation, tests, and privacy scan
 ```
 
-If you modify anything under `src/`, commit the rebuilt `dist/server.cjs` and `dist/dashboard.html` artifacts so users installing the plugin directly via GitHub do not need a build step. Before opening a pull request, confirm `git diff --exit-code dist/` passes cleanly.
+- Versioned Git hooks under `.githooks/` activate automatically via `npm run setup-hooks` (`prepare`), blocking private file extensions (`.csv`, `.pdf`, `.xlsx`) or vault files before commit and running `npm run verify:ci` before push.
+- If you modify anything under `src/`, commit the rebuilt `dist/server.cjs` and `dist/dashboard.html` artifacts so users installing the plugin directly via GitHub do not need a build step. Before opening a pull request, confirm `git diff --exit-code dist/` passes cleanly.
