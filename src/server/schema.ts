@@ -418,6 +418,64 @@ export const TrancheRuleSchema = z.object({
 
 export type TrancheRule = z.infer<typeof TrancheRuleSchema>;
 
+export const ScenarioTripleSchema = z.object({
+  bear: FiniteNumber,
+  base: FiniteNumber,
+  bull: FiniteNumber,
+});
+
+export type ScenarioTriple = z.infer<typeof ScenarioTripleSchema>;
+
+export const FundamentalSegmentSchema = z.object({
+  id: z.string().trim().min(1).max(48).regex(/^[a-z0-9._-]+$/),
+  name: z.string().trim().min(1).max(96),
+  kind: z.enum(["unit_economics", "cagr_margin", "milestone_option"]),
+  valuation_metric: z.enum(["owner_earnings", "ebit", "fcf", "revenue", "ev_direct"]).default("owner_earnings"),
+  unit_label: z.string().trim().max(64).optional(),
+  units: ScenarioTripleSchema.optional(),
+  rev_per_unit_label: z.string().trim().max(64).optional(),
+  rev_per_unit: ScenarioTripleSchema.optional(),
+  rev_multiplier_to_b: z.number().finite().positive().default(0.001),
+  current_rev_b: z.number().finite().nonnegative().optional(),
+  rev_cagr_pct: ScenarioTripleSchema.optional(),
+  margin_pct: ScenarioTripleSchema.optional(),
+  capex_or_sbc_drag_b: ScenarioTripleSchema.optional(),
+  exit_multiple: ScenarioTripleSchema.optional(),
+  milestone_label: z.string().trim().max(140).optional(),
+  success_prob: ScenarioTripleSchema.optional(),
+  success_ev_b: ScenarioTripleSchema.optional(),
+  notes: z.string().trim().max(300).optional(),
+});
+
+export type FundamentalSegment = z.infer<typeof FundamentalSegmentSchema>;
+export type FundamentalSegmentInput = z.input<typeof FundamentalSegmentSchema>;
+
+export const VariantPerceptionItemSchema = z.object({
+  id: z.string().trim().min(1).max(48),
+  kpi: z.string().trim().min(1).max(120),
+  consensus_view: z.string().trim().min(1).max(200),
+  my_view: z.string().trim().min(1).max(200),
+  edge_rationale: z.string().trim().max(320).optional(),
+  linked_hypothesis_id: z.string().trim().max(64).nullable().optional(),
+});
+
+export type VariantPerceptionItem = z.infer<typeof VariantPerceptionItemSchema>;
+
+export const FundamentalModelSchema = z.object({
+  base_shares_m: z.number().finite().positive(),
+  annual_dilution_pct: z.number().finite().min(-15).max(30).default(0),
+  projected_net_cash_b: ScenarioTripleSchema.optional(),
+  net_cash_b: z.number().finite().optional(),
+  scenario_probabilities: ScenarioTripleSchema.default({ bear: 0.25, base: 0.5, bull: 0.25 }),
+  derive_scenarios_from_sotp: z.boolean().default(true),
+  segments: z.array(FundamentalSegmentSchema).min(1).max(8),
+  variant_perception: z.array(VariantPerceptionItemSchema).max(8).default([]),
+  methodology_note: z.string().trim().max(400).optional(),
+});
+
+export type FundamentalModel = z.infer<typeof FundamentalModelSchema>;
+export type FundamentalModelInput = z.input<typeof FundamentalModelSchema>;
+
 export const DossierModelSchema = z.object({
   as_of: z.string().trim().max(64).optional(),
   horizon_years: z.number().int().min(1).max(15).default(5),
@@ -433,6 +491,7 @@ export const DossierModelSchema = z.object({
     })
     .nullable()
     .optional(),
+  fundamental_model: FundamentalModelSchema.nullable().optional(),
   tranches: z.array(TrancheRuleSchema).max(5).optional(),
 });
 
@@ -901,12 +960,22 @@ export const ForecastRequestSchema = z.object({
   rf_pct: z.number().finite().min(0).max(20).optional(),
   return_model: z.enum(["black_litterman", "raw_dossier"]).default("black_litterman"),
   simulation_engine: z.enum(["block_bootstrap", "student_t"]).default("block_bootstrap"),
-  block_length_weeks: z.number().int().min(2).max(26).default(6),
+  block_length_weeks: z.number().int().min(2).max(26).nullable().optional(),
   demo: z.boolean().optional(),
 });
 
 export type ForecastRequest = z.infer<typeof ForecastRequestSchema>;
 export type ForecastRequestInput = z.input<typeof ForecastRequestSchema>;
+
+export const QuantEvalRequestSchema = z.object({
+  horizon_weeks: z.union([z.literal(13), z.literal(26)]).default(13),
+  tx_cost_bps: z.number().finite().min(0).max(100).default(10),
+  include_external_wealth: z.boolean().default(true),
+  demo: z.boolean().optional(),
+});
+
+export type QuantEvalRequest = z.infer<typeof QuantEvalRequestSchema>;
+export type QuantEvalRequestInput = z.input<typeof QuantEvalRequestSchema>;
 
 export const EtfMetadataSchema = z
   .object({
