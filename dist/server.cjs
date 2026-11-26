@@ -35803,11 +35803,7 @@ function projectToPsd(matrix) {
     return matrix.map((row) => [...row]);
   }
   const eigenpairs = jacobiEigenSymmetric(matrix);
-  const minEig = Math.min(...eigenpairs.map((ep) => ep.eigenvalue));
   const maxEig = Math.max(...eigenpairs.map((ep) => ep.eigenvalue));
-  if (minEig >= 0) {
-    return matrix.map((row) => [...row]);
-  }
   const floorVal = maxEig > 1e-12 ? 1e-10 : 0;
   const out = Array.from({ length: n }, () => Array(n).fill(0));
   for (const ep of eigenpairs) {
@@ -37548,19 +37544,23 @@ function computeForwardScorecard(testLogAll, currentPrices, historyCache, benchm
     const hit = maturity === "MATURED" ? evaluateDirectionalHit(rec.verdict, actionVerdict, stockRet, alphaPct) : null;
     if (maturity === "MATURED" && stockRet !== null) {
       const ratio = Math.max(1e-3, 1 + stockRet / 100);
-      const years = Math.max(30, daysElapsed) / 365.25;
-      const realizedAnnualCagrPct = (Math.pow(ratio, 1 / years) - 1) * 100;
+      const yearsForIc = Math.max(0.5, daysElapsed / 365.25);
+      const icRealizedAnn = (Math.pow(ratio, 1 / yearsForIc) - 1) * 100;
       const pitExpected = rec.pit_snapshot?.expected_after_tax_cagr_pct;
       if (typeof pitExpected === "number" && Number.isFinite(pitExpected)) {
         icExpected.push(pitExpected);
-        icRealized.push(realizedAnnualCagrPct);
+        icRealized.push(icRealizedAnn);
       }
       const bounds = scenarioBoundsByTicker?.get(rec.ticker.toUpperCase());
       if (bounds && Number.isFinite(bounds.bearCagrPct) && Number.isFinite(bounds.bullCagrPct)) {
         modeledTestsMatured += 1;
-        const lo = Math.min(bounds.bearCagrPct, bounds.bullCagrPct) - 2;
-        const hi = Math.max(bounds.bearCagrPct, bounds.bullCagrPct) + 2;
-        if (realizedAnnualCagrPct >= lo && realizedAnnualCagrPct <= hi) {
+        const y = Math.max(30, daysElapsed) / 365.25;
+        const loCagr = Math.min(bounds.bearCagrPct, bounds.bullCagrPct);
+        const hiCagr = Math.max(bounds.bearCagrPct, bounds.bullCagrPct);
+        const bearHorizPct = (Math.pow(Math.max(0.05, 1 + loCagr / 100), y) - 1) * 100;
+        const bullHorizPct = (Math.pow(Math.max(0.05, 1 + hiCagr / 100), y) - 1) * 100;
+        const tolPct = y < 0.75 ? 5 : 2;
+        if (stockRet >= bearHorizPct - tolPct && stockRet <= bullHorizPct + tolPct) {
           insideBandCount += 1;
         }
       }
@@ -38585,8 +38585,10 @@ function runQuantWalkForwardEvaluation(req, portfolio, profile, historyCache, fx
   for (const pos of portfolio.positions) {
     const ticker = pos.ticker.trim().toUpperCase();
     if (!ticker || ticker === "CASH") continue;
+    const yfLookup = (pos.yf_symbol || ticker).trim();
+    const livePx = opts?.livePricesMap?.get(ticker) ?? opts?.livePricesMap?.get(yfLookup) ?? opts?.livePricesMap?.get(yfLookup.toUpperCase()) ?? pos.ref_price;
     const ccyFx = fxRates[pos.currency] ?? fxUsdToBase;
-    const mvBase = Math.max(0, pos.qty * pos.ref_price * ccyFx);
+    const mvBase = Math.max(0, pos.qty * livePx * ccyFx);
     if (mvBase <= 0) continue;
     const prev = assetAgg.get(ticker);
     assetAgg.set(ticker, {
@@ -38788,7 +38790,7 @@ function runQuantWalkForwardEvaluation(req, portfolio, profile, historyCache, fx
     }
   };
   const stratState = {
-    current_weights: { label: "Current Portfolio Weights", equity: 1, curW: [...currentWeights], weeklyRets: [], totalTurnover: 0 },
+    current_weights: { label: "Current Weights (Hindsight Ref)", equity: 1, curW: [...currentWeights], weeklyRets: [], totalTurnover: 0 },
     hrp_lw: { label: "HRP (Ledoit-Wolf Cov/Corr, 35% Cap)", equity: 1, curW: Array(N).fill(1 / N), weeklyRets: [], totalTurnover: 0 },
     inv_vol: { label: "Inverse Volatility", equity: 1, curW: Array(N).fill(1 / N), weeklyRets: [], totalTurnover: 0 },
     equal_weight: { label: "Equal Weight (1/N)", equity: 1, curW: Array(N).fill(1 / N), weeklyRets: [], totalTurnover: 0 }
@@ -38823,6 +38825,11 @@ function runQuantWalkForwardEvaluation(req, portfolio, profile, historyCache, fx
     const lw = computeLedoitWolfConstantCorr(trainSlice);
     lambdaSum += lw.lambda;
     const unbiasedScale = t / Math.max(1, t - 1);
+    const stdUnbiasedScale = Math.sqrt(unbiasedScale);
+    const lwCovUnbiased = Array.from(
+      { length: N },
+      (_, i) => Array.from({ length: N }, (_2, j) => lw.cov[i][j] * unbiasedScale)
+    );
     const sampleCov = Array.from(
       { length: N },
       (_, i) => Array.from({ length: N }, (_2, j) => lw.sample_cov[i][j] * unbiasedScale)
@@ -38852,7 +38859,7 @@ function runQuantWalkForwardEvaluation(req, portfolio, profile, historyCache, fx
     const covEvaluators = [
       ["sample_cov", sampleCov],
       ["fixed_025_shrink", fixed025Cov],
-      ["analytical_lw", lw.cov]
+      ["analytical_lw", lwCovUnbiased]
     ];
     for (const [key, mat] of covEvaluators) {
       const predWeeklyVar = portfolioVariance(currentWeights, mat);
@@ -38877,7 +38884,7 @@ function runQuantWalkForwardEvaluation(req, portfolio, profile, historyCache, fx
     for (let u = 0; u < t; u += 1) {
       const off = u * N;
       for (let i = 0; i < N; i += 1) {
-        centeredFlat[off + i] = retFlat[off + i] - trainMeans[i];
+        centeredFlat[off + i] = (retFlat[off + i] - trainMeans[i]) * stdUnbiasedScale;
       }
     }
     let realizedDemeanedRet = 0;
@@ -38890,7 +38897,7 @@ function runQuantWalkForwardEvaluation(req, portfolio, profile, historyCache, fx
       const cLog = assetCumLog < -4 ? -4 : assetCumLog > 4 ? 4 : assetCumLog;
       realizedDemeanedRet += curWArr[i] * (Math.exp(cLog) - 1);
     }
-    const cholL = choleskyDecompose(lw.cov);
+    const cholL = choleskyDecompose(lwCovUnbiased);
     for (let i = 0; i < N; i += 1) {
       const rowL = cholL[i];
       const off = i * N;
@@ -38982,7 +38989,7 @@ function runQuantWalkForwardEvaluation(req, portfolio, profile, historyCache, fx
     }
     const hrpRes = computeHrpWeights(
       assetsIncluded.map((ticker) => ({ ticker, is_cash: false, max_weight_pct: 35 })),
-      lw.cov,
+      lwCovUnbiased,
       lw.corr
     );
     const hrpWeights = normalizeWeights(assetsIncluded.map((tkr) => hrpRes.weights_by_ticker[tkr] ?? 0));
@@ -39054,12 +39061,12 @@ function runQuantWalkForwardEvaluation(req, portfolio, profile, historyCache, fx
   const tailRowsRaw = engineKeys.map((engKey) => {
     const acc = tailStats[engKey];
     const kupiec = computeKupiecPofTest(acc.breaches, windowsEvaluated, 0.05);
-    let shortfallRatio = 0;
+    let shortfallRatio = null;
     if (acc.breachRealized.length > 0) {
       const avgReal = acc.breachRealized.reduce((s, v) => s + v, 0) / acc.breachRealized.length;
       const avgPred = acc.breachPredCvar.reduce((s, v) => s + v, 0) / acc.breachPredCvar.length;
       if (avgPred < -1e-6 && avgReal < 0) {
-        shortfallRatio = avgReal / avgPred;
+        shortfallRatio = round2(avgReal / avgPred, 3);
       }
     }
     return {
@@ -39072,7 +39079,7 @@ function runQuantWalkForwardEvaluation(req, portfolio, profile, historyCache, fx
       kupiec_calibrated: kupiec.calibrated,
       mean_pinball_loss_pct: round2(acc.pinballSum / Math.max(1, windowsEvaluated) * 100, 3),
       coverage_80_pct: round2(acc.covered80 / Math.max(1, windowsEvaluated) * 100, 1),
-      cvar95_shortfall_ratio: round2(shortfallRatio, 3),
+      cvar95_shortfall_ratio: shortfallRatio,
       is_winner: false
     };
   });
@@ -39125,13 +39132,18 @@ function runQuantWalkForwardEvaluation(req, portfolio, profile, historyCache, fx
   const anyCalibrated = tailRowsRaw.some((r) => r.kupiec_calibrated);
   const volRatioOk = covWinner.realized_to_predicted_vol_ratio >= 0.5 && covWinner.realized_to_predicted_vol_ratio <= 2;
   const status = anyCalibrated && volRatioOk ? "CALIBRATED" : "WARN";
-  const bestHorse = [...horseRaceRows].sort((a, b) => b.oos_sharpe - a.oos_sharpe)[0];
+  const causalRows = horseRaceRows.filter((r) => r.strategy !== "current_weights");
+  const bestCausal = [...causalRows].sort((a, b) => b.oos_sharpe - a.oos_sharpe)[0];
+  const currentRefRow = horseRaceRows.find((r) => r.strategy === "current_weights");
   const missingFxTickers = activePool.filter((c) => c.missingFx).map((c) => c.ticker);
   const findings = [
     `Evaluated ${windowsEvaluated} non-overlapping ${horizonWeeks}w expanding windows across ${T} aligned weeks (${assetsIncluded.length} assets, mean Ledoit-Wolf \u03BB=${avgLambda}, mean Politis-White L*=${avgBlockLen}w).`,
     `Covariance winner: ${covWinner.label} (QLIKE=${covWinner.qlike_loss}, realized/predicted vol=${covWinner.realized_to_predicted_vol_ratio}x, RMSE=${covWinner.vol_rmse_pct}%).`,
     `Tail winner: ${tailWinner.label} (pinball=${tailWinner.mean_pinball_loss_pct}%, VaR95 breaches=${tailWinner.breaches}/${tailWinner.total_windows} [${tailWinner.var95_breach_rate_pct}%], Kupiec p=${tailWinner.kupiec_pof_pvalue}).`,
-    `OOS Sharpe leader: ${bestHorse.label} (Sharpe=${bestHorse.oos_sharpe}, CAGR=${bestHorse.oos_cagr_pct}%, MaxDD=${bestHorse.oos_max_dd_pct}%, turnover=${bestHorse.annual_turnover_pct}%/yr).`
+    `Causal OOS leader: ${bestCausal.label} (Sharpe=${bestCausal.oos_sharpe}, CAGR=${bestCausal.oos_cagr_pct}%, MaxDD=${bestCausal.oos_max_dd_pct}%, turnover=${bestCausal.annual_turnover_pct}%/yr).`,
+    ...currentRefRow ? [
+      `Current Weights (hindsight ref using today's weights \u2014 subject to selection bias): Sharpe=${currentRefRow.oos_sharpe}, CAGR=${currentRefRow.oos_cagr_pct}%, MaxDD=${currentRefRow.oos_max_dd_pct}%, turnover=${currentRefRow.annual_turnover_pct}%/yr.`
+    ] : []
   ];
   if (!anyCalibrated) {
     findings.push("Warning: All tail simulators rejected by Kupiec POF (p < 0.05) \u2014 regime instability or structural shift detected.");
@@ -39725,7 +39737,42 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
     common2.sort();
     return common2;
   };
-  let lwPool = assets.map((a, idx) => ({ idx, retMap: a.retMap, valueBase: baselineMap.get(a.key)?.value_base ?? 0 })).filter((x) => !assets[x.idx].slot.is_cash && x.retMap.size >= 52);
+  const baseStartVec = assets.map((a) => baselineMap.get(a.key)?.value_base ?? 0);
+  const simStartVec = assets.map((a) => simMap.get(a.key)?.value_base ?? 0);
+  const baseStartTotal = baseStartVec.reduce((acc, v) => acc + v, 0);
+  const simStartTotal = simStartVec.reduce((acc, v) => acc + v, 0);
+  const benchEndBase = round2(baseStartTotal * Math.pow(1 + benchCagrPct / 100, horizon), 2);
+  const canonBaseMap = /* @__PURE__ */ new Map();
+  const canonSimMap = /* @__PURE__ */ new Map();
+  for (let idx = 0; idx < assets.length; idx += 1) {
+    const a = assets[idx];
+    if (a.slot.is_cash) continue;
+    const canon = canonicalAssetName(a.slot.ticker);
+    canonBaseMap.set(canon, (canonBaseMap.get(canon) ?? 0) + Math.max(0, baseStartVec[idx] ?? 0));
+    canonSimMap.set(canon, (canonSimMap.get(canon) ?? 0) + Math.max(0, simStartVec[idx] ?? 0));
+  }
+  const dedupPoolByCanonical = (minWeeks) => {
+    const byCanon = /* @__PURE__ */ new Map();
+    for (let idx = 0; idx < assets.length; idx += 1) {
+      const a = assets[idx];
+      if (a.slot.is_cash || a.retMap.size < minWeeks) continue;
+      const canon = canonicalAssetName(a.slot.ticker);
+      const prev = byCanon.get(canon);
+      if (!prev) {
+        byCanon.set(canon, {
+          canon,
+          idx,
+          retMap: a.retMap,
+          valueBase: canonBaseMap.get(canon) ?? 0
+        });
+      } else if (a.retMap.size > prev.retMap.size) {
+        prev.idx = idx;
+        prev.retMap = a.retMap;
+      }
+    }
+    return Array.from(byCanon.values());
+  };
+  let lwPool = dedupPoolByCanonical(52);
   let lwCommonWeeks = lwPool.length >= 2 ? computeCommonWeeks(lwPool.map((x) => x.retMap)) : [];
   while (lwPool.length > 2 && lwCommonWeeks.length < 52) {
     let bestDropIdx = 0;
@@ -39755,7 +39802,7 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
     const lwRes = computeLedoitWolfConstantCorr(returnMatrix);
     shrinkLambda = lwRes.lambda;
     lwShrinkageMethod = "analytical_lw";
-    const lwPosMap = new Map(lwPool.map((item, k) => [item.idx, k]));
+    const lwPosMap = new Map(lwPool.map((item, k) => [item.canon, k]));
     const targetAvg = Number.isFinite(lwRes.avg_corr) ? Math.max(0.1, Math.min(0.85, lwRes.avg_corr)) : avgCorr;
     for (let i = 0; i < n; i += 1) {
       for (let j = 0; j < n; j += 1) {
@@ -39767,15 +39814,18 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
         } else if (a.slot.is_cash || b.slot.is_cash) {
           corrIJ = 0;
         } else {
-          const li = lwPosMap.get(i);
-          const lj = lwPosMap.get(j);
-          if (li !== void 0 && lj !== void 0) {
-            corrIJ = lwRes.corr[li][lj];
+          const canonA = canonicalAssetName(a.slot.ticker);
+          const canonB = canonicalAssetName(b.slot.ticker);
+          if (canonA === canonB) {
+            corrIJ = 0.97;
           } else {
-            corrIJ = (1 - shrinkLambda) * corrIJ + shrinkLambda * targetAvg;
-          }
-          if (canonicalAssetName(a.slot.ticker) === canonicalAssetName(b.slot.ticker)) {
-            corrIJ = Math.max(0.96, corrIJ);
+            const li = lwPosMap.get(canonA);
+            const lj = lwPosMap.get(canonB);
+            if (li !== void 0 && lj !== void 0) {
+              corrIJ = lwRes.corr[li][lj];
+            } else {
+              corrIJ = (1 - shrinkLambda) * corrIJ + shrinkLambda * targetAvg;
+            }
           }
         }
         shrunkCorr[i][j] = corrIJ;
@@ -39789,9 +39839,10 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
         const b = assets[j];
         let corrIJ = rawCorr[i][j];
         if (i !== j && !a.slot.is_cash && !b.slot.is_cash) {
-          corrIJ = (1 - shrinkLambda) * corrIJ + shrinkLambda * avgCorr;
           if (canonicalAssetName(a.slot.ticker) === canonicalAssetName(b.slot.ticker)) {
-            corrIJ = Math.max(0.96, corrIJ);
+            corrIJ = 0.97;
+          } else {
+            corrIJ = (1 - shrinkLambda) * corrIJ + shrinkLambda * avgCorr;
           }
         }
         shrunkCorr[i][j] = corrIJ;
@@ -39799,12 +39850,43 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
       }
     }
   }
+  const riskyIndices = [];
+  for (let i = 0; i < n; i += 1) {
+    if (!assets[i].slot.is_cash) riskyIndices.push(i);
+  }
+  const mRisky = riskyIndices.length;
+  if (mRisky > 0) {
+    const riskyCovSub = Array.from(
+      { length: mRisky },
+      (_, r) => Array.from({ length: mRisky }, (_2, c) => cov[riskyIndices[r]][riskyIndices[c]])
+    );
+    const psdRiskyCov = projectToPsd(riskyCovSub);
+    for (let r = 0; r < mRisky; r += 1) {
+      const ri = riskyIndices[r];
+      const varR = Math.max(1e-10, psdRiskyCov[r][r]);
+      cov[ri][ri] = varR;
+      assets[ri].vol = Math.sqrt(varR);
+      shrunkCorr[ri][ri] = 1;
+      for (let c = r + 1; c < mRisky; c += 1) {
+        const rj = riskyIndices[c];
+        const symCov = 0.5 * (psdRiskyCov[r][c] + psdRiskyCov[c][r]);
+        cov[ri][rj] = symCov;
+        cov[rj][ri] = symCov;
+      }
+    }
+    for (let r = 0; r < mRisky; r += 1) {
+      const ri = riskyIndices[r];
+      const di = Math.sqrt(Math.max(1e-10, cov[ri][ri]));
+      for (let c = r + 1; c < mRisky; c += 1) {
+        const rj = riskyIndices[c];
+        const dj = Math.sqrt(Math.max(1e-10, cov[rj][rj]));
+        const cleanCorr = Math.max(-0.95, Math.min(0.98, cov[ri][rj] / (di * dj)));
+        shrunkCorr[ri][rj] = cleanCorr;
+        shrunkCorr[rj][ri] = cleanCorr;
+      }
+    }
+  }
   const L = choleskyDecompose2(cov);
-  const baseStartVec = assets.map((a) => baselineMap.get(a.key)?.value_base ?? 0);
-  const simStartVec = assets.map((a) => simMap.get(a.key)?.value_base ?? 0);
-  const baseStartTotal = baseStartVec.reduce((acc, v) => acc + v, 0);
-  const simStartTotal = simStartVec.reduce((acc, v) => acc + v, 0);
-  const benchEndBase = round2(baseStartTotal * Math.pow(1 + benchCagrPct / 100, horizon), 2);
   let blockLenWeeks;
   let blockLengthMode;
   if (typeof req.block_length_weeks === "number" && Number.isFinite(req.block_length_weeks)) {
@@ -39812,7 +39894,7 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
     blockLengthMode = "manual";
   } else {
     blockLengthMode = "politis_white_auto";
-    let pwPool = lwPool.length >= 2 && lwCommonWeeks.length >= 52 ? lwPool : assets.map((a, idx) => ({ idx, retMap: a.retMap, valueBase: baselineMap.get(a.key)?.value_base ?? 0 })).filter((x) => !assets[x.idx].slot.is_cash && x.retMap.size >= 30);
+    let pwPool = lwPool.length >= 2 && lwCommonWeeks.length >= 52 ? lwPool : dedupPoolByCanonical(30);
     let pwWeeks = lwPool.length >= 2 && lwCommonWeeks.length >= 52 ? lwCommonWeeks : computeCommonWeeks(pwPool.map((x) => x.retMap));
     if (pwPool.length > 1 && pwWeeks.length < 30) {
       pwPool.sort((a, b) => b.valueBase - a.valueBase || b.retMap.size - a.retMap.size);
@@ -39821,10 +39903,10 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
     }
     const portSeries = [];
     if (pwPool.length > 0 && pwWeeks.length >= 30) {
-      let rawWeights = pwPool.map((x) => Math.max(0, baseStartVec[x.idx] ?? 0));
+      let rawWeights = pwPool.map((x) => canonBaseMap.get(x.canon) ?? 0);
       let wSum = rawWeights.reduce((s, v) => s + v, 0);
       if (wSum <= 1e-6) {
-        rawWeights = pwPool.map((x) => Math.max(0, simStartVec[x.idx] ?? 0));
+        rawWeights = pwPool.map((x) => canonSimMap.get(x.canon) ?? 0);
         wSum = rawWeights.reduce((s, v) => s + v, 0);
       }
       const normW = wSum > 1e-6 ? rawWeights.map((w) => w / wSum) : pwPool.map(() => 1 / pwPool.length);
@@ -40555,8 +40637,13 @@ function extractXbrlDilutedSharesM(fundamentals) {
   )?.diluted_shares_m;
   return aShares && aShares > 0 ? aShares : null;
 }
-function buildSotpWarnings(fm, baseSharesM, segments, baseTotalEvRaw, baseEquityB, bullEquityB, fundamentals) {
+function buildSotpWarnings(fm, baseSharesM, segments, baseTotalEvRaw, baseEquityB, bullEquityB, bearTargetPrice, baseTargetPrice, bullTargetPrice, fundamentals) {
   const warnings = [];
+  if (baseTargetPrice < bearTargetPrice - 0.01 || baseTargetPrice > bullTargetPrice + 0.01) {
+    warnings.push(
+      `SOTP scenarios are inverted (Bear $${round2(bearTargetPrice, 2).toFixed(2)} / Base $${round2(baseTargetPrice, 2).toFixed(2)} / Bull $${round2(bullTargetPrice, 2).toFixed(2)}); verify segment assumptions.`
+    );
+  }
   const nonMilestone = fm.segments.filter((s) => s.kind !== "milestone_option");
   const allCagrWithRev = nonMilestone.length > 0 && nonMilestone.every(
     (s) => s.kind === "cagr_margin" && typeof s.current_rev_b === "number" && Number.isFinite(s.current_rev_b) && s.current_rev_b > 0
@@ -40731,6 +40818,9 @@ function computeSotpValuation(price, model, taxInfo, fundamentals) {
     rawTotals.base.ev,
     rawTotals.base.equity,
     rawTotals.bull.equity,
+    rawTotals.bear.targetPrice,
+    rawTotals.base.targetPrice,
+    rawTotals.bull.targetPrice,
     fundamentals
   );
   return {
@@ -43981,6 +44071,25 @@ async function executeQuantEvaluation(opts) {
       amount_base: payload.summary.ext_total_base - payload.summary.ext_portfolio_base
     }
   } : payload.profile;
+  const livePricesMap = /* @__PURE__ */ new Map();
+  for (const pos of payload.portfolio.positions) {
+    if (pos.price > 0) {
+      livePricesMap.set(pos.ticker.toUpperCase(), pos.price);
+      if (pos.yf_symbol) {
+        livePricesMap.set(pos.yf_symbol, pos.price);
+        livePricesMap.set(pos.yf_symbol.toUpperCase(), pos.price);
+      }
+    }
+  }
+  for (const t of payload.theses) {
+    if (t.price !== null && t.price > 0) {
+      livePricesMap.set(t.ticker.toUpperCase(), t.price);
+      if (t.yf_symbol) {
+        livePricesMap.set(t.yf_symbol, t.price);
+        livePricesMap.set(t.yf_symbol.toUpperCase(), t.price);
+      }
+    }
+  }
   const evaluation = runQuantWalkForwardEvaluation(
     req,
     portfolio,
@@ -43988,7 +44097,8 @@ async function executeQuantEvaluation(opts) {
     historyCache,
     payload.fx_rates,
     {
-      defaultRfPct: payload.macro_regime?.us3m_pct ?? 4
+      defaultRfPct: payload.macro_regime?.us3m_pct ?? 4,
+      livePricesMap
     }
   );
   payload.lab.latest_quant_eval = evaluation;
