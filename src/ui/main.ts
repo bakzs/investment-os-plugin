@@ -1198,6 +1198,38 @@ function fmtCompact(n: number, ccy: string): string {
   return fmtMoney(n, ccy, 0);
 }
 
+function fmtHeaderTimestamp(isoStr: string | null | undefined): string {
+  if (!isoStr) return "";
+  const dt = new Date(isoStr);
+  if (Number.isNaN(dt.getTime())) return isoStr;
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(dt);
+  } catch {
+    return isoStr.slice(0, 16).replace("T", " ");
+  }
+}
+
+function cleanAlertTitle(title: string, ticker?: string | null): string {
+  const trimmed = title.trim();
+  if (!ticker) return trimmed;
+  const sym = ticker.trim().toUpperCase();
+  // Strip duplicated prefix like "NVDA · NVDA Rule Breached" or "NVDA - NVDA ..."
+  const dupPrefix = new RegExp(`^${sym}\\s*[·:-]\\s*${sym}\\s+`, "i");
+  if (dupPrefix.test(trimmed)) {
+    return `${sym} · ${trimmed.replace(dupPrefix, "")}`;
+  }
+  const singlePrefix = new RegExp(`^${sym}\\s+`, "i");
+  if (singlePrefix.test(trimmed)) {
+    return `${sym} · ${trimmed.replace(singlePrefix, "")}`;
+  }
+  return trimmed;
+}
+
 function fmtPct(n: number | null | undefined, digits = 1): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "N/A";
   return `${n.toFixed(digits)}%`;
@@ -2163,7 +2195,7 @@ function renderOverview(data: DashboardPayload): string {
       ticker: a.ticker ?? undefined,
       themeSlug: a.theme_slug ?? undefined,
       alertId: a.id,
-      title: a.title,
+      title: cleanAlertTitle(a.title, a.ticker),
       detail: `${a.detected_at.slice(0, 10)}${a.detail ? ` · ${a.detail}` : ""}`,
       badgeLabel: a.kind === "hypothesis_rule_breach" ? "Rule Breach" : a.kind === "sec_gate_cleared" ? "Gate Cleared" : "High Priority",
       dotCls: a.kind === "sec_gate_cleared" ? "ok" : "bad",
@@ -3139,7 +3171,7 @@ function renderEdgar(data: DashboardPayload, canOpenLinks: boolean): string {
   const renderAlertRow = (a: WatchdogAlert) => `
     <div class="alert-row">
       <button type="button" class="alert-row-main" ${a.ticker ? `data-inspect-ticker="${esc(a.ticker)}"` : a.theme_slug ? `data-inspect-theme="${esc(a.theme_slug)}"` : ""}>
-        <span class="queue-title">${esc(a.title)}</span>
+        <span class="queue-title">${esc(cleanAlertTitle(a.title, a.ticker))}</span>
         <span class="queue-sub">${esc(a.detected_at.slice(0, 10))}${a.detail ? ` · ${esc(a.detail)}` : ""}</span>
       </button>
       <div class="alert-right">
@@ -5442,28 +5474,52 @@ function setupInspectorDialogHost(): HTMLDialogElement {
 }
 
 function selectTab(nextTab: TabId, focusTab = false): void {
+  if (activeTab === nextTab && !focusTab) return;
   activeTab = nextTab;
   const tabBtns = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
   const panels = Array.from(document.querySelectorAll<HTMLElement>('[role="tabpanel"]'));
 
-  for (const btn of tabBtns) {
-    const selected = btn.dataset.tab === activeTab;
-    btn.setAttribute("aria-selected", selected ? "true" : "false");
-    btn.toggleAttribute("focusgroupstart", selected);
-    if (selected) {
-      btn.scrollIntoView({ block: "nearest", inline: "nearest" });
-      if (focusTab) btn.focus();
+  const applyTabUpdate = () => {
+    for (const btn of tabBtns) {
+      const selected = btn.dataset.tab === activeTab;
+      btn.setAttribute("aria-selected", selected ? "true" : "false");
+      btn.toggleAttribute("focusgroupstart", selected);
+      if (selected) {
+        btn.scrollIntoView({
+          block: "nearest",
+          inline: "nearest",
+          container: "nearest",
+        } as ScrollIntoViewOptions);
+      }
     }
-  }
 
-  for (const panel of panels) {
-    const isCurrent = panel.dataset.panel === activeTab;
-    if (isCurrent) {
-      panel.removeAttribute("hidden");
-      panel.setAttribute("tabindex", "0");
-    } else {
-      panel.setAttribute("hidden", "until-found");
-      panel.removeAttribute("tabindex");
+    for (const panel of panels) {
+      const isCurrent = panel.dataset.panel === activeTab;
+      if (isCurrent) {
+        panel.removeAttribute("hidden");
+        panel.setAttribute("tabindex", "0");
+      } else {
+        panel.setAttribute("hidden", "until-found");
+        panel.removeAttribute("tabindex");
+      }
+    }
+  };
+
+  const docWithVt = document as Document & {
+    startViewTransition?: (cb: () => void) => { finished: Promise<void> };
+  };
+  const prefersReducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
+  if (typeof docWithVt.startViewTransition === "function" && !prefersReducedMotion) {
+    const vt = docWithVt.startViewTransition(applyTabUpdate);
+    if (focusTab) {
+      vt.finished.finally(() => {
+        document.getElementById(`tab-${activeTab}`)?.focus();
+      });
+    }
+  } else {
+    applyTabUpdate();
+    if (focusTab) {
+      document.getElementById(`tab-${activeTab}`)?.focus();
     }
   }
 }
@@ -5559,7 +5615,7 @@ function render(): void {
               <span class="ver-badge">v0.6</span>
               <span class="status-tag"><span class="dot ${statusDotCls}"></span>${statusLbl}</span>
             </div>
-            <div class="meta-line">Base ${esc(state.base_currency)} · ${esc(state.generated_at)}</div>
+            <div class="meta-line">Base ${esc(state.base_currency)} · ${esc(fmtHeaderTimestamp(state.generated_at))}</div>
           </div>
         </div>
         <div class="cmd-actions">
