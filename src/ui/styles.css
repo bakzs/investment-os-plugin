@@ -1776,6 +1776,12 @@ dialog#stock-inspector::backdrop {
   color: var(--fg-primary);
 }
 
+.v4-form input:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+  background: var(--bg-inset);
+}
+
 .pos-warn {
   color: var(--warn);
 }
@@ -3379,6 +3385,13 @@ dialog#stock-inspector {
 .sotp-sliders-grid .sim-field label {
   font-size: 0.71rem;
   gap: 0.35rem;
+  align-items: baseline;
+}
+
+.sotp-slider-hint {
+  font-weight: 400;
+  font-size: 0.65rem;
+  white-space: nowrap;
 }
 
 .sotp-total-row th,

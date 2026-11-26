@@ -1022,7 +1022,7 @@ interface TailEvalRow {
   kupiec_calibrated: boolean;
   mean_pinball_loss_pct: number;
   coverage_80_pct: number;
-  cvar95_shortfall_ratio: number;
+  cvar95_shortfall_ratio: number | null;
   is_winner: boolean;
 }
 
@@ -2153,11 +2153,13 @@ function ingestPayload(payload: unknown): void {
     const anyThesis = p.theses.find((t) => t.tier !== "active")?.ticker ?? p.theses[0]?.ticker ?? "";
     btTicker = benchFirst ?? anyThesis;
   }
-  if (p.lab?.latest_backtest && !backtestResult) {
+  if (p.lab?.latest_backtest) {
     backtestResult = p.lab.latest_backtest;
+    backtestError = "";
   }
-  if (p.lab?.latest_quant_eval && !quantEvalResult) {
+  if (p.lab?.latest_quant_eval) {
     quantEvalResult = p.lab.latest_quant_eval;
+    quantEvalError = null;
   }
   if (p.forecast) {
     if (!forecastResult || firstLoad) {
@@ -4249,12 +4251,15 @@ interface SotpSliderSpec {
   max: number;
   step: number;
   value: number;
+  bearBullHint?: string;
 }
 
 interface SotpClientEval {
   sotp: SotpValuationSummary;
   expected_price_5y: number;
+  expected_gross_cagr_pct: number | null;
   expected_after_tax_cagr_pct: number | null;
+  spread_vs_benchmark_pct: number | null;
   spread_vs_hurdle_pct: number | null;
 }
 
@@ -4267,17 +4272,19 @@ function resolveClientTaxInfo(
   data: DashboardPayload,
   thesis: ThesisRow | undefined,
   model: DossierModel | null | undefined,
-): { hurdle_cagr_pct: number; total_tax_drag_pct: number; accumulating: boolean } {
+): { benchmark_cagr_pct: number; hurdle_cagr_pct: number; total_tax_drag_pct: number; accumulating: boolean } {
   const ti = thesis?.scenario_summary?.tax_info;
   if (ti) {
     return {
+      benchmark_cagr_pct: ti.benchmark_cagr_pct,
       hurdle_cagr_pct: ti.hurdle_cagr_pct,
       total_tax_drag_pct: ti.total_tax_drag_pct,
       accumulating: Boolean(ti.accumulating || model?.accumulating),
     };
   }
   const bench = data.profile.benchmark;
-  const hurdle = data.lab?.benchmark_summary.hurdle_cagr_pct ?? ((bench?.expected_cagr_pct ?? 8) + (bench?.alpha_buffer_pct ?? 2.5));
+  const benchCagr = bench?.expected_cagr_pct ?? 8;
+  const hurdle = data.lab?.benchmark_summary.hurdle_cagr_pct ?? (benchCagr + (bench?.alpha_buffer_pct ?? 2.5));
   const usSitus = Boolean(thesis?.us_situs);
   const accumulating = Boolean(model?.accumulating);
   const divYield = !accumulating && model && Number.isFinite(model.dividend_yield_pct) && model.dividend_yield_pct > 0 ? model.dividend_yield_pct : 0;
@@ -4295,13 +4302,18 @@ function resolveClientTaxInfo(
       estDrag = (1 - Math.pow(1 - rate, 1 / yrs)) * 100;
     }
   }
-  return { hurdle_cagr_pct: hurdle, total_tax_drag_pct: roundNum(divDrag + estDrag, 2), accumulating };
+  return {
+    benchmark_cagr_pct: benchCagr,
+    hurdle_cagr_pct: hurdle,
+    total_tax_drag_pct: roundNum(divDrag + estDrag, 2),
+    accumulating,
+  };
 }
 
 function computeSotpClient(
   price: number | null,
   model: DossierModel,
-  taxInfo: { hurdle_cagr_pct: number; total_tax_drag_pct: number; accumulating?: boolean },
+  taxInfo: { benchmark_cagr_pct?: number; hurdle_cagr_pct: number; total_tax_drag_pct: number; accumulating?: boolean },
 ): SotpClientEval | null {
   const fm = model.fundamental_model;
   if (!fm || !Array.isArray(fm.segments) || fm.segments.length === 0 || !Number.isFinite(fm.base_shares_m) || fm.base_shares_m <= 0) {
@@ -4437,20 +4449,24 @@ function computeSotpClient(
 
   const probNorm = probs.bear + probs.base + probs.bull || 1;
   let expPx = 0;
+  let expTermGross = 0;
   let expTermAt = 0;
   for (const c of keys) {
     const w = probs[c] / probNorm;
     const px = totals[c].target_price;
     expPx += w * px;
-    if (hasPrice && price) {
-      const ratio = px / price;
-      const pxCagr = ratio > 0 ? (Math.pow(ratio, 1 / horizonYears) - 1) * 100 : -95;
-      const afterTax = roundNum(roundNum(pxCagr + rawDiv, 2) - taxInfo.total_tax_drag_pct, 2);
+    const gross = totals[c].implied_gross_cagr_pct;
+    const afterTax = totals[c].implied_after_tax_cagr_pct;
+    if (hasPrice && price && gross !== null && afterTax !== null) {
+      expTermGross += w * price * Math.pow(Math.max(0.01, 1 + gross / 100), horizonYears);
       expTermAt += w * price * Math.pow(Math.max(0.01, 1 + afterTax / 100), horizonYears);
     }
   }
+  const expGrossCagr =
+    hasPrice && price ? roundNum((Math.pow(Math.max(0.0001, expTermGross / price), 1 / horizonYears) - 1) * 100, 2) : null;
   const expAtCagr =
     hasPrice && price ? roundNum((Math.pow(Math.max(0.0001, expTermAt / price), 1 / horizonYears) - 1) * 100, 2) : null;
+  const benchCagr = taxInfo.benchmark_cagr_pct ?? 8;
 
   return {
     sotp: {
@@ -4466,7 +4482,9 @@ function computeSotpClient(
       methodology_note: fm.methodology_note ?? null,
     },
     expected_price_5y: roundNum(expPx, 2),
+    expected_gross_cagr_pct: expGrossCagr,
     expected_after_tax_cagr_pct: expAtCagr,
+    spread_vs_benchmark_pct: expAtCagr !== null ? roundNum(expAtCagr - benchCagr, 2) : null,
     spread_vs_hurdle_pct: expAtCagr !== null ? roundNum(expAtCagr - taxInfo.hurdle_cagr_pct, 2) : null,
   };
 }
@@ -4478,6 +4496,33 @@ function formatSliderValue(field: SotpSliderField, val: number): string {
   return val.toLocaleString("en-US", { maximumFractionDigits: 1 });
 }
 
+function formatBearBullHint(field: SotpSliderField, triple: ScenarioTriple): string {
+  if (!Number.isFinite(triple.bear) || !Number.isFinite(triple.bull)) return "";
+  const fmtBound = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
+  if (field === "success_prob") {
+    return `${Math.round(triple.bear * 100)}%–${Math.round(triple.bull * 100)}%`;
+  }
+  if (field === "rev_cagr_pct" || field === "margin_pct") {
+    return `Bear ${fmtBound(triple.bear)}% · Bull ${fmtBound(triple.bull)}%`;
+  }
+  if (field === "exit_multiple") {
+    return `Bear ${fmtBound(triple.bear)}x · Bull ${fmtBound(triple.bull)}x`;
+  }
+  return `Bear ${triple.bear.toLocaleString("en-US", { maximumFractionDigits: 1 })} · Bull ${triple.bull.toLocaleString("en-US", { maximumFractionDigits: 1 })}`;
+}
+
+function isSotpInverted(sotp: SotpValuationSummary): boolean {
+  return (
+    sotp.totals.base.target_price < sotp.totals.bear.target_price - 0.01 ||
+    sotp.totals.base.target_price > sotp.totals.bull.target_price + 0.01
+  );
+}
+
+function buildSotpInversionInnerHtml(sotp: SotpValuationSummary, currency: string): string {
+  if (!isSotpInverted(sotp)) return "";
+  return `<span class="micro-label pos-warn">Scenario Order Warning</span><div>• SOTP scenarios are inverted (Bear ${esc(fmtMoney(sotp.totals.bear.target_price, currency, 2))} / Base ${esc(fmtMoney(sotp.totals.base.target_price, currency, 2))} / Bull ${esc(fmtMoney(sotp.totals.bull.target_price, currency, 2))}); verify segment assumptions.</div>`;
+}
+
 function buildSotpSliders(fm: FundamentalModel): SotpSliderSpec[] {
   const sliders: SotpSliderSpec[] = [];
   for (const seg of fm.segments.slice(0, 6)) {
@@ -4487,14 +4532,41 @@ function buildSotpSliders(fm: FundamentalModel): SotpSliderSpec[] {
       const hi = Math.max(v, Math.ceil(Math.max(seg.units.bull * 1.3, v * 1.5, 10)));
       const span = Math.max(1, hi - lo);
       const step = span <= 5 ? 0.1 : span <= 30 ? 0.5 : span <= 150 ? 1 : span <= 1000 ? 5 : Math.max(1, Math.round(span / 80));
-      sliders.push({ segId: seg.id, field: "units", label: `${seg.name} (${seg.unit_label || "Units"})`, min: lo, max: hi, step, value: v });
+      sliders.push({
+        segId: seg.id,
+        field: "units",
+        label: `${seg.name} (${seg.unit_label || "Units"})`,
+        min: lo,
+        max: hi,
+        step,
+        value: v,
+        bearBullHint: formatBearBullHint("units", seg.units),
+      });
     } else if (seg.kind === "cagr_margin" && seg.rev_cagr_pct) {
       const v = seg.rev_cagr_pct.base;
       const lo = Math.min(v, -10, Math.floor(seg.rev_cagr_pct.bear - 5));
       const hi = Math.max(v, 35, Math.ceil(seg.rev_cagr_pct.bull + 8));
-      sliders.push({ segId: seg.id, field: "rev_cagr_pct", label: `${seg.name} Rev CAGR`, min: lo, max: hi, step: 0.5, value: v });
+      sliders.push({
+        segId: seg.id,
+        field: "rev_cagr_pct",
+        label: `${seg.name} Rev CAGR`,
+        min: lo,
+        max: hi,
+        step: 0.5,
+        value: v,
+        bearBullHint: formatBearBullHint("rev_cagr_pct", seg.rev_cagr_pct),
+      });
     } else if (seg.kind === "milestone_option" && seg.success_prob) {
-      sliders.push({ segId: seg.id, field: "success_prob", label: `${seg.name} Prob`, min: 0, max: 1, step: 0.05, value: Math.min(1, Math.max(0, seg.success_prob.base)) });
+      sliders.push({
+        segId: seg.id,
+        field: "success_prob",
+        label: `${seg.name} Prob`,
+        min: 0,
+        max: 1,
+        step: 0.05,
+        value: Math.min(1, Math.max(0, seg.success_prob.base)),
+        bearBullHint: formatBearBullHint("success_prob", seg.success_prob),
+      });
     }
   }
   if (fm.segments.length <= 3) {
@@ -4504,7 +4576,16 @@ function buildSotpSliders(fm: FundamentalModel): SotpSliderSpec[] {
         const v = seg.margin_pct.base;
         const lo = Math.min(v, 0, Math.floor(seg.margin_pct.bear - 10));
         const hi = Math.max(v, Math.min(95, Math.ceil(Math.max(60, seg.margin_pct.bull + 10))));
-        sliders.push({ segId: seg.id, field: "margin_pct", label: `${seg.name} Margin`, min: lo, max: hi, step: 0.5, value: v });
+        sliders.push({
+          segId: seg.id,
+          field: "margin_pct",
+          label: `${seg.name} Margin`,
+          min: lo,
+          max: hi,
+          step: 0.5,
+          value: v,
+          bearBullHint: formatBearBullHint("margin_pct", seg.margin_pct),
+        });
       }
     }
     for (const seg of fm.segments) {
@@ -4513,7 +4594,16 @@ function buildSotpSliders(fm: FundamentalModel): SotpSliderSpec[] {
         const v = seg.exit_multiple.base;
         const lo = Math.min(v, Math.max(1, Math.floor(Math.min(seg.exit_multiple.bear * 0.5, v * 0.5))));
         const hi = Math.max(v, 40, Math.ceil(Math.max(seg.exit_multiple.bull * 1.4, v * 1.5)));
-        sliders.push({ segId: seg.id, field: "exit_multiple", label: `${seg.name} Multiple`, min: lo, max: hi, step: 0.5, value: v });
+        sliders.push({
+          segId: seg.id,
+          field: "exit_multiple",
+          label: `${seg.name} Multiple`,
+          min: lo,
+          max: hi,
+          step: 0.5,
+          value: v,
+          bearBullHint: formatBearBullHint("exit_multiple", seg.exit_multiple),
+        });
       }
     }
   }
@@ -4540,9 +4630,12 @@ function renderSotpWorkbench(
   }
 
   const fmBase = detail?.model?.fundamental_model ?? null;
+  const hasDraft = Boolean(sym && sotpDraftModel.has(sym));
   const activeFm = (sym ? sotpDraftModel.get(sym) : undefined) ?? fmBase;
   const livePrice = (sym ? state?.portfolio.positions.find((p) => p.ticker === sym)?.price : undefined) ?? thesis?.price ?? null;
-  const taxInfo = state ? resolveClientTaxInfo(state, thesis, detail?.model) : { hurdle_cagr_pct: 10.5, total_tax_drag_pct: 0, accumulating: false };
+  const taxInfo = state
+    ? resolveClientTaxInfo(state, thesis, detail?.model)
+    : { benchmark_cagr_pct: 8, hurdle_cagr_pct: 10.5, total_tax_drag_pct: 0, accumulating: false };
   const draftClient =
     activeFm && detail?.model
       ? computeSotpClient(livePrice, { ...detail.model, fundamental_model: activeFm }, taxInfo)
@@ -4571,7 +4664,11 @@ function renderSotpWorkbench(
     })
     .join("");
 
-  const extraWarnings = storedSotp.sotp_warnings.filter((w) => !(scen?.valuation_warnings ?? []).includes(w));
+  const isInverted = isSotpInverted(sotp);
+  const inversionWarnHtml = `<div id="sotp-live-inversion-warn" class="warn-box" role="status"${isInverted ? "" : ' style="display:none"'}>${buildSotpInversionInnerHtml(sotp, currency)}</div>`;
+  const extraWarnings = storedSotp.sotp_warnings.filter(
+    (w) => !(scen?.valuation_warnings ?? []).includes(w) && !/^SOTP scenarios are inverted/i.test(w),
+  );
   const sotpWarnHtml =
     extraWarnings.length > 0
       ? `<div class="warn-box" role="status"><span class="micro-label pos-warn">SOTP Guardrails</span>${extraWarnings.map((w) => `<div>• ${esc(w)}</div>`).join("")}</div>`
@@ -4613,6 +4710,7 @@ function renderSotpWorkbench(
         <span>Bear–Bull <strong id="sotp-live-px-range">${fmtMoney(sotp.totals.bear.target_price, currency, 0)}–${fmtMoney(sotp.totals.bull.target_price, currency, 0)}</strong> · Exp 5Y <strong id="sotp-live-exp-px">${fmtMoney(expPx, currency, 2)}</strong> · After-Tax <strong id="sotp-live-exp-cagr">${expAtCagr !== null ? fmtSignedPct(expAtCagr, 1) : "—"}</strong> · vs Hurdle <strong id="sotp-live-spread" class="${spreadHurdle !== null ? (spreadHurdle >= 0 ? "pos-ok" : "pos-bad") : ""}">${spreadHurdle !== null ? fmtSignedPct(spreadHurdle, 1) : "—"}</strong></span>
       </div>
       ${sotp.methodology_note ? `<div class="muted-sub">${esc(sotp.methodology_note)}</div>` : ""}
+      ${inversionWarnHtml}
       ${sotpWarnHtml}
     </div>
   `;
@@ -4625,6 +4723,7 @@ function renderSotpWorkbench(
         <div class="hypothesis-head">
           <span class="micro-label">Key-Driver Sensitivity Sliders (Base Case)</span>
           <div class="actions-row" style="gap:0.35rem">
+            <span id="sotp-draft-badge" class="auto-badge warn"${hasDraft ? "" : ' style="display:none"'}>Unsaved Draft</span>
             <button type="button" class="small ghost" id="btn-reset-sotp">Reset</button>
             <button type="button" class="small primary" id="btn-save-sotp" ${isDemo ? `disabled title="Read-only in Sample Demo preview"` : ""}>Save SOTP Model</button>
           </div>
@@ -4634,8 +4733,8 @@ function renderSotpWorkbench(
             .map(
               (sl) => `
             <div class="sim-field">
-              <label>
-                <span class="wrap-cell">${esc(sl.label)}</span>
+              <label${sl.bearBullHint ? ` title="${esc(sl.bearBullHint)}"` : ""}>
+                <span class="wrap-cell">${esc(sl.label)}${sl.bearBullHint ? ` <span class="muted-sub sotp-slider-hint">(${esc(sl.bearBullHint)})</span>` : ""}</span>
                 <strong id="sotp-slider-val-${esc(sl.segId)}-${esc(sl.field)}">${esc(formatSliderValue(sl.field, sl.value))}</strong>
               </label>
               <input type="range" class="sotp-slider" data-sotp-seg="${esc(sl.segId)}" data-sotp-field="${esc(sl.field)}" min="${sl.min}" max="${sl.max}" step="${sl.step}" value="${sl.value}" />
@@ -4795,6 +4894,22 @@ function renderValuationSection(
       ? `<div class="kelly-subline">Standalone Kelly CAGR: <strong>${scen.standalone_kelly_cagr_pct.toFixed(1)}%</strong>${scen.dispersion_drag_bps !== undefined ? ` (dispersion drag ${scen.dispersion_drag_bps.toFixed(0)} bps)` : ""}${scen.tax_info.estate_tax_drag_mode ? ` · Estate mode: ${esc(scen.tax_info.estate_tax_drag_mode)}` : ""}${scen.tax_info.accumulating ? " · Accumulating ETF (0% dist. WHT)" : ""}</div>`
       : "";
 
+  const draftFm = sym ? sotpDraftModel.get(sym) : undefined;
+  const livePrice = (sym ? state?.portfolio.positions.find((p) => p.ticker === sym)?.price : undefined) ?? thesis?.price ?? null;
+  const taxInfo = state
+    ? resolveClientTaxInfo(state, thesis, model)
+    : { benchmark_cagr_pct: 8, hurdle_cagr_pct: 10.5, total_tax_drag_pct: 0, accumulating: false };
+  const draftClient =
+    draftFm && model && draftFm.derive_scenarios_from_sotp !== false
+      ? computeSotpClient(livePrice, { ...model, fundamental_model: draftFm }, taxInfo)
+      : null;
+
+  const expRowPx = draftClient ? draftClient.expected_price_5y : scen?.expected_price_5y;
+  const expRowGross = draftClient ? draftClient.expected_gross_cagr_pct : scen?.expected_gross_cagr_pct;
+  const expRowAt = draftClient ? draftClient.expected_after_tax_cagr_pct : scen?.expected_after_tax_cagr_pct;
+  const expRowBench = draftClient ? draftClient.spread_vs_benchmark_pct : scen?.spread_vs_benchmark_pct;
+  const expRowHurdle = draftClient ? draftClient.spread_vs_hurdle_pct : scen?.spread_vs_hurdle_pct;
+
   const scenTableHtml = scen
     ? `
       <div class="compact-table-wrap">
@@ -4813,14 +4928,19 @@ function renderValuationSection(
             ${(["bear", "base", "bull"] as const)
               .map((k) => {
                 const c = scen.cases[k];
+                const isBase = k === "base";
+                const rowPx = isBase && draftClient ? draftClient.sotp.totals.base.target_price : c.target_price_5y;
+                const rowGross = isBase && draftClient ? draftClient.sotp.totals.base.implied_gross_cagr_pct : c.gross_cagr_pct;
+                const rowAt = isBase && draftClient ? draftClient.sotp.totals.base.implied_after_tax_cagr_pct : c.after_tax_cagr_pct;
+                const rowSummary = isBase && draftClient ? draftClient.sotp.derived_scenarios.base.summary : c.summary;
                 return `
                   <tr>
                     <th scope="row" style="text-transform:capitalize">${k}</th>
                     <td class="num">${(c.probability * 100).toFixed(0)}%</td>
-                    <td class="num"><strong>${fmtMoney(c.target_price_5y, currency, 2)}</strong></td>
-                    <td class="num">${fmtSignedPct(c.gross_cagr_pct, 1)}</td>
-                    <td class="num">${fmtDeltaText(c.after_tax_cagr_pct)}</td>
-                    <td class="wrap-cell muted-sub">${esc(c.summary)}</td>
+                    <td class="num"${isBase ? ' id="scen-base-px"' : ""}><strong>${fmtMoney(rowPx, currency, 2)}</strong></td>
+                    <td class="num"${isBase ? ' id="scen-base-gross"' : ""}>${fmtSignedPct(rowGross, 1)}</td>
+                    <td class="num"${isBase ? ' id="scen-base-at"' : ""}>${fmtDeltaText(rowAt)}</td>
+                    <td class="wrap-cell muted-sub"${isBase ? ' id="scen-base-summary"' : ""}>${esc(rowSummary)}</td>
                   </tr>
                 `;
               })
@@ -4828,10 +4948,10 @@ function renderValuationSection(
             <tr>
               <th scope="row">Expected</th>
               <td class="num">100%</td>
-              <td class="num"><strong>${fmtMoney(scen.expected_price_5y, currency, 2)}</strong></td>
-              <td class="num">${fmtSignedPct(scen.expected_gross_cagr_pct, 1)}</td>
-              <td class="num"><strong>${fmtDeltaText(scen.expected_after_tax_cagr_pct)}</strong></td>
-              <td class="wrap-cell">vs Bench <strong>${fmtSignedPct(scen.spread_vs_benchmark_pct, 1)}</strong> · vs Hurdle <strong class="${scen.spread_vs_hurdle_pct >= 0 ? "pos-ok" : "pos-bad"}">${fmtSignedPct(scen.spread_vs_hurdle_pct, 1)}</strong></td>
+              <td class="num" id="scen-exp-px"><strong>${fmtMoney(expRowPx, currency, 2)}</strong></td>
+              <td class="num" id="scen-exp-gross">${fmtSignedPct(expRowGross, 1)}</td>
+              <td class="num" id="scen-exp-at"><strong>${fmtDeltaText(expRowAt)}</strong></td>
+              <td class="wrap-cell" id="scen-exp-spread">vs Bench <strong>${fmtSignedPct(expRowBench, 1)}</strong> · vs Hurdle <strong class="${expRowHurdle !== null && expRowHurdle !== undefined ? (expRowHurdle >= 0 ? "pos-ok" : "pos-bad") : ""}">${fmtSignedPct(expRowHurdle, 1)}</strong></td>
             </tr>
           </tbody>
         </table>
@@ -4841,22 +4961,25 @@ function renderValuationSection(
     `
     : `<div class="muted-sub">No 5Y Bear/Base/Bull scenarios modeled yet. Add targets below to compute after-tax CAGR vs hurdle.</div>`;
 
-  const bearTarget = model?.scenarios?.bear.target_price_5y ?? scen?.cases.bear.target_price_5y ?? "";
-  const baseTarget = model?.scenarios?.base.target_price_5y ?? scen?.cases.base.target_price_5y ?? "";
-  const bullTarget = model?.scenarios?.bull.target_price_5y ?? scen?.cases.bull.target_price_5y ?? "";
-  const bearProb = model?.scenarios?.bear.probability ?? scen?.cases.bear.probability ?? 0.25;
-  const baseProb = model?.scenarios?.base.probability ?? scen?.cases.base.probability ?? 0.5;
-  const bullProb = model?.scenarios?.bull.probability ?? scen?.cases.bull.probability ?? 0.25;
+  const sotpControlled = Boolean(model?.fundamental_model && model.fundamental_model.derive_scenarios_from_sotp !== false);
+  const storedOrDraftSotp = draftClient?.sotp ?? detail?.sotp_summary ?? thesis?.sotp_summary ?? null;
+  const bearTarget = model?.scenarios?.bear.target_price_5y ?? scen?.cases.bear.target_price_5y ?? storedOrDraftSotp?.totals.bear.target_price ?? "";
+  const baseTarget = model?.scenarios?.base.target_price_5y ?? scen?.cases.base.target_price_5y ?? storedOrDraftSotp?.totals.base.target_price ?? "";
+  const bullTarget = model?.scenarios?.bull.target_price_5y ?? scen?.cases.bull.target_price_5y ?? storedOrDraftSotp?.totals.bull.target_price ?? "";
+  const bearProb = (sotpControlled ? model?.fundamental_model?.scenario_probabilities?.bear : undefined) ?? model?.scenarios?.bear.probability ?? scen?.cases.bear.probability ?? 0.25;
+  const baseProb = (sotpControlled ? model?.fundamental_model?.scenario_probabilities?.base : undefined) ?? model?.scenarios?.base.probability ?? scen?.cases.base.probability ?? 0.5;
+  const bullProb = (sotpControlled ? model?.fundamental_model?.scenario_probabilities?.bull : undefined) ?? model?.scenarios?.bull.probability ?? scen?.cases.bull.probability ?? 0.25;
 
   const editFormHtml = !isDemo
     ? `
       <details class="add-hyp-details">
-        <summary>Edit Bear / Base / Bull Targets &amp; Probabilities</summary>
+        <summary>${sotpControlled ? "Edit Scenario Probabilities (or Detach from SOTP)" : "Edit Bear / Base / Bull Targets &amp; Probabilities"}</summary>
         <div class="v4-form" style="display:flex;flex-direction:column;gap:0.45rem;margin-top:0.45rem">
+          ${sotpControlled ? `<label class="bt-check-label" style="padding-top:0"><input type="checkbox" id="mod-detach-sotp" /> Detach Bear/Base/Bull target prices from SOTP segments</label>` : ""}
           <div class="model-edit-grid">
-            <label>Bear 5Y Target <input type="number" step="any" id="mod-bear-px" value="${bearTarget}" /></label>
-            <label>Base 5Y Target <input type="number" step="any" id="mod-base-px" value="${baseTarget}" /></label>
-            <label>Bull 5Y Target <input type="number" step="any" id="mod-bull-px" value="${bullTarget}" /></label>
+            <label>Bear 5Y Target <input type="number" step="any" id="mod-bear-px" value="${bearTarget}" ${sotpControlled ? "disabled" : ""} /></label>
+            <label>Base 5Y Target <input type="number" step="any" id="mod-base-px" value="${baseTarget}" ${sotpControlled ? "disabled" : ""} /></label>
+            <label>Bull 5Y Target <input type="number" step="any" id="mod-bull-px" value="${bullTarget}" ${sotpControlled ? "disabled" : ""} /></label>
             <label>Bear Prob (0-1) <input type="number" step="0.05" min="0" max="1" id="mod-bear-p" value="${bearProb}" /></label>
             <label>Base Prob (0-1) <input type="number" step="0.05" min="0" max="1" id="mod-base-p" value="${baseProb}" /></label>
             <label>Bull Prob (0-1) <input type="number" step="0.05" min="0" max="1" id="mod-bull-p" value="${bullProb}" /></label>
@@ -5881,6 +6004,10 @@ function bindInspectorEvents(dlg: HTMLDialogElement, sym: string, detail: Dossie
       const el = document.getElementById(id);
       if (el) el.textContent = text;
     };
+    const setHtml = (id: string, html: string) => {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = html;
+    };
     const { sotp } = live;
     for (const seg of sotp.segments) {
       const isOpt = seg.kind === "milestone_option";
@@ -5906,6 +6033,28 @@ function bindInspectorEvents(dlg: HTMLDialogElement, sym: string, detail: Dossie
       spreadEl.textContent = live.spread_vs_hurdle_pct !== null ? fmtSignedPct(live.spread_vs_hurdle_pct, 1) : "—";
       spreadEl.className = live.spread_vs_hurdle_pct !== null ? (live.spread_vs_hurdle_pct >= 0 ? "pos-ok" : "pos-bad") : "";
     }
+    const invWarnEl = document.getElementById("sotp-live-inversion-warn");
+    if (invWarnEl) {
+      const inverted = isSotpInverted(sotp);
+      invWarnEl.style.display = inverted ? "" : "none";
+      invWarnEl.innerHTML = buildSotpInversionInnerHtml(sotp, currency);
+    }
+
+    if (draft.derive_scenarios_from_sotp !== false) {
+      setHtml("scen-base-px", `<strong>${esc(fmtMoney(sotp.totals.base.target_price, currency, 2))}</strong>`);
+      setText("scen-base-gross", fmtSignedPct(sotp.totals.base.implied_gross_cagr_pct, 1));
+      setHtml("scen-base-at", fmtDeltaText(sotp.totals.base.implied_after_tax_cagr_pct));
+      setText("scen-base-summary", sotp.derived_scenarios.base.summary);
+
+      setHtml("scen-exp-px", `<strong>${esc(fmtMoney(live.expected_price_5y, currency, 2))}</strong>`);
+      setText("scen-exp-gross", fmtSignedPct(live.expected_gross_cagr_pct, 1));
+      setHtml("scen-exp-at", `<strong>${fmtDeltaText(live.expected_after_tax_cagr_pct)}</strong>`);
+      const expSpreadCls = live.spread_vs_hurdle_pct !== null ? (live.spread_vs_hurdle_pct >= 0 ? "pos-ok" : "pos-bad") : "";
+      setHtml(
+        "scen-exp-spread",
+        `vs Bench <strong>${esc(fmtSignedPct(live.spread_vs_benchmark_pct, 1))}</strong> · vs Hurdle <strong class="${expSpreadCls}">${esc(fmtSignedPct(live.spread_vs_hurdle_pct, 1))}</strong>`,
+      );
+    }
   };
 
   dlg.querySelectorAll<HTMLInputElement>(".sotp-slider").forEach((slider) => {
@@ -5929,6 +6078,8 @@ function bindInspectorEvents(dlg: HTMLDialogElement, sym: string, detail: Dossie
 
       const valEl = document.getElementById(`sotp-slider-val-${segId}-${field}`);
       if (valEl) valEl.textContent = formatSliderValue(field, nextVal);
+      const badgeEl = document.getElementById("sotp-draft-badge");
+      if (badgeEl) badgeEl.style.display = "";
       applySotpLiveDomUpdate(draft);
     });
   });
@@ -5957,12 +6108,23 @@ function bindInspectorEvents(dlg: HTMLDialogElement, sym: string, detail: Dossie
       dossierCache.set(sym, { ...prevCached, model: mergedModel, ...(live ? { sotp_summary: live.sotp } : {}) });
     }
     sotpDraftModel.delete(sym);
+    const badgeEl = document.getElementById("sotp-draft-badge");
+    if (badgeEl) badgeEl.style.display = "none";
     await runAppTool(
       "app_save_dossier_model",
       { ticker: sym, model: mergedModel, rationale: "Adjusted SOTP segment driver sliders" },
       `Saved ${sym} SOTP valuation model.`,
     );
     void fetchDossierDetail(sym);
+  });
+
+  const detachSotpEl = dlg.querySelector<HTMLInputElement>("#mod-detach-sotp");
+  detachSotpEl?.addEventListener("change", () => {
+    const unlocked = detachSotpEl.checked;
+    for (const id of ["mod-bear-px", "mod-base-px", "mod-bull-px"]) {
+      const inp = dlg.querySelector<HTMLInputElement>(`#${id}`);
+      if (inp) inp.disabled = !unlocked;
+    }
   });
 
   dlg.querySelector<HTMLButtonElement>("#btn-save-dossier-model")?.addEventListener("click", async () => {
@@ -5974,46 +6136,95 @@ function bindInspectorEvents(dlg: HTMLDialogElement, sym: string, detail: Dossie
     const bearPx = readNum("mod-bear-px", 0);
     const basePx = readNum("mod-base-px", 0);
     const bullPx = readNum("mod-bull-px", 0);
-    if (bearPx <= 0 || basePx <= 0 || bullPx <= 0) {
-      toastMessage = "Please enter positive 5Y target prices for Bear, Base, and Bull cases.";
-      render();
-      return;
-    }
+    const bearP = Math.min(1, Math.max(0, readNum("mod-bear-p", 0.25)));
+    const baseP = Math.min(1, Math.max(0, readNum("mod-base-p", 0.5)));
+    const bullP = Math.min(1, Math.max(0, readNum("mod-bull-p", 0.25)));
+
     const existing = detail?.model;
     const prevScen = existing?.scenarios;
-    const mergedModel: DossierModel = {
-      ...(existing ?? { horizon_years: 5, dividend_yield_pct: 0 }),
-      as_of: new Date().toISOString().slice(0, 10),
-      horizon_years: existing?.horizon_years ?? 5,
-      dividend_yield_pct: existing?.dividend_yield_pct ?? 0,
-      scenarios: {
+    const sotpControlled = Boolean(
+      existing?.fundamental_model && existing.fundamental_model.derive_scenarios_from_sotp !== false,
+    );
+    const detach = Boolean(dlg.querySelector<HTMLInputElement>("#mod-detach-sotp")?.checked);
+
+    let nextFm = existing?.fundamental_model ?? undefined;
+    let liveSotp: SotpClientEval | null = null;
+
+    if (sotpControlled && existing?.fundamental_model) {
+      const clonedFm = JSON.parse(JSON.stringify(existing.fundamental_model)) as FundamentalModel;
+      clonedFm.scenario_probabilities = { bear: bearP, base: baseP, bull: bullP };
+      clonedFm.derive_scenarios_from_sotp = !detach;
+      nextFm = clonedFm;
+
+      if (!detach) {
+        const thesis = state?.theses.find((t) => t.ticker === sym) ?? detail?.thesis ?? undefined;
+        const livePrice = state?.portfolio.positions.find((p) => p.ticker === sym)?.price ?? thesis?.price ?? null;
+        const taxInfo = state
+          ? resolveClientTaxInfo(state, thesis, existing)
+          : { benchmark_cagr_pct: 8, hurdle_cagr_pct: 10.5, total_tax_drag_pct: 0, accumulating: false };
+        liveSotp = computeSotpClient(livePrice, { ...existing, fundamental_model: clonedFm }, taxInfo);
+      }
+      const openDraft = sotpDraftModel.get(sym);
+      if (openDraft) {
+        openDraft.scenario_probabilities = { bear: bearP, base: baseP, bull: bullP };
+        openDraft.derive_scenarios_from_sotp = !detach;
+      }
+    } else if (existing?.fundamental_model) {
+      const clonedFm = JSON.parse(JSON.stringify(existing.fundamental_model)) as FundamentalModel;
+      clonedFm.scenario_probabilities = { bear: bearP, base: baseP, bull: bullP };
+      nextFm = clonedFm;
+    }
+
+    let nextScenarios: NonNullable<DossierModel["scenarios"]>;
+    if (sotpControlled && !detach && liveSotp) {
+      nextScenarios = liveSotp.sotp.derived_scenarios;
+    } else {
+      if (bearPx <= 0 || basePx <= 0 || bullPx <= 0) {
+        toastMessage = "Please enter positive 5Y target prices for Bear, Base, and Bull cases.";
+        render();
+        return;
+      }
+      nextScenarios = {
         bear: {
-          probability: Math.min(1, Math.max(0, readNum("mod-bear-p", 0.25))),
+          probability: bearP,
           target_price_5y: bearPx,
           multiple: prevScen?.bear.multiple ?? null,
           metric_cagr_pct: prevScen?.bear.metric_cagr_pct ?? null,
           summary: prevScen?.bear.summary || "Bear case 5Y valuation target.",
         },
         base: {
-          probability: Math.min(1, Math.max(0, readNum("mod-base-p", 0.5))),
+          probability: baseP,
           target_price_5y: basePx,
           multiple: prevScen?.base.multiple ?? null,
           metric_cagr_pct: prevScen?.base.metric_cagr_pct ?? null,
           summary: prevScen?.base.summary || "Base case 5Y valuation target.",
         },
         bull: {
-          probability: Math.min(1, Math.max(0, readNum("mod-bull-p", 0.25))),
+          probability: bullP,
           target_price_5y: bullPx,
           multiple: prevScen?.bull.multiple ?? null,
           metric_cagr_pct: prevScen?.bull.metric_cagr_pct ?? null,
           summary: prevScen?.bull.summary || "Bull case 5Y valuation target.",
         },
-      },
+      };
+    }
+
+    const mergedModel: DossierModel = {
+      ...(existing ?? { horizon_years: 5, dividend_yield_pct: 0 }),
+      as_of: new Date().toISOString().slice(0, 10),
+      horizon_years: existing?.horizon_years ?? 5,
+      dividend_yield_pct: existing?.dividend_yield_pct ?? 0,
+      ...(nextFm !== undefined ? { fundamental_model: nextFm } : {}),
+      scenarios: nextScenarios,
     };
     const rationale = dlg.querySelector<HTMLInputElement>("#mod-rationale")?.value.trim() ?? "";
     const prevCached = dossierCache.get(sym);
     if (prevCached) {
-      dossierCache.set(sym, { ...prevCached, model: mergedModel });
+      dossierCache.set(sym, {
+        ...prevCached,
+        model: mergedModel,
+        ...(liveSotp ? { sotp_summary: liveSotp.sotp } : {}),
+      });
     }
     const modelArgs: Record<string, unknown> = { ticker: sym, model: mergedModel };
     if (rationale) modelArgs.rationale = rationale;
