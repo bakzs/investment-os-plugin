@@ -1,8 +1,8 @@
 {
   "name": "investment-os",
   "displayName": "Investment OS",
-  "version": "0.7.0",
-  "description": "Institutional Quantamental Personal-CIO sidecar for multi-currency portfolios: Black-Litterman & Block Bootstrap forward forecasting, CVaR tail risk, PCA Effective Bets, HRP & Quarter-Kelly sizing, Deflated Sharpe backtesting, ETF look-through, SEC XBRL Owner Earnings/ROIC quality scoring, Form 4 insiders, 3-lens deep research, and quiet Watchdog.",
+  "version": "0.8.0",
+  "description": "Institutional Quantamental Personal-CIO sidecar for multi-currency portfolios: analytical Ledoit-Wolf & Patton-Politis-White L* Block Bootstrap forecasting, Black-Litterman Brier calibration, zero-lookahead walk-forward evaluation & allocation horse race, bottom-up multi-segment SOTP & Variant Perception dossiers, SEC XBRL Owner Earnings/ROIC quality scoring, Form 4 insiders, 3-lens deep research, and quiet Watchdog.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Open my Investment OS dashboard and help me onboard my portfolio",

@@ -1,6 +1,7 @@
 import yaml from "js-yaml";
 import { z } from "zod";
 import { evaluateSecGates, extractSecRedFlags, type SecRedFlag } from "./edgar.js";
+import { runQuantWalkForwardEvaluation, type QuantWalkForwardEvalResult } from "./eval_harness.js";
 import {
   runPortfolioForecast,
   type ForecastThesisRef,
@@ -56,6 +57,7 @@ import {
   PositionInputSchema,
   ProfileSchema,
   ProvenanceSourceSchema,
+  QuantEvalRequestSchema,
   ThemeObjectSchema,
   ThesisTestRecordSchema,
   type ActionVerdict,
@@ -127,6 +129,11 @@ import {
   type MarketCacheEntry,
   writeThesisFile,
 } from "./storage.js";
+import {
+  computeSotpValuation,
+  resolveEffectiveDossierModel,
+  type SotpValuationSummary,
+} from "./sotp.js";
 
 export { canonicalAssetName, computeUsEstateTaxNra, memberTickersForCanonical, round, type UsEstateTaxResult };
 
@@ -607,7 +614,14 @@ export function saveDossierModelWithAudit(
   const sym = normalizeTicker(ticker);
   const validated = DossierModelSchema.parse(rawModel);
   const existingModel = loadDossierModel(dataDir, sym);
-  const saved = saveDossierModel(dataDir, sym, validated);
+  let fundamentals: DossierFundamentals | null = null;
+  try {
+    fundamentals = loadDossierFundamentals(dataDir, sym);
+  } catch {
+    fundamentals = null;
+  }
+  const effectiveModel = resolveEffectiveDossierModel(validated, fundamentals) ?? validated;
+  const saved = saveDossierModel(dataDir, sym, effectiveModel);
 
   if (existingModel || (rationale && rationale.trim())) {
     const existingRaw = readThesisFile(dataDir, sym);
@@ -828,12 +842,20 @@ function capturePitContextForTest(
     }
   }
 
+  let fundamentals: DossierFundamentals | null = null;
+  try {
+    fundamentals = loadDossierFundamentals(dataDir, sym);
+  } catch {
+    fundamentals = null;
+  }
+  const fundamentalsPeriod = fundamentals?.quarterly[0]?.period_end ?? fundamentals?.annual[0]?.period_end ?? null;
+
   let expectedAfterTaxCagr: number | null = null;
   let hurdleCagr: number | null = null;
   let impliedRevCagr: number | null = null;
   let model: DossierModel | null = null;
   try {
-    model = loadDossierModel(dataDir, sym);
+    model = resolveEffectiveDossierModel(loadDossierModel(dataDir, sym), fundamentals);
   } catch {
     model = null;
   }
@@ -843,19 +865,11 @@ function capturePitContextForTest(
       dividendWhtPctOverride: model.dividend_wht_pct,
       accumulating: model.accumulating,
     });
-    const scen = computeScenarioSummary(priceAtTest, model, taxInfo);
+    const scen = computeScenarioSummary(priceAtTest, model, taxInfo, { fundamentals });
     const rdcf = computeReverseDcf(priceAtTest, model, taxInfo);
     expectedAfterTaxCagr = scen?.expected_after_tax_cagr_pct ?? null;
     hurdleCagr = taxInfo.hurdle_cagr_pct;
     impliedRevCagr = rdcf?.implied_revenue_cagr_pct ?? null;
-  }
-
-  let fundamentalsPeriod: string | null = null;
-  try {
-    const fund = loadDossierFundamentals(dataDir, sym);
-    fundamentalsPeriod = fund?.quarterly[0]?.period_end ?? fund?.annual[0]?.period_end ?? null;
-  } catch {
-    fundamentalsPeriod = null;
   }
 
   return {
@@ -1284,6 +1298,69 @@ function buildDemoState(): DemoStateBundle {
         bear: { probability: 0.25, target_price_5y: 415, multiple: 22, metric_cagr_pct: 5.5, summary: "AI capex overhangs FCF conversion while seat growth stalls." },
         base: { probability: 0.5, target_price_5y: 780, multiple: 28, metric_cagr_pct: 12.5, summary: "Cloud scales efficiently and enterprise ARPU holds steady." },
         bull: { probability: 0.25, target_price_5y: 980, multiple: 31, metric_cagr_pct: 16.0, summary: "Autonomous agent monetization expands gross margins." },
+      },
+      fundamental_model: {
+        base_shares_m: 7450,
+        annual_dilution_pct: -0.5,
+        net_cash_b: 32.0,
+        scenario_probabilities: { bear: 0.25, base: 0.5, bull: 0.25 },
+        derive_scenarios_from_sotp: true,
+        segments: [
+          {
+            id: "azure-ai-cloud",
+            name: "Azure & AI Cloud",
+            kind: "cagr_margin",
+            valuation_metric: "owner_earnings",
+            current_rev_b: 118,
+            rev_cagr_pct: { bear: 14, base: 20, bull: 26 },
+            margin_pct: { bear: 28, base: 34, bull: 38 },
+            exit_multiple: { bear: 22, base: 28, bull: 32 },
+            notes: "Hyperscale IaaS/PaaS and AI inference workloads.",
+          },
+          {
+            id: "m365-commercial-seats",
+            name: "M365 Commercial Seats",
+            kind: "unit_economics",
+            valuation_metric: "owner_earnings",
+            unit_label: "M Commercial Seats",
+            units: { bear: 440, base: 510, bull: 575 },
+            rev_per_unit_label: "$ Annual ARPU",
+            rev_per_unit: { bear: 260, base: 300, bull: 345 },
+            rev_multiplier_to_b: 0.001,
+            margin_pct: { bear: 36, base: 42, bull: 46 },
+            exit_multiple: { bear: 20, base: 24, bull: 28 },
+            notes: "Enterprise seat footprint + Copilot ARPU mix uplift.",
+          },
+          {
+            id: "agentic-copilot-option",
+            name: "Agentic Copilot Platform Option",
+            kind: "milestone_option",
+            valuation_metric: "ev_direct",
+            milestone_label: "Autonomous Enterprise Copilot Adoption >30%",
+            success_prob: { bear: 0.2, base: 0.55, bull: 0.85 },
+            success_ev_b: { bear: 350, base: 700, bull: 1150 },
+            notes: "Probability-weighted optionality on autonomous workflow orchestration.",
+          },
+        ],
+        variant_perception: [
+          {
+            id: "vp-azure-margin",
+            kpi: "Azure AI Cloud Owner-Earnings Margin",
+            consensus_view: "Data-center depreciation compresses cloud EBIT margins toward 27%.",
+            my_view: "Inference utilization & custom silicon sustain 34% owner-earnings margin.",
+            edge_rationale: "Multi-year commercial RPO absorbs front-loaded capex depreciation.",
+            linked_hypothesis_id: "azure-ai-margin",
+          },
+          {
+            id: "vp-seat-arpu",
+            kpi: "Enterprise Seat Count vs. Blended ARPU",
+            consensus_view: "Autonomous agents cannibalize legacy per-seat licenses.",
+            my_view: "Copilot tiering expands blended commercial ARPU to $300 across 510M seats.",
+            edge_rationale: "System-of-record governance preserves seat base while capturing agent budgets.",
+            linked_hypothesis_id: "seat-pricing-resilience",
+          },
+        ],
+        methodology_note: "3-segment SOTP combining Azure CAGR-margin, M365 seat unit economics, and probability-weighted Agentic Copilot optionality.",
       },
     }),
     AAPL: DossierModelSchema.parse({
@@ -1960,12 +2037,14 @@ export interface DashboardThesisRow {
   recent_rule_changes: ThesisTestRecord[];
   provenance: ThesisProvenance;
   scenario_summary: ScenarioSummary | null;
+  sotp_summary: SotpValuationSummary | null;
   reverse_dcf: ReverseDcfSummary | null;
   valuation_bands: ValuationBandsSummary | null;
   dip_triage: DipTriageResult;
   theme_refs: string[];
   has_memo: boolean;
   has_model: boolean;
+  has_sotp: boolean;
   has_intel: boolean;
   has_fundamentals: boolean;
   has_insiders: boolean;
@@ -2011,12 +2090,14 @@ export interface DashboardLabSection {
   pa_performance: PaPerformanceState | null;
   last_backtest_tickers: string[];
   latest_backtest: BacktestResult | null;
+  latest_quant_eval: QuantWalkForwardEvalResult | null;
 }
 
 export interface DossierDetail {
   ticker: string;
   memo_md: string | null;
   model: DossierModel | null;
+  sotp_summary: SotpValuationSummary | null;
   intel: DossierIntel | null;
   fundamentals: DossierFundamentals | null;
   insiders: DossierInsiders | null;
@@ -2269,10 +2350,20 @@ export async function buildDashboardPayload(opts: {
               { confidence: "low", predicted_prob: 0.4, resolved_count: 0, supported_count: 0, falsified_count: 0, empirical_rate_pct: null, brier_score: null },
             ],
           },
+          fundamental_accuracy: {
+            spearman_rank_ic: null,
+            ic_t_stat: null,
+            ic_sample_count: 0,
+            modeled_tests_matured: 0,
+            inside_band_count: 0,
+            inside_band_rate_pct: null,
+            note: "Need >=4 matured modeled tests for Rank IC",
+          },
         },
         pa_performance: null,
         last_backtest_tickers: [],
         latest_backtest: null,
+        latest_quant_eval: null,
       },
     };
   }
@@ -2871,12 +2962,13 @@ export async function buildDashboardPayload(opts: {
     const recentRuleChanges = allTickerLogs.filter((r) => r.event_type === "rule_change").slice(0, 5);
     const killSwitchTriggered = Boolean(recentTests[0]?.kill_switch_triggered);
 
-    const model = isDemo ? (demoState?.dossierModels[sym] ?? null) : loadDossierModel(opts.dataDir, sym);
+    const rawModel = isDemo ? (demoState?.dossierModels[sym] ?? null) : loadDossierModel(opts.dataDir, sym);
     const hasMemo = isDemo ? Boolean(demoState?.dossierMemos[sym]) : hasDossierMemo(opts.dataDir, sym);
     const intel = isDemo ? (demoState?.dossierIntels[sym] ?? null) : loadDossierIntel(opts.dataDir, sym);
     const fundamentals = isDemo
       ? (demoState?.dossierFundamentals[sym] ?? null)
       : loadDossierFundamentals(opts.dataDir, sym);
+    const model = resolveEffectiveDossierModel(rawModel, fundamentals);
     const insiders = isDemo
       ? (demoState?.dossierInsiders[sym] ?? null)
       : loadDossierInsiders(opts.dataDir, sym);
@@ -2930,7 +3022,17 @@ export async function buildDashboardPayload(opts: {
         accumulating: isAccumulating,
       },
     );
+    const sotpSummary = computeSotpValuation(price, model, taxInfo, fundamentals);
     const scenarioSummary = computeScenarioSummary(price, model, taxInfo, { isEtf, fundamentals });
+    if (sotpSummary && sotpSummary.sotp_warnings.length > 0 && scenarioSummary) {
+      const seenWarnings = new Set(scenarioSummary.valuation_warnings);
+      for (const w of sotpSummary.sotp_warnings) {
+        if (!seenWarnings.has(w)) {
+          seenWarnings.add(w);
+          scenarioSummary.valuation_warnings.push(w);
+        }
+      }
+    }
     const reverseDcf = computeReverseDcf(price, model, taxInfo, {
       consensusRevGrowthPct: intel?.consensus?.ntm_rev_growth_pct ?? null,
     });
@@ -3117,12 +3219,14 @@ export async function buildDashboardPayload(opts: {
       recent_rule_changes: recentRuleChanges,
       provenance,
       scenario_summary: scenarioSummary,
+      sotp_summary: sotpSummary,
       reverse_dcf: reverseDcf,
       valuation_bands: valuationBands,
       dip_triage: dipTriage,
       theme_refs: themeRefs,
       has_memo: hasMemo,
       has_model: Boolean(model),
+      has_sotp: Boolean(sotpSummary),
       has_intel: Boolean(intel),
       has_fundamentals: Boolean(fundamentals),
       has_insiders: Boolean(insiders),
@@ -3132,8 +3236,17 @@ export async function buildDashboardPayload(opts: {
     };
   });
 
-  // Collect all live hypotheses across dossiers for Brier calibration
+  // Collect all live hypotheses across dossiers for Brier calibration & scenario bounds for band-hit scoring
   const allLiveHypotheses: HypothesisRecord[] = thesesOut.flatMap((t) => t.hypotheses);
+  const scenarioBoundsByTicker = new Map<string, { bearCagrPct: number; bullCagrPct: number }>();
+  for (const t of thesesOut) {
+    if (t.scenario_summary) {
+      scenarioBoundsByTicker.set(t.ticker.toUpperCase(), {
+        bearCagrPct: t.scenario_summary.cases.bear.after_tax_cagr_pct,
+        bullCagrPct: t.scenario_summary.cases.bull.after_tax_cagr_pct,
+      });
+    }
+  }
   const scorecard = computeForwardScorecard(
     testLogAll,
     currentPricesMap,
@@ -3141,6 +3254,7 @@ export async function buildDashboardPayload(opts: {
     benchYf,
     isDemo ? new Date("2026-11-23T12:00:00Z") : new Date(),
     allLiveHypotheses,
+    scenarioBoundsByTicker,
   );
 
   const dipTriageQueue: DashboardDipTriageQueueRow[] = thesesOut
@@ -3193,6 +3307,7 @@ export async function buildDashboardPayload(opts: {
     pa_performance: paPerformance,
     last_backtest_tickers: Array.from(backtestCandidates).sort(),
     latest_backtest: null,
+    latest_quant_eval: null,
   };
 
   const totalPnlUsd = totPosUsd - totCostUsd;
@@ -3201,7 +3316,11 @@ export async function buildDashboardPayload(opts: {
   let defaultForecast: PortfolioForecastResult | null = null;
   try {
     const forecastThesisRefs: ForecastThesisRef[] = thesesOut.map((t) => {
-      const m = isDemo ? (demoState?.dossierModels[t.ticker] ?? null) : loadDossierModel(opts.dataDir, t.ticker);
+      const rawM = isDemo ? (demoState?.dossierModels[t.ticker] ?? null) : loadDossierModel(opts.dataDir, t.ticker);
+      const fundM = isDemo
+        ? (demoState?.dossierFundamentals[t.ticker] ?? null)
+        : loadDossierFundamentals(opts.dataDir, t.ticker);
+      const m = resolveEffectiveDossierModel(rawM, fundM);
       return {
         ticker: t.ticker,
         yf_symbol: t.yf_symbol,
@@ -3346,12 +3465,17 @@ export async function getDossierDetail(opts: {
 
   if (opts.demo) {
     const demoState = buildDemoState();
+    const demoFundamentals = demoState.dossierFundamentals[sym] ?? null;
+    const effectiveModel = resolveEffectiveDossierModel(demoState.dossierModels[sym] ?? null, demoFundamentals);
+    const sotpSummary =
+      thesis?.sotp_summary ?? computeSotpValuation(thesis?.price ?? null, effectiveModel, null, demoFundamentals);
     return {
       ticker: sym,
       memo_md: demoState.dossierMemos[sym] ?? null,
-      model: demoState.dossierModels[sym] ?? null,
+      model: effectiveModel,
+      sotp_summary: sotpSummary,
       intel: demoState.dossierIntels[sym] ?? null,
-      fundamentals: demoState.dossierFundamentals[sym] ?? null,
+      fundamentals: demoFundamentals,
       insiders: demoState.dossierInsiders[sym] ?? null,
       intel_history: demoState.dossierIntelHistory[sym] ?? [],
       valuation_bands: thesis?.valuation_bands ?? null,
@@ -3360,12 +3484,18 @@ export async function getDossierDetail(opts: {
     };
   }
 
+  const fundamentals = loadDossierFundamentals(opts.dataDir, sym);
+  const effectiveModel = resolveEffectiveDossierModel(loadDossierModel(opts.dataDir, sym), fundamentals);
+  const sotpSummary =
+    thesis?.sotp_summary ?? computeSotpValuation(thesis?.price ?? null, effectiveModel, null, fundamentals);
+
   return {
     ticker: sym,
     memo_md: loadDossierMemo(opts.dataDir, sym),
-    model: loadDossierModel(opts.dataDir, sym),
+    model: effectiveModel,
+    sotp_summary: sotpSummary,
     intel: loadDossierIntel(opts.dataDir, sym),
-    fundamentals: loadDossierFundamentals(opts.dataDir, sym),
+    fundamentals,
     insiders: loadDossierInsiders(opts.dataDir, sym),
     intel_history: loadIntelHistory(opts.dataDir, sym, 30),
     valuation_bands: thesis?.valuation_bands ?? null,
@@ -3608,7 +3738,11 @@ export async function executePortfolioForecast(opts: {
   }
 
   const thesisRefs: ForecastThesisRef[] = payload.theses.map((t) => {
-    const model = isDemo ? (demoState?.dossierModels[t.ticker] ?? null) : loadDossierModel(opts.dataDir, t.ticker);
+    const rawM = isDemo ? (demoState?.dossierModels[t.ticker] ?? null) : loadDossierModel(opts.dataDir, t.ticker);
+    const fundM = isDemo
+      ? (demoState?.dossierFundamentals[t.ticker] ?? null)
+      : loadDossierFundamentals(opts.dataDir, t.ticker);
+    const model = resolveEffectiveDossierModel(rawM, fundM);
     return {
       ticker: t.ticker,
       yf_symbol: t.yf_symbol,
@@ -3650,6 +3784,80 @@ export async function executePortfolioForecast(opts: {
   );
   payload.forecast = forecast;
   return { forecast, payload };
+}
+
+export async function executeQuantEvaluation(opts: {
+  dataDir: string;
+  pluginRoot: string;
+  rawRequest: unknown;
+}): Promise<{ evaluation: QuantWalkForwardEvalResult; payload: DashboardPayload }> {
+  const req = QuantEvalRequestSchema.parse(opts.rawRequest ?? {});
+  const isDemo = Boolean(req.demo);
+  const payload = await buildDashboardPayload({
+    dataDir: opts.dataDir,
+    pluginRoot: opts.pluginRoot,
+    live: false,
+    useCache: !isDemo,
+    activeTab: "lab",
+    demo: isDemo,
+  });
+
+  if (!payload.initialized) {
+    throw new Error("Portfolio is not initialized yet. Save positions via update_portfolio_positions or use Demo Mode.");
+  }
+
+  const demoState = isDemo ? buildDemoState() : null;
+  const portfolio = demoState ? demoState.portfolio : loadPortfolio(opts.dataDir);
+  if (!portfolio) {
+    throw new Error("Portfolio file not found.");
+  }
+
+  let historyCache: HistoryCacheState;
+  if (isDemo) {
+    historyCache = demoState!.historyCache;
+  } else {
+    const benchSym = payload.profile.benchmark.yf_symbol || payload.profile.benchmark.ticker;
+    const symbolsToEnsure: string[] = [benchSym];
+    const fxCurrencies = new Set<string>();
+    for (const p of portfolio.positions) {
+      symbolsToEnsure.push(p.yf_symbol || p.ticker);
+      if (p.currency && p.currency !== "USD") fxCurrencies.add(p.currency);
+    }
+    if (
+      req.include_external_wealth &&
+      payload.profile.external_exposure.enabled &&
+      payload.profile.external_exposure.ticker
+    ) {
+      symbolsToEnsure.push(payload.profile.external_exposure.ticker);
+    }
+    historyCache = await ensureHistorySeries(opts.dataDir, symbolsToEnsure, {
+      fxCurrencies: Array.from(fxCurrencies),
+      dailyBenchmarkSymbol: benchSym,
+    });
+  }
+
+  const effectiveProfile: UserProfile = payload.summary.ext_live_marked
+    ? {
+        ...payload.profile,
+        external_exposure: {
+          ...payload.profile.external_exposure,
+          amount_base: payload.summary.ext_total_base - payload.summary.ext_portfolio_base,
+        },
+      }
+    : payload.profile;
+
+  const evaluation = runQuantWalkForwardEvaluation(
+    req,
+    portfolio,
+    effectiveProfile,
+    historyCache,
+    payload.fx_rates,
+    {
+      defaultRfPct: payload.macro_regime?.us3m_pct ?? 4.0,
+    },
+  );
+  payload.lab.latest_quant_eval = evaluation;
+  return { evaluation, payload };
 }
 
 export function buildSummaryText(payload: DashboardPayload): string {

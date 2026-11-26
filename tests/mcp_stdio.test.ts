@@ -15,7 +15,7 @@ function findNodeRuntime(): string {
   return process.execPath;
 }
 
-test("bundled dist/server.cjs passes end-to-end v0.7 stdio MCP App lifecycle", async () => {
+test("bundled dist/server.cjs passes end-to-end v0.8 stdio MCP App lifecycle", async () => {
   const rootDir = path.resolve(process.cwd());
   const serverPath = path.join(rootDir, "dist", "server.cjs");
   assert.equal(fs.existsSync(serverPath), true, "dist/server.cjs must be built before running stdio test");
@@ -28,7 +28,7 @@ test("bundled dist/server.cjs passes end-to-end v0.7 stdio MCP App lifecycle", a
   });
 
   const client = new Client(
-    { name: "investment-os-test-client", version: "0.7.0" },
+    { name: "investment-os-test-client", version: "0.8.0" },
     { capabilities: {} },
   );
 
@@ -42,7 +42,7 @@ test("bundled dist/server.cjs passes end-to-end v0.7 stdio MCP App lifecycle", a
     const openTool = byName.get("open_dashboard");
     assert.ok(openTool);
     const openMeta = openTool._meta as Record<string, unknown>;
-    assert.deepEqual(openMeta?.ui, { resourceUri: "ui://investment-os/v7/dashboard.html" });
+    assert.deepEqual(openMeta?.ui, { resourceUri: "ui://investment-os/v8/dashboard.html" });
     const agyUi = openMeta?.["com.google.antigravity/ui"] as { entrypoints?: Array<{ type: string; title: string }> };
     assert.equal(agyUi?.entrypoints?.length, 2);
 
@@ -57,11 +57,12 @@ test("bundled dist/server.cjs passes end-to-end v0.7 stdio MCP App lifecycle", a
       "update_etf_weights",
       "run_portfolio_backtest",
       "simulate_portfolio_forecast",
+      "run_quant_evaluation",
     ]) {
       const tool = byName.get(inlineToolName);
       assert.ok(tool, `missing ${inlineToolName}`);
       assert.deepEqual((tool._meta as Record<string, unknown>)?.ui, {
-        resourceUri: "ui://investment-os/v7/dashboard.html",
+        resourceUri: "ui://investment-os/v8/dashboard.html",
       });
     }
 
@@ -78,6 +79,7 @@ test("bundled dist/server.cjs passes end-to-end v0.7 stdio MCP App lifecycle", a
       "app_save_dossier_model",
       "app_run_backtest",
       "app_simulate_forecast",
+      "app_run_quant_eval",
     ]) {
       const appTool = byName.get(appToolName);
       assert.ok(appTool, `missing ${appToolName}`);
@@ -86,15 +88,15 @@ test("bundled dist/server.cjs passes end-to-end v0.7 stdio MCP App lifecycle", a
 
     // 2. Verify resource listing and HTML content
     const resList = await client.listResources();
-    assert.equal(resList.resources[0]?.uri, "ui://investment-os/v7/dashboard.html");
+    assert.equal(resList.resources[0]?.uri, "ui://investment-os/v8/dashboard.html");
     assert.equal(resList.resources[0]?.mimeType, "text/html;profile=mcp-app");
 
-    const resRead = await client.readResource({ uri: "ui://investment-os/v7/dashboard.html" });
+    const resRead = await client.readResource({ uri: "ui://investment-os/v8/dashboard.html" });
     const item = resRead.contents[0];
     assert.ok(item && "text" in item);
     assert.equal(item.mimeType, "text/html;profile=mcp-app");
     assert.equal(item.text.includes("Investment OS"), true);
-    assert.equal(item.text.includes("v0.7"), true);
+    assert.equal(/v0\.[78]/.test(item.text), true);
     assert.equal(item.text.includes('<dialog id="stock-inspector"'), true);
     assert.equal(Buffer.byteLength(item.text, "utf-8") < 1_000_000, true);
 
@@ -161,10 +163,13 @@ test("bundled dist/server.cjs passes end-to-end v0.7 stdio MCP App lifecycle", a
     const demoDetail = demoDetailCall.structuredContent as {
       ticker: string;
       memo_md: string | null;
+      model: { fundamental_model?: { segments: unknown[] } | null } | null;
+      sotp_summary: { segments: unknown[]; variant_perception: unknown[] } | null;
       fundamentals: unknown;
       insiders: unknown;
       valuation_bands: unknown;
       linked_themes: unknown[];
+      thesis: { has_sotp?: boolean } | null;
     };
     assert.equal(demoDetail.ticker, "MSFT");
     assert.equal(Boolean(demoDetail.memo_md), true);
@@ -172,6 +177,10 @@ test("bundled dist/server.cjs passes end-to-end v0.7 stdio MCP App lifecycle", a
     assert.equal(Boolean(demoDetail.insiders), true);
     assert.equal(Boolean(demoDetail.valuation_bands), true);
     assert.equal(demoDetail.linked_themes.length >= 1, true);
+    assert.equal(demoDetail.model?.fundamental_model?.segments.length, 3);
+    assert.equal(demoDetail.sotp_summary?.segments.length, 3);
+    assert.equal(demoDetail.sotp_summary?.variant_perception.length, 2);
+    assert.equal(demoDetail.thesis?.has_sotp, true);
 
     const demoThemeCall = await client.callTool({
       name: "app_get_theme_detail",
@@ -208,6 +217,42 @@ test("bundled dist/server.cjs passes end-to-end v0.7 stdio MCP App lifecycle", a
     assert.equal(demoBt.baseline.cvar_95_weekly_pct <= 0, true);
     assert.equal(demoBt.simulated.deflated_sharpe_prob_pct >= 0 && demoBt.simulated.deflated_sharpe_prob_pct <= 100, true);
     assert.equal(demoBt.simulated.tx_cost_drag_bps > 0, true);
+
+    const demoQuantEvalCall = await client.callTool({
+      name: "run_quant_evaluation",
+      arguments: { demo: true, horizon_weeks: 13 },
+    });
+    assert.equal(Boolean(demoQuantEvalCall.isError), false);
+    const demoQuantPayload = demoQuantEvalCall.structuredContent as {
+      lab: {
+        latest_quant_eval: {
+          status: string;
+          windows_evaluated: number;
+          covariance_eval: unknown[];
+          tail_eval: unknown[];
+          allocation_horse_race: unknown[];
+        } | null;
+      };
+    };
+    assert.ok(demoQuantPayload.lab.latest_quant_eval);
+    assert.equal(demoQuantPayload.lab.latest_quant_eval.windows_evaluated >= 1, true);
+    assert.equal(demoQuantPayload.lab.latest_quant_eval.covariance_eval.length, 3);
+    assert.equal(demoQuantPayload.lab.latest_quant_eval.tail_eval.length, 3);
+    assert.equal(demoQuantPayload.lab.latest_quant_eval.allocation_horse_race.length, 4);
+
+    const appQuantEvalCall = await client.callTool({
+      name: "app_run_quant_eval",
+      arguments: { demo: true, horizon_weeks: 26 },
+    });
+    assert.equal(Boolean(appQuantEvalCall.isError), false);
+    const appQuantEval = appQuantEvalCall.structuredContent as {
+      horizon_weeks: number;
+      windows_evaluated: number;
+      covariance_eval: unknown[];
+    };
+    assert.equal(appQuantEval.horizon_weeks, 26);
+    assert.equal(appQuantEval.windows_evaluated >= 1, true);
+    assert.equal(appQuantEval.covariance_eval.length, 3);
     assert.equal(fs.readdirSync(tempDataDir).length, 0);
 
     // 5. Full v0.5 agent round-trip persistence (themes, etf_weights, dossiers, intel_history, watchdog, ack, tests)
@@ -311,14 +356,46 @@ test("bundled dist/server.cjs passes end-to-end v0.7 stdio MCP App lifecycle", a
       name: "app_save_dossier_model",
       arguments: {
         ticker: "AAPL",
-        rationale: "Raised base target slightly after Services check.",
+        rationale: "Updated bottom-up SOTP segments after Services check.",
         model: {
           horizon_years: 5,
           dividend_yield_pct: 0.5,
-          scenarios: {
-            bear: { probability: 0.25, target_price_5y: 185, summary: "Updated bear" },
-            base: { probability: 0.5, target_price_5y: 350, summary: "Updated base" },
-            bull: { probability: 0.25, target_price_5y: 430, summary: "Updated bull" },
+          fundamental_model: {
+            base_shares_m: 15000,
+            annual_dilution_pct: -2.0,
+            net_cash_b: 50,
+            derive_scenarios_from_sotp: true,
+            segments: [
+              {
+                id: "services",
+                name: "Services",
+                kind: "cagr_margin",
+                valuation_metric: "owner_earnings",
+                current_rev_b: 100,
+                rev_cagr_pct: { bear: 7, base: 11, bull: 14 },
+                margin_pct: { bear: 60, base: 65, bull: 70 },
+                exit_multiple: { bear: 22, base: 28, bull: 32 },
+              },
+              {
+                id: "devices",
+                name: "Hardware Ecosystem",
+                kind: "cagr_margin",
+                valuation_metric: "owner_earnings",
+                current_rev_b: 300,
+                rev_cagr_pct: { bear: 0, base: 4, bull: 7 },
+                margin_pct: { bear: 18, base: 22, bull: 25 },
+                exit_multiple: { bear: 16, base: 20, bull: 24 },
+              },
+            ],
+            variant_perception: [
+              {
+                id: "vp-services",
+                kpi: "Services gross margin",
+                consensus_view: "Regulators cap Services take-rate.",
+                my_view: "Installed base keeps Services compounding at 11%.",
+                linked_hypothesis_id: "services-margin-mix",
+              },
+            ],
           },
         },
       },
@@ -400,17 +477,65 @@ test("bundled dist/server.cjs passes end-to-end v0.7 stdio MCP App lifecycle", a
     const detail = detailCall.structuredContent as {
       ticker: string;
       memo_md: string | null;
-      model: { scenarios?: { base: { target_price_5y: number } } } | null;
+      model: {
+        scenarios?: { base: { target_price_5y: number } };
+        fundamental_model?: { segments: unknown[] } | null;
+      } | null;
+      sotp_summary: {
+        segments: unknown[];
+        totals: { base: { target_price: number } };
+      } | null;
       intel: { themes: string[] } | null;
       intel_history: unknown[];
       linked_themes: Array<{ slug: string }>;
     };
     assert.equal(detail.ticker, "AAPL");
     assert.equal(detail.memo_md?.includes("Stdio round-trip check"), true);
-    assert.equal(detail.model?.scenarios?.base.target_price_5y, 350);
+    assert.equal(detail.model?.fundamental_model?.segments.length, 2);
+    assert.equal(detail.sotp_summary?.segments.length, 2);
+    assert.ok(detail.sotp_summary && detail.sotp_summary.totals.base.target_price > 300);
+    assert.equal(detail.model?.scenarios?.base.target_price_5y, detail.sotp_summary.totals.base.target_price);
     assert.deepEqual(detail.intel?.themes, ["Consumer Ecosystem"]);
     assert.equal(detail.intel_history.length, 1);
     assert.equal(detail.linked_themes[0]?.slug, "edge-ai-services");
+
+    // Verify upsert_dossier with fundamental_model propagates to app_get_dossier_detail & simulate_portfolio_forecast
+    await client.callTool({
+      name: "upsert_dossier",
+      arguments: {
+        ticker: "MSFT",
+        tier: "active",
+        model: {
+          horizon_years: 5,
+          dividend_yield_pct: 0.7,
+          fundamental_model: {
+            base_shares_m: 7450,
+            annual_dilution_pct: -0.5,
+            net_cash_b: 32,
+            derive_scenarios_from_sotp: true,
+            segments: [
+              {
+                id: "cloud",
+                name: "Cloud",
+                kind: "cagr_margin",
+                valuation_metric: "owner_earnings",
+                current_rev_b: 120,
+                rev_cagr_pct: { bear: 12, base: 18, bull: 24 },
+                margin_pct: { bear: 28, base: 34, bull: 38 },
+                exit_multiple: { bear: 20, base: 26, bull: 30 },
+              },
+            ],
+          },
+        },
+      },
+    });
+    const msftDetailCall = await client.callTool({ name: "app_get_dossier_detail", arguments: { ticker: "MSFT" } });
+    const msftDetail = msftDetailCall.structuredContent as {
+      sotp_summary: { totals: { base: { target_price: number } } } | null;
+      model: { scenarios?: { base: { target_price_5y: number } } } | null;
+    };
+    assert.ok(msftDetail.sotp_summary);
+    assert.equal(msftDetail.model?.scenarios?.base.target_price_5y, msftDetail.sotp_summary.totals.base.target_price);
 
     const themeDetailCall = await client.callTool({
       name: "app_get_theme_detail",
@@ -436,11 +561,18 @@ test("bundled dist/server.cjs passes end-to-end v0.7 stdio MCP App lifecycle", a
     });
     assert.equal(Boolean(forecastCall.isError), false);
     const forecastPayload = forecastCall.structuredContent as {
-      forecast: { simulated: { ending_p50_base: number; ending_cash_base: number } } | null;
+      forecast: {
+        simulated: { ending_p50_base: number; ending_cash_base: number };
+        positions: Array<{ ticker: string; raw_view_cagr_pct: number | null; return_source: string }>;
+      } | null;
     };
     assert.equal(Boolean(forecastPayload.forecast && forecastPayload.forecast.simulated.ending_p50_base > 0), true);
     // Preserves configured £5,000 liquidity_reserve while sweeping £5,000 excess cash into VWRA
     assert.equal(forecastPayload.forecast?.simulated.ending_cash_base, 5000);
+    // AAPL SOTP-derived scenarios propagated into Black-Litterman raw view!
+    const aaplForecastPos = forecastPayload.forecast?.positions.find((p) => p.ticker === "AAPL");
+    assert.ok(aaplForecastPos && aaplForecastPos.raw_view_cagr_pct !== null);
+    assert.equal(aaplForecastPos.return_source, "black_litterman");
 
     const finalCall = await client.callTool({ name: "open_dashboard", arguments: {} });
     const finalPayload = finalCall.structuredContent as {
@@ -475,7 +607,7 @@ test("bundled dist/server.cjs passes end-to-end v0.7 stdio MCP App lifecycle", a
     assert.equal(finalPayload.theses[0]?.hypothesis_counts.supported, 1);
     assert.equal(finalPayload.theses[0]?.recent_tests.length, 1);
     assert.equal(finalPayload.theses[0]?.recent_rule_changes.length, 1);
-    assert.equal(finalPayload.lab.active_count, 1);
+    assert.equal(finalPayload.lab.active_count, 2);
     assert.equal(finalPayload.lab.pa_performance?.periods[0]?.period, "YTD");
     assert.equal(fs.existsSync(path.join(tempDataDir, "test_log.jsonl")), true);
     assert.equal(fs.existsSync(path.join(tempDataDir, "etf_weights.json")), true);

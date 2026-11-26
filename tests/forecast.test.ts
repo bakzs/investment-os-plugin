@@ -166,9 +166,15 @@ test("runPortfolioForecast simulates tax swaps, mandatory exits, planned buys, c
   // 1. Seeded deterministic repeatability
   assert.deepEqual(res1, res2);
 
-  // 2. Starting wealth conserved ($100,000), v0.7 defaults active (BL + Block Bootstrap), & tail ordering holds
+  // 2. Starting wealth conserved ($100,000), v0.8 defaults active (BL + Block Bootstrap + Analytical LW + Politis-White L*), & tail ordering holds
   assert.equal(res1.return_model, "black_litterman");
   assert.equal(res1.simulation_engine_used, "block_bootstrap");
+  assert.equal(res1.lw_shrinkage_method, "analytical_lw");
+  assert.ok(res1.lw_shrinkage_lambda >= 0 && res1.lw_shrinkage_lambda <= 1);
+  assert.equal(res1.block_length_mode, "politis_white_auto");
+  assert.ok(res1.block_length_weeks >= 3 && res1.block_length_weeks <= 16);
+  assert.ok(res1.methodology_note.includes("λ*="));
+  assert.ok(res1.methodology_note.includes("Auto L*="));
   assert.equal(res1.baseline.starting_wealth_base, 100000);
   assert.equal(res1.simulated.starting_wealth_base, 100000);
   assert.ok(res1.baseline.ending_cvar_10_base <= res1.baseline.ending_p10_base);
@@ -230,4 +236,48 @@ test("runPortfolioForecast simulates tax swaps, mandatory exits, planned buys, c
   assert.equal(overBuyRes.cash_shortfall_base, 15000);
   assert.equal(overBuyRes.positions.find((p) => p.ticker === "ACME")?.after_value_base, 10000);
   assert.equal(overBuyRes.simulated.ending_cash_base, 0);
+
+  // 6. Manual block_length_weeks override vs null auto mode
+  const manualBlockReq = ForecastRequestSchema.parse({
+    horizon_years: 3,
+    simulations: 300,
+    block_length_weeks: 12,
+  });
+  const manualBlockRes = runPortfolioForecast(
+    manualBlockReq,
+    portfolio,
+    profile,
+    theses,
+    queue,
+    etfWeights,
+    historyCache,
+    { USD: 1.0 },
+  );
+  assert.equal(manualBlockRes.block_length_mode, "manual");
+  assert.equal(manualBlockRes.block_length_weeks, 12);
+  assert.ok(manualBlockRes.methodology_note.includes("Manual L=12w"));
+
+  // 7. Short-history fallback (<52w common overlap -> fallback_fixed lambda=0.25)
+  const shortCache: HistoryCacheState = {
+    updated_at: "2026-11-26T00:00:00Z",
+    series: {
+      "VWRA.L": { symbol: "VWRA.L", currency: "USD", source: "yahoo", updated_at: "2026-11-26T00:00:00Z", points: makeWeeklyPoints("2026-01-05", 35, 0.0018, 100, 0) },
+      QQQ: { symbol: "QQQ", currency: "USD", source: "yahoo", updated_at: "2026-11-26T00:00:00Z", points: makeWeeklyPoints("2026-01-05", 35, 0.0024, 350, 1) },
+      MSFT: { symbol: "MSFT", currency: "USD", source: "yahoo", updated_at: "2026-11-26T00:00:00Z", points: makeWeeklyPoints("2026-01-05", 35, 0.0026, 300, 2) },
+    },
+  };
+  const fallbackRes = runPortfolioForecast(
+    ForecastRequestSchema.parse({ horizon_years: 3, simulations: 300 }),
+    portfolio,
+    profile,
+    theses,
+    queue,
+    etfWeights,
+    shortCache,
+    { USD: 1.0 },
+  );
+  assert.equal(fallbackRes.lw_shrinkage_method, "fallback_fixed");
+  assert.equal(fallbackRes.lw_shrinkage_lambda, 0.25);
+  assert.equal(fallbackRes.block_length_mode, "politis_white_auto");
+  assert.equal(fallbackRes.simulation_engine_used, "student_t");
 });

@@ -3,6 +3,23 @@
 All notable changes to **Investment OS** are documented in this file.
 Versions stay aligned across `plugin.json`, `package.json`, and `src/server/index.ts`.
 
+## [0.8.0] - 2026-11-27
+
+### Added
+- **Analytical Ledoit-Wolf (`λ*`) & Automatic Patton-Politis-White (`L*`) Forecasting (`src/server/{quant_sota,forecast}.ts`):**
+  - Replaced fixed `0.25` shrinkage in `runPortfolioForecast` with exact Ledoit & Wolf (2004) analytical constant-correlation shrinkage (`lw_shrinkage_lambda`, `lw_shrinkage_method: "analytical_lw" | "fallback_fixed"`) over aligned risky-asset weekly returns (`>= 52w` overlap, preserving `>= 0.96` canonical share-class pair correlation).
+  - Replaced hardcoded `block_length_weeks = 6` default with automatic Patton-Politis-White (2009) spectral block-length estimation (`block_length_mode: "politis_white_auto" | "manual"`) across raw returns and `|r_t - mean|` volatility clustering when `block_length_weeks` is omitted or `null`.
+- **Zero-Lookahead Walk-Forward Calibration & Allocation Horse Race (`src/server/eval_harness.ts`, `run_quant_evaluation`, `app_run_quant_eval`):**
+  - Expanding-window (`52w` warmup, `13w`/`26w` non-overlapping step) evaluation comparing **Covariance** (Sample vs. Fixed `0.25` vs. Analytical Ledoit-Wolf via Patton QLIKE & Vol RMSE), **Tail-Risk Simulators** (Politis-White Block Bootstrap vs. Student-t `df=6` vs. Gaussian via Kupiec POF `p`-value, Pinball Loss & 80% coverage), and **OOS Allocation Horse Race** (Current Weights vs. HRP-LW vs. Inv-Vol vs. Equal-Weight net of slippage).
+- **Bottom-Up Multi-Segment SOTP Valuation & Variant Perception (`src/server/sotp.ts`, `src/server/engine.ts`):**
+  - Added `fundamental_model` (`unit_economics`, `cagr_margin`, `milestone_option` segments, share-count dilution, net cash bridge, `variant_perception` ledger linked to hypotheses) onto `DossierModelSchema`, automatically deriving `scenarios` when `derive_scenarios_from_sotp !== false` and merging SOTP GIGO guardrails into `valuation_warnings` for Black-Litterman Ω discounting.
+  - Added `fundamental_accuracy` (`spearman_rank_ic`, `ic_t_stat`, `inside_band_rate_pct`) onto `ForwardScorecardResult` (`computeForwardScorecard`).
+  - Enriched Demo Mode `MSFT` with a 3-segment SOTP model and 2 Variant Perception rows.
+
+### Changed
+- Bumped MCP App resource URI (`APP_URI`) to `ui://investment-os/v8/dashboard.html` and Server version to `0.8.0`.
+- Upgraded Lab tab with Walk-Forward Calibration & Horse Race diagnostics and Stock Inspector with a 3-block SOTP Workbench.
+
 ## [0.7.0] - 2026-11-26
 
 ### Added

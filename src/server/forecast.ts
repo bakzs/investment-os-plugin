@@ -12,6 +12,8 @@ import {
   computeBlackLittermanPosterior,
   computeFactorRiskDecomposition,
   computeHrpWeights,
+  computeLedoitWolfConstantCorr,
+  computePolitisWhiteBlockLength,
   runCorrelatedWealthSimulation,
   type BlackLittermanResult,
   type FactorRiskDecomposition,
@@ -117,6 +119,9 @@ export interface PortfolioForecastResult {
   simulation_engine_requested: "block_bootstrap" | "student_t";
   simulation_engine_used: "block_bootstrap" | "student_t";
   block_length_weeks: number;
+  block_length_mode: "politis_white_auto" | "manual";
+  lw_shrinkage_lambda: number;
+  lw_shrinkage_method: "analytical_lw" | "fallback_fixed";
   aligned_history_weeks: number;
   simulations: number;
   rf_pct: number;
@@ -685,7 +690,6 @@ export function runPortfolioForecast(
 
   const returnModel = req.return_model ?? "black_litterman";
   const simEngineReq = req.simulation_engine ?? "block_bootstrap";
-  const blockLenWeeks = Math.max(2, Math.min(26, req.block_length_weeks ?? 6));
 
   interface CalibratedAsset {
     key: string;
@@ -821,19 +825,102 @@ export function runPortfolioForecast(
   }
 
   const avgCorr = pairwiseCount > 0 ? Math.max(0.1, Math.min(0.8, pairwiseSum / pairwiseCount)) : 0.45;
-  const shrinkLambda = 0.25;
+
+  // Analytical Ledoit-Wolf (2004) constant-correlation shrinkage across aligned risky-asset weekly returns (>=52w overlap)
+  const computeCommonWeeks = (maps: Array<Map<string, number>>): string[] => {
+    if (maps.length === 0) return [];
+    let shortest = maps[0]!;
+    for (let k = 1; k < maps.length; k += 1) {
+      if (maps[k]!.size < shortest.size) shortest = maps[k]!;
+    }
+    const common: string[] = [];
+    for (const wk of shortest.keys()) {
+      if (maps.every((m) => m.has(wk))) {
+        common.push(wk);
+      }
+    }
+    common.sort();
+    return common;
+  };
+
+  let lwPool = assets
+    .map((a, idx) => ({ idx, retMap: a.retMap, valueBase: baselineMap.get(a.key)?.value_base ?? 0 }))
+    .filter((x) => !assets[x.idx]!.slot.is_cash && x.retMap.size >= 52);
+
+  let lwCommonWeeks = lwPool.length >= 2 ? computeCommonWeeks(lwPool.map((x) => x.retMap)) : [];
+  while (lwPool.length > 2 && lwCommonWeeks.length < 52) {
+    let bestDropIdx = 0;
+    let bestCount = -1;
+    let bestDropVal = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < lwPool.length; i += 1) {
+      const subset = lwPool.filter((_, idx) => idx !== i);
+      const cnt = computeCommonWeeks(subset.map((x) => x.retMap)).length;
+      const val = lwPool[i]!.valueBase;
+      if (cnt > bestCount || (cnt === bestCount && val < bestDropVal)) {
+        bestCount = cnt;
+        bestDropIdx = i;
+        bestDropVal = val;
+      }
+    }
+    lwPool.splice(bestDropIdx, 1);
+    lwCommonWeeks = computeCommonWeeks(lwPool.map((x) => x.retMap));
+  }
+
+  let shrinkLambda = 0.25;
+  let lwShrinkageMethod: "analytical_lw" | "fallback_fixed" = "fallback_fixed";
   const shrunkCorr: number[][] = Array.from({ length: n }, () => Array<number>(n).fill(0));
   const cov: number[][] = Array.from({ length: n }, () => Array<number>(n).fill(0));
-  for (let i = 0; i < n; i += 1) {
-    for (let j = 0; j < n; j += 1) {
-      const a = assets[i]!;
-      const b = assets[j]!;
-      let corrIJ = rawCorr[i]![j]!;
-      if (i !== j && !a.slot.is_cash && !b.slot.is_cash) {
-        corrIJ = (1 - shrinkLambda) * corrIJ + shrinkLambda * avgCorr;
+
+  if (lwPool.length >= 2 && lwCommonWeeks.length >= 52) {
+    const returnMatrix: number[][] = lwCommonWeeks.map((wk) =>
+      lwPool.map((item) => item.retMap.get(wk) ?? 0),
+    );
+    const lwRes = computeLedoitWolfConstantCorr(returnMatrix);
+    shrinkLambda = lwRes.lambda;
+    lwShrinkageMethod = "analytical_lw";
+    const lwPosMap = new Map<number, number>(lwPool.map((item, k) => [item.idx, k]));
+    const targetAvg = Number.isFinite(lwRes.avg_corr) ? Math.max(0.1, Math.min(0.85, lwRes.avg_corr)) : avgCorr;
+
+    for (let i = 0; i < n; i += 1) {
+      for (let j = 0; j < n; j += 1) {
+        const a = assets[i]!;
+        const b = assets[j]!;
+        let corrIJ = rawCorr[i]![j]!;
+        if (i === j) {
+          corrIJ = 1.0;
+        } else if (a.slot.is_cash || b.slot.is_cash) {
+          corrIJ = 0;
+        } else {
+          const li = lwPosMap.get(i);
+          const lj = lwPosMap.get(j);
+          if (li !== undefined && lj !== undefined) {
+            corrIJ = lwRes.corr[li]![lj]!;
+          } else {
+            corrIJ = (1 - shrinkLambda) * corrIJ + shrinkLambda * targetAvg;
+          }
+          if (canonicalAssetName(a.slot.ticker) === canonicalAssetName(b.slot.ticker)) {
+            corrIJ = Math.max(0.96, corrIJ);
+          }
+        }
+        shrunkCorr[i]![j] = corrIJ;
+        cov[i]![j] = a.vol * b.vol * corrIJ;
       }
-      shrunkCorr[i]![j] = corrIJ;
-      cov[i]![j] = a.vol * b.vol * corrIJ;
+    }
+  } else {
+    for (let i = 0; i < n; i += 1) {
+      for (let j = 0; j < n; j += 1) {
+        const a = assets[i]!;
+        const b = assets[j]!;
+        let corrIJ = rawCorr[i]![j]!;
+        if (i !== j && !a.slot.is_cash && !b.slot.is_cash) {
+          corrIJ = (1 - shrinkLambda) * corrIJ + shrinkLambda * avgCorr;
+          if (canonicalAssetName(a.slot.ticker) === canonicalAssetName(b.slot.ticker)) {
+            corrIJ = Math.max(0.96, corrIJ);
+          }
+        }
+        shrunkCorr[i]![j] = corrIJ;
+        cov[i]![j] = a.vol * b.vol * corrIJ;
+      }
     }
   }
 
@@ -844,6 +931,48 @@ export function runPortfolioForecast(
   const baseStartTotal = baseStartVec.reduce((acc, v) => acc + v, 0);
   const simStartTotal = simStartVec.reduce((acc, v) => acc + v, 0);
   const benchEndBase = round(baseStartTotal * Math.pow(1 + benchCagrPct / 100, horizon), 2);
+
+  // Automatic Patton-Politis-White (2009) block length L* when manual block_length_weeks is null/undefined
+  let blockLenWeeks: number;
+  let blockLengthMode: "politis_white_auto" | "manual";
+  if (typeof req.block_length_weeks === "number" && Number.isFinite(req.block_length_weeks)) {
+    blockLenWeeks = Math.max(2, Math.min(26, Math.round(req.block_length_weeks)));
+    blockLengthMode = "manual";
+  } else {
+    blockLengthMode = "politis_white_auto";
+    let pwPool = lwPool.length >= 2 && lwCommonWeeks.length >= 52
+      ? lwPool
+      : assets
+          .map((a, idx) => ({ idx, retMap: a.retMap, valueBase: baselineMap.get(a.key)?.value_base ?? 0 }))
+          .filter((x) => !assets[x.idx]!.slot.is_cash && x.retMap.size >= 30);
+    let pwWeeks = lwPool.length >= 2 && lwCommonWeeks.length >= 52
+      ? lwCommonWeeks
+      : computeCommonWeeks(pwPool.map((x) => x.retMap));
+    if (pwPool.length > 1 && pwWeeks.length < 30) {
+      pwPool.sort((a, b) => b.valueBase - a.valueBase || b.retMap.size - a.retMap.size);
+      pwPool = [pwPool[0]!];
+      pwWeeks = Array.from(pwPool[0]!.retMap.keys()).sort();
+    }
+    const portSeries: number[] = [];
+    if (pwPool.length > 0 && pwWeeks.length >= 30) {
+      let rawWeights = pwPool.map((x) => Math.max(0, baseStartVec[x.idx] ?? 0));
+      let wSum = rawWeights.reduce((s, v) => s + v, 0);
+      if (wSum <= 1e-6) {
+        rawWeights = pwPool.map((x) => Math.max(0, simStartVec[x.idx] ?? 0));
+        wSum = rawWeights.reduce((s, v) => s + v, 0);
+      }
+      const normW =
+        wSum > 1e-6 ? rawWeights.map((w) => w / wSum) : pwPool.map(() => 1 / pwPool.length);
+      for (const wk of pwWeeks) {
+        let pRet = 0;
+        for (let k = 0; k < pwPool.length; k += 1) {
+          pRet += normW[k]! * (pwPool[k]!.retMap.get(wk) ?? 0);
+        }
+        portSeries.push(pRet);
+      }
+    }
+    blockLenWeeks = computePolitisWhiteBlockLength(portSeries).block_length_weeks;
+  }
 
   // 5b. Black-Litterman Posterior Expected Returns (Brier-Calibrated & GIGO-Adjusted)
   const eqTotal = Math.max(1, baseStartTotal);
@@ -1102,10 +1231,16 @@ export function runPortfolioForecast(
     })
     .sort((a, b) => b.after_value_base - a.after_value_base);
 
+  const blockModeTag =
+    blockLengthMode === "politis_white_auto" ? `Auto L*=${blockLenWeeks}w` : `Manual L=${blockLenWeeks}w`;
   const engineLabel =
     simRun.engine_used === "block_bootstrap"
-      ? `Politis-Romano Stationary Block Bootstrap (L=${blockLenWeeks}w across ${simRun.aligned_weeks} aligned weeks)`
+      ? `Politis-Romano Stationary Block Bootstrap (${blockModeTag} across ${simRun.aligned_weeks} aligned weeks)`
       : `Correlated Student-t (df=6) weekly shocks${simEngineReq === "block_bootstrap" ? ` (fallback: ${simRun.aligned_weeks}w < 80w aligned)` : ""}`;
+  const lwLabel =
+    lwShrinkageMethod === "analytical_lw"
+      ? `Analytical Ledoit-Wolf shrunk covariance (λ*=${round(shrinkLambda, 3)})`
+      : `Fixed Ledoit-Wolf shrunk covariance (λ=0.25 fallback)`;
   const retLabel = returnModel === "black_litterman" ? "Black-Litterman Brier-calibrated posterior" : "Raw 5Y dossier scenarios";
 
   return {
@@ -1117,6 +1252,9 @@ export function runPortfolioForecast(
     simulation_engine_requested: simEngineReq,
     simulation_engine_used: simRun.engine_used,
     block_length_weeks: blockLenWeeks,
+    block_length_mode: blockLengthMode,
+    lw_shrinkage_lambda: round(shrinkLambda, 3),
+    lw_shrinkage_method: lwShrinkageMethod,
     aligned_history_weeks: simRun.aligned_weeks,
     simulations,
     rf_pct: rfPct,
@@ -1145,6 +1283,6 @@ export function runPortfolioForecast(
     applied_actions: appliedLog,
     cash_shortfall_base: cashShortfallBase,
     positions: positionRows,
-    methodology_note: `Seeded ${simulations}-path ${engineLabel} using Ledoit-Wolf shrunk covariance (λ=0.25), ${retLabel}, Rf=${rfPct}%, Vol×${round(volMult, 2)}. Forecast cones reflect modeled assumptions & historical covariance, not guarantees.`,
+    methodology_note: `Seeded ${simulations}-path ${engineLabel} using ${lwLabel}, ${retLabel}, Rf=${rfPct}%, Vol×${round(volMult, 2)}. Forecast cones reflect modeled assumptions & historical covariance, not guarantees.`,
   };
 }

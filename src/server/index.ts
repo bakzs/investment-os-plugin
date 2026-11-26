@@ -15,6 +15,7 @@ import {
   buildSummaryText,
   executePortfolioBacktest,
   executePortfolioForecast,
+  executeQuantEvaluation,
   formatTimestamp,
   getDossierDetail,
   getThemeDetail,
@@ -60,7 +61,7 @@ import {
 import { runWatchdogSweep } from "./watchdog.js";
 import { syncFundamentalsXbrl } from "./xbrl.js";
 
-const APP_URI = "ui://investment-os/v7/dashboard.html";
+const APP_URI = "ui://investment-os/v8/dashboard.html";
 const APP_MIME = "text/html;profile=mcp-app";
 
 const currentDir =
@@ -182,7 +183,7 @@ const TOOLS: Tool[] = [
     name: "open_dashboard",
     title: "Investment OS",
     description:
-      "Open or refresh the interactive Investment OS v0.6 Executive Quantamental Personal-CIO sidecar dashboard showing unified wealth overview, Forward Portfolio Forecast & Action Simulator, look-through exposures, Priority Sells & Tax Swaps, living dossiers (Owner Earnings, ROIC, Reverse DCF bridge, 5Y scenarios, dip triage), Shared Themes, SEC EDGAR & Watchdog signals, and Backtest Lab.",
+      "Open or refresh the interactive Investment OS v0.8 Executive Quantamental Personal-CIO sidecar dashboard showing unified wealth overview, dynamic Ledoit-Wolf / Politis-White Forward Portfolio Forecast & Action Simulator, look-through exposures, Priority Sells & Tax Swaps, living dossiers (bottom-up multi-segment SOTP workbench, Variant Perception ledger, Owner Earnings, ROIC, Reverse DCF bridge, 5Y scenarios, dip triage), Shared Themes, SEC EDGAR & Watchdog signals, and Walk-Forward Calibration + Backtest Lab.",
     inputSchema: {
       type: "object",
       properties: {
@@ -393,14 +394,14 @@ const TOOLS: Tool[] = [
     name: "upsert_dossier",
     title: "Create or Update Full Research Dossier",
     description:
-      "Atomically upsert a stock's living thesis card (${PLUGIN_DATA}/theses/<TICKER>.md) plus optional Reverse DCF & Bear/Base/Bull valuation model (dossiers/<TICKER>/model.json), primary-source markdown research memo (dossiers/<TICKER>/memo.md), and external market intelligence (dossiers/<TICKER>/intel.json).",
+      "Atomically upsert a stock's living thesis card (${PLUGIN_DATA}/theses/<TICKER>.md) plus optional bottom-up multi-segment SOTP fundamental_model, Variant Perception ledger, Reverse DCF & Bear/Base/Bull valuation model (dossiers/<TICKER>/model.json, auto-deriving scenarios when derive_scenarios_from_sotp !== false), primary-source markdown research memo (dossiers/<TICKER>/memo.md), and external market intelligence (dossiers/<TICKER>/intel.json).",
     inputSchema: {
       type: "object",
       properties: {
         ...THESIS_BASE_PROPERTIES,
         model: {
           type: "object",
-          description: "Optional 5Y valuation model (DossierModelSchema): reverse_dcf (with net_cash_b, annual_dilution_pct), scenarios, dividend_yield_pct, accumulating, dividend_wht_pct, tranches.",
+          description: "Optional 5Y valuation model (DossierModelSchema): fundamental_model (bottom-up SOTP segments + variant_perception), reverse_dcf (with net_cash_b, annual_dilution_pct), scenarios, dividend_yield_pct, accumulating, dividend_wht_pct, tranches.",
         },
         memo_md: {
           type: "string",
@@ -573,7 +574,7 @@ const TOOLS: Tool[] = [
     name: "simulate_portfolio_forecast",
     title: "Simulate Forward Portfolio Forecast & Action Plan",
     description:
-      "Run a correlated fat-tail Monte Carlo (1,500 seeded Student-t paths, Ledoit-Wolf shrunk covariance blended with dossier 5Y after-tax scenarios) comparing Current Portfolio vs. Toggled Action Plan (UCITS tax swaps, mandatory exits, cap trims, planned buys, benchmark cash sweeps) over 1-10 years, reporting Bear/Base/Bull wealth trajectories, estate tax & WHT savings, cured risk caps, marginal risk contribution %, correlation-adjusted hurdles, and Quarter-Kelly sizing.",
+      "Run a correlated fat-tail Monte Carlo (1,500 seeded paths using Analytical Ledoit-Wolf shrinkage λ* and automatic Patton-Politis-White block length L*, blended with Brier-calibrated Black-Litterman or raw 5Y dossier scenarios) comparing Current Portfolio vs. Toggled Action Plan (UCITS tax swaps, mandatory exits, cap trims, planned buys, benchmark cash sweeps) over 1-10 years, reporting Bear/Base/Bull wealth trajectories, CVaR 10%, Max DD P95, PCA Effective Bets, estate tax & WHT savings, cured risk caps, Marginal Risk Contribution %, correlation-adjusted hurdles, Quarter-Kelly, and HRP sizing.",
     inputSchema: {
       type: "object",
       properties: {
@@ -604,8 +605,24 @@ const TOOLS: Tool[] = [
         rf_pct: { type: "number", description: "Annual risk-free rate % (defaults to cached 3M T-bill or 3.8%)." },
         return_model: { type: "string", enum: ["black_litterman", "raw_dossier"], description: "Expected return engine: Brier-calibrated Black-Litterman posterior (default) or raw 5Y dossier scenarios." },
         simulation_engine: { type: "string", enum: ["block_bootstrap", "student_t"], description: "Multivariate shock generator: Politis-Romano stationary block bootstrap (default, auto-falls back to Student-t if <80w aligned) or Student-t df=6." },
-        block_length_weeks: { type: "integer", description: "Mean geometric block length in weeks for Politis-Romano bootstrap (2-26, default 6)." },
+        block_length_weeks: { type: ["integer", "null"], description: "Optional manual geometric block length in weeks (2-26). Omit or pass null for automatic Patton-Politis-White L*." },
         demo: { type: "boolean", description: "Simulate against synthetic Demo Mode portfolio." },
+      },
+    },
+    _meta: INLINE_META,
+  },
+  {
+    name: "run_quant_evaluation",
+    title: "Run Walk-Forward Quant Calibration & Horse Race",
+    description:
+      "Execute a zero-lookahead expanding-window walk-forward evaluation across aligned weekly history comparing Covariance (Sample vs. Fixed-0.25 vs. Analytical Ledoit-Wolf via QLIKE & Vol RMSE), Tail-Risk Simulators (Politis-White Block Bootstrap vs. Student-t df=6 vs. Gaussian via Kupiec POF & Pinball Loss), and an OOS Allocation Horse Race (Current Weights vs. HRP-LW vs. Inv-Vol vs. Equal-Weight net of slippage).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        horizon_weeks: { type: "integer", enum: [13, 26], description: "Non-overlapping evaluation step & rebalance horizon in weeks (13 quarterly default, or 26 semi-annual)." },
+        tx_cost_bps: { type: "number", description: "One-way transaction cost & slippage in basis points per dollar traded (0-100, default 10)." },
+        include_external_wealth: { type: "boolean", description: "Include configured external equity exposure in weights & covariance (default true)." },
+        demo: { type: "boolean", description: "If true, evaluate against Demo Preview synthetic weekly histories." },
       },
     },
     _meta: INLINE_META,
@@ -893,7 +910,22 @@ const TOOLS: Tool[] = [
         rf_pct: { type: "number" },
         return_model: { type: "string", enum: ["black_litterman", "raw_dossier"] },
         simulation_engine: { type: "string", enum: ["block_bootstrap", "student_t"] },
-        block_length_weeks: { type: "integer" },
+        block_length_weeks: { type: ["integer", "null"] },
+        demo: { type: "boolean" },
+      },
+    },
+    _meta: APP_ONLY_META,
+  },
+  {
+    name: "app_run_quant_eval",
+    title: "App Run Walk-Forward Quant Evaluation",
+    description: "Internal UI tool to run the zero-lookahead walk-forward covariance, tail-risk, and allocation horse-race evaluation from the Lab tab.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        horizon_weeks: { type: "integer", enum: [13, 26] },
+        tx_cost_bps: { type: "number" },
+        include_external_wealth: { type: "boolean" },
         demo: { type: "boolean" },
       },
     },
@@ -970,11 +1002,11 @@ function mergeProfileUpdate(current: UserProfile, args: Record<string, unknown>)
 }
 
 const server = new Server(
-  { name: "investment-os-dashboard", version: "0.7.0" },
+  { name: "investment-os-dashboard", version: "0.8.0" },
   {
     capabilities: { tools: {}, resources: {} },
     instructions:
-      "Institutional Quantamental Personal-CIO workstation: Black-Litterman & Politis-Romano Block Bootstrap forward portfolio forecasting with CVaR, PCA Effective Bets & HRP sizing, 3-layer research graph, automated SEC/XBRL (Owner Earnings, ROIC, Accruals)/Form 4 signal harness, and Deflated Sharpe backtest lab for Investment OS.",
+      "Institutional Quantamental Personal-CIO workstation: Analytical Ledoit-Wolf & Politis-White Block Bootstrap forward portfolio forecasting with CVaR, PCA Effective Bets & HRP sizing, zero-lookahead walk-forward model validation, bottom-up multi-segment SOTP & Variant Perception dossiers, 3-layer research graph, automated SEC/XBRL (Owner Earnings, ROIC, Accruals)/Form 4 signal harness, and Deflated Sharpe backtest lab for Investment OS.",
   },
 );
 
@@ -1600,6 +1632,58 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return {
         content: [{ type: "text", text: `Simulated ${forecast.horizon_years}Y forecast (${forecast.applied_actions.length} actions).` }],
         structuredContent: forecast as unknown as Record<string, unknown>,
+      };
+    }
+
+    if (name === "run_quant_evaluation") {
+      const { evaluation, payload } = await executeQuantEvaluation({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        rawRequest: args,
+      });
+      const covWinner = evaluation.covariance_eval.find((r) => r.is_winner);
+      const tailWinner = evaluation.tail_eval.find((r) => r.is_winner);
+      const bestAlloc = [...evaluation.allocation_horse_race].sort((a, b) => b.oos_sharpe - a.oos_sharpe)[0];
+      const text = [
+        `Walk-Forward Quant Calibration (${evaluation.status} | ${evaluation.horizon_weeks}w windows=${evaluation.windows_evaluated} | ${evaluation.aligned_weeks}w aligned | ${evaluation.assets_included.length} assets | tx=${evaluation.tx_cost_bps}bps):`,
+        `- Date Range: ${evaluation.date_range ? `${evaluation.date_range.start} to ${evaluation.date_range.end}` : "N/A"} | Avg LW λ*=${evaluation.avg_lw_lambda ?? "n/a"} | Avg Auto L*=${evaluation.avg_auto_block_length ?? "n/a"}w`,
+        ...(covWinner
+          ? [
+              `- Covariance Winner: ${covWinner.label} (QLIKE=${covWinner.qlike_loss}, Realized/Predicted Vol=${covWinner.realized_to_predicted_vol_ratio}x, RMSE=${covWinner.vol_rmse_pct}%)`,
+            ]
+          : []),
+        ...(tailWinner
+          ? [
+              `- Tail-Risk Winner: ${tailWinner.label} (Pinball=${tailWinner.mean_pinball_loss_pct}%, VaR95 Breaches=${tailWinner.breaches}/${tailWinner.total_windows} [${tailWinner.var95_breach_rate_pct}%], Kupiec p=${tailWinner.kupiec_pof_pvalue}, 80% Cov=${tailWinner.coverage_80_pct}%)`,
+            ]
+          : []),
+        ...(bestAlloc
+          ? [
+              `- OOS Allocation Leader: ${bestAlloc.label} (Sharpe=${bestAlloc.oos_sharpe}, CAGR=${bestAlloc.oos_cagr_pct}%, MaxDD=${bestAlloc.oos_max_dd_pct}%, Turnover=${bestAlloc.annual_turnover_pct}%/yr)`,
+            ]
+          : []),
+        ...evaluation.findings.map((f) => `- ${f}`),
+      ].join("\n");
+      return {
+        content: [{ type: "text", text }],
+        structuredContent: payload as unknown as Record<string, unknown>,
+      };
+    }
+
+    if (name === "app_run_quant_eval") {
+      const { evaluation } = await executeQuantEvaluation({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        rawRequest: args,
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Completed walk-forward quant evaluation (${evaluation.status}, ${evaluation.windows_evaluated} windows).`,
+          },
+        ],
+        structuredContent: evaluation as unknown as Record<string, unknown>,
       };
     }
 

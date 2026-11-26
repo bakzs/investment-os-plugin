@@ -1,7 +1,7 @@
 {
   "name": "investment-os-plugin",
-  "version": "0.7.0",
-  "description": "Open-source Antigravity Institutional Quantamental Personal-CIO MCP App plugin: Black-Litterman Brier-calibrated forward forecasting, Politis-Romano Block Bootstrap & CVaR, Jacobi PCA factor risk & Effective Bets, Hierarchical Risk Parity (HRP), Deflated Sharpe backtesting, ETF look-through, SEC XBRL (Owner Earnings, ROIC, Accruals)/Form 4 signals, 3-lens adversarial deep research, and quiet Watchdog.",
+  "version": "0.8.0",
+  "description": "Open-source Antigravity Institutional Quantamental Personal-CIO MCP App plugin: Analytical Ledoit-Wolf shrinkage (λ*), automatic Patton-Politis-White block length (L*), Black-Litterman Brier-calibrated forecasting, zero-lookahead walk-forward evaluation harness, bottom-up SOTP & Variant Perception dossiers, Jacobi PCA factor risk, HRP, Deflated Sharpe backtesting, SEC XBRL/Form 4 signals, 3-lens adversarial research, and quiet Watchdog.",
   "license": "MIT",
   "type": "module",
   "repository": {

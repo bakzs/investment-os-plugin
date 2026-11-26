@@ -593,6 +593,124 @@ test("computeForwardScorecard separates <30d PENDING, deduplicates 30d calls, fi
   // Brier: high supported (0.8-1)^2 = 0.04, medium falsified (0.6-0)^2 = 0.36 -> avg = 0.20
   assert.equal(card.brier_calibration.resolved_total, 2);
   assert.equal(card.brier_calibration.overall_brier_score, 0.2);
+
+  // < 4 matured modeled tests -> null Rank IC with clear note
+  assert.equal(card.fundamental_accuracy.spearman_rank_ic, null);
+  assert.equal(card.fundamental_accuracy.ic_sample_count, 0);
+  assert.ok(card.fundamental_accuracy.note.includes("Need >=4 matured modeled tests for Rank IC"));
+});
+
+test("computeForwardScorecard computes Spearman Rank IC and scenario band hit rate across >=4 matured modeled tests", () => {
+  const historyCache: HistoryCacheState = {
+    updated_at: "2026-11-27T00:00:00Z",
+    series: {
+      "daily:VWRA.L": {
+        symbol: "VWRA.L",
+        currency: "USD",
+        source: "yahoo",
+        updated_at: "2026-11-27T00:00:00Z",
+        points: [
+          { date: "2025-11-27", close: 100 },
+          { date: "2026-11-27", close: 110 },
+        ],
+      },
+    },
+  };
+
+  // 5 matured (1Y) modeled tests with strictly monotonic expected vs realized returns + 1 immature PENDING test
+  const logs: ThesisTestRecord[] = [
+    ThesisTestRecordSchema.parse({
+      ticker: "ALPHA",
+      tested_at: "2025-11-27T00:00:00Z",
+      verdict: "EXIT",
+      summary: "Low expected CAGR",
+      price_at_test: 100,
+      benchmark_price_at_test: 100,
+      pit_snapshot: { expected_after_tax_cagr_pct: 3.0 },
+    }),
+    ThesisTestRecordSchema.parse({
+      ticker: "BETA",
+      tested_at: "2025-11-27T00:00:00Z",
+      verdict: "WATCH",
+      summary: "Modest expected CAGR",
+      price_at_test: 100,
+      benchmark_price_at_test: 100,
+      pit_snapshot: { expected_after_tax_cagr_pct: 8.0 },
+    }),
+    ThesisTestRecordSchema.parse({
+      ticker: "GAMMA",
+      tested_at: "2025-11-27T00:00:00Z",
+      verdict: "HIGH_CONVICTION",
+      summary: "Good expected CAGR",
+      price_at_test: 100,
+      benchmark_price_at_test: 100,
+      pit_snapshot: { expected_after_tax_cagr_pct: 13.0 },
+    }),
+    ThesisTestRecordSchema.parse({
+      ticker: "DELTA",
+      tested_at: "2025-11-27T00:00:00Z",
+      verdict: "HIGH_CONVICTION",
+      summary: "Strong expected CAGR",
+      price_at_test: 100,
+      benchmark_price_at_test: 100,
+      pit_snapshot: { expected_after_tax_cagr_pct: 18.0 },
+    }),
+    ThesisTestRecordSchema.parse({
+      ticker: "EPSILON",
+      tested_at: "2025-11-27T00:00:00Z",
+      verdict: "HIGH_CONVICTION",
+      summary: "Top expected CAGR (breaks upside band)",
+      price_at_test: 100,
+      benchmark_price_at_test: 100,
+      pit_snapshot: { expected_after_tax_cagr_pct: 24.0 },
+    }),
+    ThesisTestRecordSchema.parse({
+      ticker: "PEND",
+      tested_at: "2026-11-20T00:00:00Z",
+      verdict: "HIGH_CONVICTION",
+      summary: "Immature 7d test must be excluded",
+      price_at_test: 100,
+      benchmark_price_at_test: 109,
+      pit_snapshot: { expected_after_tax_cagr_pct: 30.0 },
+    }),
+  ];
+
+  const prices = new Map<string, number>([
+    ["ALPHA", 96], // -4% ann
+    ["BETA", 106], // +6% ann
+    ["GAMMA", 114], // +14% ann
+    ["DELTA", 121], // +21% ann
+    ["EPSILON", 145], // +45% ann (outside [-5-2, 32+2] = [-7, 34])
+    ["PEND", 150],
+    ["VWRA.L", 110],
+  ]);
+
+  const bounds = new Map<string, { bearCagrPct: number; bullCagrPct: number }>([
+    ["ALPHA", { bearCagrPct: -6, bullCagrPct: 12 }], // -4 in [-8, 14] -> hit
+    ["BETA", { bearCagrPct: 0, bullCagrPct: 16 }], // +6 in [-2, 18] -> hit
+    ["GAMMA", { bearCagrPct: 4, bullCagrPct: 22 }], // +14 in [2, 24] -> hit
+    ["DELTA", { bearCagrPct: 8, bullCagrPct: 26 }], // +21 in [6, 28] -> hit
+    ["EPSILON", { bearCagrPct: -5, bullCagrPct: 32 }], // +45 NOT in [-7, 34] -> miss
+    ["PEND", { bearCagrPct: 5, bullCagrPct: 35 }],
+  ]);
+
+  const card = computeForwardScorecard(
+    logs,
+    prices,
+    historyCache,
+    "VWRA.L",
+    new Date("2026-11-27T00:00:00Z"),
+    undefined,
+    bounds,
+  );
+  assert.equal(card.matured_count, 5);
+  assert.equal(card.pending_count, 1);
+  assert.equal(card.fundamental_accuracy.ic_sample_count, 5);
+  assert.equal(card.fundamental_accuracy.spearman_rank_ic, 1);
+  assert.ok(card.fundamental_accuracy.ic_t_stat === null || card.fundamental_accuracy.ic_t_stat > 5);
+  assert.equal(card.fundamental_accuracy.modeled_tests_matured, 5);
+  assert.equal(card.fundamental_accuracy.inside_band_count, 4);
+  assert.equal(card.fundamental_accuracy.inside_band_rate_pct, 80);
 });
 
 test("evaluateHypothesisRule evaluates XBRL, EDGAR, and Form 4 insider rules deterministically", () => {

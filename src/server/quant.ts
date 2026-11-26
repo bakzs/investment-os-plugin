@@ -1,4 +1,4 @@
-import { computeDeflatedSharpeRatio, computeHigherMoments } from "./quant_sota.js";
+import { computeDeflatedSharpeRatio, computeHigherMoments, computeSpearmanRankCorrelation } from "./quant_sota.js";
 import type {
   BacktestRequest,
   CatalystRecord,
@@ -1853,6 +1853,16 @@ export interface BrierCalibrationSummary {
   tiers: BrierCalibrationTier[];
 }
 
+export interface FundamentalAccuracySummary {
+  spearman_rank_ic: number | null;
+  ic_t_stat: number | null;
+  ic_sample_count: number;
+  modeled_tests_matured: number;
+  inside_band_count: number;
+  inside_band_rate_pct: number | null;
+  note: string;
+}
+
 export interface ForwardScorecardResult {
   benchmark_symbol: string;
   total_tests: number;
@@ -1863,6 +1873,7 @@ export interface ForwardScorecardResult {
   by_verdict: VerdictScorecardSummary[];
   horizon_buckets: ScorecardHorizonBucket[];
   brier_calibration: BrierCalibrationSummary;
+  fundamental_accuracy: FundamentalAccuracySummary;
 }
 
 export function lookupHistorySeries(
@@ -1993,6 +2004,7 @@ export function computeForwardScorecard(
   benchmarkSymbol: string,
   nowDate: Date = new Date(),
   allHypotheses?: HypothesisRecord[],
+  scenarioBoundsByTicker?: Map<string, { bearCagrPct: number; bullCagrPct: number }>,
 ): ForwardScorecardResult {
   const nowMs = nowDate.getTime();
   const benchBaseTicker = benchmarkSymbol.split(".")[0]?.toUpperCase() ?? benchmarkSymbol.toUpperCase();
@@ -2031,6 +2043,11 @@ export function computeForwardScorecard(
   }
 
   const entries: ForwardScorecardEntry[] = [];
+  const icExpected: number[] = [];
+  const icRealized: number[] = [];
+  let modeledTestsMatured = 0;
+  let insideBandCount = 0;
+
   for (const rec of dedupedLogs) {
     const testDate = rec.tested_at.slice(0, 10);
     const parsedMs = Date.parse(`${testDate}T00:00:00Z`);
@@ -2063,6 +2080,28 @@ export function computeForwardScorecard(
     const actionVerdict = rec.action_verdict ?? null;
     const hit =
       maturity === "MATURED" ? evaluateDirectionalHit(rec.verdict, actionVerdict, stockRet, alphaPct) : null;
+
+    if (maturity === "MATURED" && stockRet !== null) {
+      const ratio = Math.max(0.001, 1 + stockRet / 100);
+      const years = Math.max(30, daysElapsed) / 365.25;
+      const realizedAnnualCagrPct = (Math.pow(ratio, 1 / years) - 1) * 100;
+
+      const pitExpected = rec.pit_snapshot?.expected_after_tax_cagr_pct;
+      if (typeof pitExpected === "number" && Number.isFinite(pitExpected)) {
+        icExpected.push(pitExpected);
+        icRealized.push(realizedAnnualCagrPct);
+      }
+
+      const bounds = scenarioBoundsByTicker?.get(rec.ticker.toUpperCase());
+      if (bounds && Number.isFinite(bounds.bearCagrPct) && Number.isFinite(bounds.bullCagrPct)) {
+        modeledTestsMatured += 1;
+        const lo = Math.min(bounds.bearCagrPct, bounds.bullCagrPct) - 2;
+        const hi = Math.max(bounds.bearCagrPct, bounds.bullCagrPct) + 2;
+        if (realizedAnnualCagrPct >= lo && realizedAnnualCagrPct <= hi) {
+          insideBandCount += 1;
+        }
+      }
+    }
 
     entries.push({
       ticker: rec.ticker,
@@ -2138,6 +2177,25 @@ export function computeForwardScorecard(
     };
   });
 
+  const icSampleCount = icExpected.length;
+  let spearmanRankIc: number | null = null;
+  let icTStat: number | null = null;
+  let accuracyNote = "Need >=4 matured modeled tests for Rank IC";
+
+  if (icSampleCount >= 4) {
+    const sp = computeSpearmanRankCorrelation(icExpected, icRealized);
+    if (sp) {
+      spearmanRankIc = round(sp.rho, 3);
+      icTStat = sp.t_stat !== null ? round(sp.t_stat, 2) : null;
+      accuracyNote = `Spearman Rank IC across ${icSampleCount} matured modeled call(s) (rho=${spearmanRankIc}${icTStat !== null ? `, t=${icTStat}` : ""}).`;
+    } else {
+      accuracyNote = `Rank IC undefined across ${icSampleCount} matured modeled call(s) (zero rank dispersion).`;
+    }
+  }
+
+  const insideBandRatePct =
+    modeledTestsMatured > 0 ? round((insideBandCount / modeledTestsMatured) * 100, 1) : null;
+
   return {
     benchmark_symbol: benchmarkSymbol,
     total_tests: judgmentLogs.length,
@@ -2148,6 +2206,15 @@ export function computeForwardScorecard(
     by_verdict: byVerdict,
     horizon_buckets: horizonBuckets,
     brier_calibration: computeBrierCalibration(judgmentLogs, allHypotheses),
+    fundamental_accuracy: {
+      spearman_rank_ic: spearmanRankIc,
+      ic_t_stat: icTStat,
+      ic_sample_count: icSampleCount,
+      modeled_tests_matured: modeledTestsMatured,
+      inside_band_count: insideBandCount,
+      inside_band_rate_pct: insideBandRatePct,
+      note: accuracyNote,
+    },
   };
 }
 
