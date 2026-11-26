@@ -30,7 +30,7 @@ export interface HistoryFetchResult {
 }
 
 const YF_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (compatible; InvestmentOS-Plugin/0.6.0)",
+  "User-Agent": "Mozilla/5.0 (compatible; InvestmentOS-Plugin/0.7.0)",
   Accept: "application/json",
 };
 

@@ -15,7 +15,7 @@ function findNodeRuntime(): string {
   return process.execPath;
 }
 
-test("bundled dist/server.cjs passes end-to-end v0.6 stdio MCP App lifecycle", async () => {
+test("bundled dist/server.cjs passes end-to-end v0.7 stdio MCP App lifecycle", async () => {
   const rootDir = path.resolve(process.cwd());
   const serverPath = path.join(rootDir, "dist", "server.cjs");
   assert.equal(fs.existsSync(serverPath), true, "dist/server.cjs must be built before running stdio test");
@@ -28,7 +28,7 @@ test("bundled dist/server.cjs passes end-to-end v0.6 stdio MCP App lifecycle", a
   });
 
   const client = new Client(
-    { name: "investment-os-test-client", version: "0.6.0" },
+    { name: "investment-os-test-client", version: "0.7.0" },
     { capabilities: {} },
   );
 
@@ -42,7 +42,7 @@ test("bundled dist/server.cjs passes end-to-end v0.6 stdio MCP App lifecycle", a
     const openTool = byName.get("open_dashboard");
     assert.ok(openTool);
     const openMeta = openTool._meta as Record<string, unknown>;
-    assert.deepEqual(openMeta?.ui, { resourceUri: "ui://investment-os/v6/dashboard.html" });
+    assert.deepEqual(openMeta?.ui, { resourceUri: "ui://investment-os/v7/dashboard.html" });
     const agyUi = openMeta?.["com.google.antigravity/ui"] as { entrypoints?: Array<{ type: string; title: string }> };
     assert.equal(agyUi?.entrypoints?.length, 2);
 
@@ -61,7 +61,7 @@ test("bundled dist/server.cjs passes end-to-end v0.6 stdio MCP App lifecycle", a
       const tool = byName.get(inlineToolName);
       assert.ok(tool, `missing ${inlineToolName}`);
       assert.deepEqual((tool._meta as Record<string, unknown>)?.ui, {
-        resourceUri: "ui://investment-os/v6/dashboard.html",
+        resourceUri: "ui://investment-os/v7/dashboard.html",
       });
     }
 
@@ -86,15 +86,15 @@ test("bundled dist/server.cjs passes end-to-end v0.6 stdio MCP App lifecycle", a
 
     // 2. Verify resource listing and HTML content
     const resList = await client.listResources();
-    assert.equal(resList.resources[0]?.uri, "ui://investment-os/v6/dashboard.html");
+    assert.equal(resList.resources[0]?.uri, "ui://investment-os/v7/dashboard.html");
     assert.equal(resList.resources[0]?.mimeType, "text/html;profile=mcp-app");
 
-    const resRead = await client.readResource({ uri: "ui://investment-os/v6/dashboard.html" });
+    const resRead = await client.readResource({ uri: "ui://investment-os/v7/dashboard.html" });
     const item = resRead.contents[0];
     assert.ok(item && "text" in item);
     assert.equal(item.mimeType, "text/html;profile=mcp-app");
     assert.equal(item.text.includes("Investment OS"), true);
-    assert.equal(item.text.includes("v0.6"), true);
+    assert.equal(item.text.includes("v0.7"), true);
     assert.equal(item.text.includes('<dialog id="stock-inspector"'), true);
     assert.equal(Buffer.byteLength(item.text, "utf-8") < 1_000_000, true);
 
@@ -104,14 +104,19 @@ test("bundled dist/server.cjs passes end-to-end v0.6 stdio MCP App lifecycle", a
     assert.equal(emptyPayload.initialized, false);
     assert.equal(fs.readdirSync(tempDataDir).length, 0);
 
-    // 4. Demo mode renders synthetic v0.6 preview + forecast + demo dossier detail + demo theme detail + backtest without writing files
+    // 4. Demo mode renders synthetic v0.7 preview + BL/Bootstrap forecast + demo dossier detail + demo theme detail + DSR backtest without writing files
     const demoCall = await client.callTool({ name: "app_get_dashboard", arguments: { demo: true } });
     const demoPayload = demoCall.structuredContent as {
       initialized: boolean;
       is_demo: boolean;
       macro_regime: { regime_label: string } | null;
       rotation_queue: { tax_swaps: unknown[]; mandatory_exits: unknown[] };
-      forecast: { baseline: { ending_p50_base: number }; simulated: { ending_p50_base: number } } | null;
+      forecast: {
+        return_model: string;
+        simulation_engine_used: string;
+        baseline: { ending_p50_base: number; ending_cvar_10_base: number; factor_risk: { effective_bets: number } };
+        simulated: { ending_p50_base: number; ending_cvar_10_base: number; factor_risk: { effective_bets: number } };
+      } | null;
       themes: Array<{ slug: string }>;
       alerts: unknown[];
       portfolio: { positions: unknown[] };
@@ -122,7 +127,10 @@ test("bundled dist/server.cjs passes end-to-end v0.6 stdio MCP App lifecycle", a
     assert.equal(demoPayload.macro_regime?.regime_label, "CALM");
     assert.equal(demoPayload.rotation_queue.tax_swaps.length >= 1, true);
     assert.equal(demoPayload.rotation_queue.mandatory_exits.length >= 1, true);
+    assert.equal(demoPayload.forecast?.return_model, "black_litterman");
+    assert.equal(demoPayload.forecast?.simulation_engine_used, "block_bootstrap");
     assert.equal(Boolean(demoPayload.forecast && demoPayload.forecast.simulated.ending_p50_base > 0), true);
+    assert.equal(Boolean(demoPayload.forecast && demoPayload.forecast.simulated.factor_risk.effective_bets >= 1), true);
     assert.equal(demoPayload.themes.length >= 1, true);
     assert.equal(demoPayload.alerts.length >= 1, true);
     assert.equal(demoPayload.lab.active_count, 3);
@@ -136,12 +144,15 @@ test("bundled dist/server.cjs passes end-to-end v0.6 stdio MCP App lifecycle", a
     const demoForecast = demoForecastCall.structuredContent as {
       horizon_years: number;
       deltas: { estate_tax_saved_base: number };
-      simulated: { ending_p10_base: number; ending_p50_base: number; ending_p90_base: number };
+      simulated: { ending_cvar_10_base: number; ending_p10_base: number; ending_p50_base: number; ending_p90_base: number };
+      positions: Array<{ hrp_weight_pct: number; is_cash: boolean }>;
     };
     assert.equal(demoForecast.horizon_years, 5);
+    assert.equal(demoForecast.simulated.ending_cvar_10_base <= demoForecast.simulated.ending_p10_base, true);
     assert.equal(demoForecast.simulated.ending_p10_base < demoForecast.simulated.ending_p50_base, true);
     assert.equal(demoForecast.simulated.ending_p50_base < demoForecast.simulated.ending_p90_base, true);
     assert.equal(demoForecast.deltas.estate_tax_saved_base > 0, true);
+    assert.equal(demoForecast.positions.some((p) => !p.is_cash && p.hrp_weight_pct > 0), true);
 
     const demoDetailCall = await client.callTool({
       name: "app_get_dossier_detail",
@@ -179,16 +190,24 @@ test("bundled dist/server.cjs passes end-to-end v0.6 stdio MCP App lifecycle", a
 
     const demoBtCall = await client.callTool({
       name: "app_run_backtest",
-      arguments: { candidate_ticker: "ACME", target_weight_pct: 8, funding_source: "cash", demo: true },
+      arguments: { candidate_ticker: "ACME", target_weight_pct: 8, funding_source: "cash", tx_cost_bps: 10, trials_tested: 12, demo: true },
     });
     const demoBt = demoBtCall.structuredContent as {
       candidate_ticker: string;
       weeks_analyzed: number;
-      baseline: { sharpe_se: number; rebalance_count: number };
+      tx_cost_bps: number;
+      trials_tested: number;
+      baseline: { sharpe_se: number; rebalance_count: number; cvar_95_weekly_pct: number };
+      simulated: { deflated_sharpe_prob_pct: number; tx_cost_drag_bps: number };
     };
     assert.equal(demoBt.candidate_ticker, "ACME");
     assert.equal(demoBt.weeks_analyzed >= 250, true);
+    assert.equal(demoBt.tx_cost_bps, 10);
+    assert.equal(demoBt.trials_tested, 12);
     assert.equal(demoBt.baseline.sharpe_se > 0, true);
+    assert.equal(demoBt.baseline.cvar_95_weekly_pct <= 0, true);
+    assert.equal(demoBt.simulated.deflated_sharpe_prob_pct >= 0 && demoBt.simulated.deflated_sharpe_prob_pct <= 100, true);
+    assert.equal(demoBt.simulated.tx_cost_drag_bps > 0, true);
     assert.equal(fs.readdirSync(tempDataDir).length, 0);
 
     // 5. Full v0.5 agent round-trip persistence (themes, etf_weights, dossiers, intel_history, watchdog, ack, tests)

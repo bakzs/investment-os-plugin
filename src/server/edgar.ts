@@ -10,7 +10,7 @@ import {
 } from "./storage.js";
 import { normalizeTicker, type CatalystRecord, type UserProfile } from "./schema.js";
 
-export const DEFAULT_SEC_USER_AGENT = "InvestmentOS-Plugin/0.6.0 (contact@investment-os.local)";
+export const DEFAULT_SEC_USER_AGENT = "InvestmentOS-Plugin/0.7.0 (contact@investment-os.local)";
 export const SEC_PACING_MS = 150;
 
 export const PERIODIC_FORMS = new Set(["10-K", "10-Q", "20-F", "10-K/A", "10-Q/A", "20-F/A"]);

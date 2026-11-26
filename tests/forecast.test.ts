@@ -166,13 +166,20 @@ test("runPortfolioForecast simulates tax swaps, mandatory exits, planned buys, c
   // 1. Seeded deterministic repeatability
   assert.deepEqual(res1, res2);
 
-  // 2. Starting wealth conserved ($100,000) & percentile ordering holds
+  // 2. Starting wealth conserved ($100,000), v0.7 defaults active (BL + Block Bootstrap), & tail ordering holds
+  assert.equal(res1.return_model, "black_litterman");
+  assert.equal(res1.simulation_engine_used, "block_bootstrap");
   assert.equal(res1.baseline.starting_wealth_base, 100000);
   assert.equal(res1.simulated.starting_wealth_base, 100000);
+  assert.ok(res1.baseline.ending_cvar_10_base <= res1.baseline.ending_p10_base);
   assert.ok(res1.baseline.ending_p10_base < res1.baseline.ending_p50_base);
   assert.ok(res1.baseline.ending_p50_base < res1.baseline.ending_p90_base);
+  assert.ok(res1.simulated.ending_cvar_10_base <= res1.simulated.ending_p10_base);
   assert.ok(res1.simulated.ending_p10_base < res1.simulated.ending_p50_base);
   assert.ok(res1.simulated.ending_p50_base < res1.simulated.ending_p90_base);
+  assert.ok(res1.simulated.sim_max_dd_p95_pct <= res1.simulated.sim_max_dd_p50_pct && res1.simulated.sim_max_dd_p50_pct <= 0);
+  assert.ok(res1.simulated.factor_risk.effective_bets >= 1);
+  assert.ok(res1.simulated.factor_risk.top_factors.length >= 1);
   assert.equal(res1.simulated.trajectory.length, 6); // Year 0..5
 
   // 3. QQQ -> VWRA tax swap + HYPE exit cured US-Situs cap & reduced NRA estate tax to $0 (US-situs drops from $72k to $24k <= $60k threshold!)
@@ -183,15 +190,34 @@ test("runPortfolioForecast simulates tax swaps, mandatory exits, planned buys, c
   assert.equal(res1.cash_shortfall_base, 0);
   assert.equal(res1.simulated.ending_cash_base, 0); // park_cash_in_benchmark deployed residual $8k into VWRA
 
-  // 4. Risk sizing metrics: Marginal Risk Contributions sum to ~100% and ACME receives positive Quarter-Kelly sizing
+  // 4. Risk sizing metrics: Marginal Risk Contributions & HRP weights sum to ~100%, BL shrinks ACME toward prior
   const totalMrc = res1.positions.reduce((s, p) => s + p.marginal_risk_contrib_pct, 0);
   assert.ok(totalMrc > 98 && totalMrc < 102, `Expected total MRC ~100%, got ${totalMrc}`);
+  const totalHrp = res1.positions.filter((p) => !p.is_cash && p.after_value_base > 0).reduce((s, p) => s + p.hrp_weight_pct, 0);
+  assert.ok(totalHrp > 98 && totalHrp < 102, `Expected total HRP ~100%, got ${totalHrp}`);
   const acmeRow = res1.positions.find((p) => p.ticker === "ACME");
   assert.ok(acmeRow);
   assert.equal(acmeRow.after_value_base, 12000);
   assert.equal(acmeRow.quality_grade, "A");
+  assert.equal(acmeRow.return_source, "black_litterman");
+  assert.ok(acmeRow.raw_view_cagr_pct !== null && acmeRow.expected_cagr_pct < acmeRow.raw_view_cagr_pct);
   assert.ok(acmeRow.quarter_kelly_weight_pct > 0 && acmeRow.quarter_kelly_weight_pct <= 12);
+  assert.ok(acmeRow.hrp_weight_pct > 0);
   assert.ok(acmeRow.corr_adjusted_hurdle_pct >= 8.0);
+
+  // Raw Dossier + Student-t toggle check
+  const rawStudentReq = ForecastRequestSchema.parse({
+    horizon_years: 5,
+    simulations: 400,
+    apply_recommended_rotations: true,
+    return_model: "raw_dossier",
+    simulation_engine: "student_t",
+    actions: [{ type: "buy", ticker: "ACME", amount_base: 12000 }],
+  });
+  const rawStudentRes = runPortfolioForecast(rawStudentReq, portfolio, profile, theses, queue, etfWeights, historyCache, { USD: 1.0 });
+  assert.equal(rawStudentRes.return_model, "raw_dossier");
+  assert.equal(rawStudentRes.simulation_engine_used, "student_t");
+  assert.equal(rawStudentRes.positions.find((p) => p.ticker === "ACME")?.return_source, "dossier_scenarios");
 
   // 5. Cash shortfall capping when user enters a buy exceeding cash + freed proceeds
   const overBuyReq = ForecastRequestSchema.parse({

@@ -3045,6 +3045,65 @@ details.drawer-disclosure:not([open])::details-content {
   display: block;
 }
 
+.factor-strip {
+  margin-top: 0.7rem;
+  padding: 0.65rem 0.8rem;
+  border-radius: 9px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.factor-strip-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.35rem 0.75rem;
+}
+
+.factor-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.factor-bar-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 210px) 1fr 44px;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.factor-bar-label {
+  min-inline-size: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.factor-bar-track {
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--border-color) 70%, transparent);
+  overflow: hidden;
+}
+
+.factor-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.factor-bar-pct {
+  text-align: right;
+  font-weight: 600;
+}
+
 .action-check-list {
   display: flex;
   flex-direction: column;

@@ -1,7 +1,7 @@
 {
   "name": "investment-os-plugin",
-  "version": "0.6.0",
-  "description": "Open-source Antigravity Quantamental Personal-CIO MCP App plugin for multi-currency portfolio analytics, correlated Monte Carlo forward forecasting & action simulation, ETF look-through, Priority Sells & Tax Swaps, automated SEC XBRL (Owner Earnings, ROIC, Accruals)/Form 4 signals, 3-layer research graph, adversarial deep company research, deterministic backtesting, and quiet delta-only Watchdog.",
+  "version": "0.7.0",
+  "description": "Open-source Antigravity Institutional Quantamental Personal-CIO MCP App plugin: Black-Litterman Brier-calibrated forward forecasting, Politis-Romano Block Bootstrap & CVaR, Jacobi PCA factor risk & Effective Bets, Hierarchical Risk Parity (HRP), Deflated Sharpe backtesting, ETF look-through, SEC XBRL (Owner Earnings, ROIC, Accruals)/Form 4 signals, 3-lens adversarial deep research, and quiet Watchdog.",
   "license": "MIT",
   "type": "module",
   "repository": {

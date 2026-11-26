@@ -725,9 +725,54 @@ test("runDeterministicBacktest prevents nano-position rebalance storms, FX-conve
   assert.ok(resWithExt.baseline.rebalance_count < 15, `Expected low rebalance count, got ${resWithExt.baseline.rebalance_count}`);
   // 2. FX conversion applied to EUR.DE
   assert.ok(resWithExt.fx_converted_tickers.includes("EUR.DE"));
-  // 3. Risk-free rate & Sharpe SE exposed
+  // 3. Risk-free rate, Sharpe SE, Deflated Sharpe, weekly CVaR & tx-cost slippage exposed
   assert.equal(resWithExt.rf_pct, 4.5);
+  assert.equal(resWithExt.tx_cost_bps, 10);
   assert.ok(resWithExt.baseline.sharpe_se > 0);
+  assert.ok(resWithExt.simulated.deflated_sharpe_prob_pct >= 0 && resWithExt.simulated.deflated_sharpe_prob_pct <= 100);
+  assert.ok(resWithExt.simulated.cvar_95_weekly_pct <= 0);
+  assert.ok(resWithExt.simulated.total_turnover_pct >= 9.5); // at least 10% entry buy turnover
+  assert.ok(resWithExt.simulated.tx_cost_drag_bps > 0);
+
+  // Higher slippage (50 bps) strictly reduces simulated CAGR vs 0 bps
+  const resZeroCost = runDeterministicBacktest(
+    BacktestRequestSchema.parse({
+      candidate_ticker: "EUR.DE",
+      candidate_yf_symbol: "EUR.DE",
+      target_weight_pct: 10,
+      funding_source: "cash",
+      rebalance_band_pct: 25,
+      include_external_wealth: true,
+      rf_pct: 4.5,
+      tx_cost_bps: 0,
+      trials_tested: 1,
+    }),
+    portfolio,
+    [],
+    profile,
+    historyCache,
+    { USD: 1.0, EUR: 1.1 },
+  );
+  const resHighCost = runDeterministicBacktest(
+    BacktestRequestSchema.parse({
+      candidate_ticker: "EUR.DE",
+      candidate_yf_symbol: "EUR.DE",
+      target_weight_pct: 10,
+      funding_source: "cash",
+      rebalance_band_pct: 25,
+      include_external_wealth: true,
+      rf_pct: 4.5,
+      tx_cost_bps: 50,
+      trials_tested: 25,
+    }),
+    portfolio,
+    [],
+    profile,
+    historyCache,
+    { USD: 1.0, EUR: 1.1 },
+  );
+  assert.ok(resHighCost.simulated.cagr_pct < resZeroCost.simulated.cagr_pct);
+  assert.ok(resHighCost.simulated.deflated_sharpe_prob_pct < resZeroCost.simulated.deflated_sharpe_prob_pct);
   // 4. External wealth (MSFT) included in baseline & top correlations
   assert.equal(resWithExt.include_external_wealth, true);
   assert.ok(resWithExt.top_correlations.some((c) => c.ticker === "MSFT"));

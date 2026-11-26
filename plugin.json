@@ -1,8 +1,8 @@
 {
   "name": "investment-os",
   "displayName": "Investment OS",
-  "version": "0.6.0",
-  "description": "Quantamental Personal-CIO sidecar workstation for multi-currency portfolios: executive cockpit, 5Y correlated Monte Carlo forward portfolio forecast & action simulator, ETF look-through, Owner Earnings & ROIC XBRL quality scoring, Form 4 insiders, 3-lens adversarial deep company research, Reverse DCF bridge, FX-aware backtesting, and quiet Watchdog.",
+  "version": "0.7.0",
+  "description": "Institutional Quantamental Personal-CIO sidecar for multi-currency portfolios: Black-Litterman & Block Bootstrap forward forecasting, CVaR tail risk, PCA Effective Bets, HRP & Quarter-Kelly sizing, Deflated Sharpe backtesting, ETF look-through, SEC XBRL Owner Earnings/ROIC quality scoring, Form 4 insiders, 3-lens deep research, and quiet Watchdog.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Open my Investment OS dashboard and help me onboard my portfolio",

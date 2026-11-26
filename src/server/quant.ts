@@ -1,3 +1,4 @@
+import { computeDeflatedSharpeRatio, computeHigherMoments } from "./quant_sota.js";
 import type {
   BacktestRequest,
   CatalystRecord,
@@ -2157,8 +2158,14 @@ export interface BacktestSeriesMetrics {
   max_drawdown_pct: number;
   sharpe: number;
   sharpe_se: number;
+  deflated_sharpe_prob_pct: number;
   sortino: number;
+  cvar_95_weekly_pct: number;
+  skewness: number;
+  excess_kurtosis: number;
   rebalance_count: number;
+  total_turnover_pct: number;
+  tx_cost_drag_bps: number;
   rolling_3y_cagr_min_pct: number | null;
   rolling_3y_cagr_median_pct: number | null;
   rolling_3y_cagr_max_pct: number | null;
@@ -2191,6 +2198,9 @@ export interface BacktestResult {
   funding_source: string;
   rebalance_band_pct: number;
   rf_pct: number;
+  tx_cost_bps: number;
+  trials_tested: number;
+  sr0_annual_threshold: number;
   include_external_wealth: boolean;
   fx_converted_tickers: string[];
   overlap_start: string;
@@ -2301,8 +2311,16 @@ function convertWeekMapToUsd(
   return out.size >= 12 ? { converted: out, fxApplied: true } : { converted: wkMap, fxApplied: false };
 }
 
-function computeSeriesMetrics(values: number[], rfPct = 4.0, rebalanceCount = 0): BacktestSeriesMetrics {
+function computeSeriesMetrics(
+  values: number[],
+  rfPct = 4.0,
+  rebalanceCount = 0,
+  opts?: { totalTurnoverPct?: number; txCostDragBps?: number; trialsTested?: number },
+): BacktestSeriesMetrics {
   const n = values.length;
+  const totalTurnoverPct = round(opts?.totalTurnoverPct ?? 0, 1);
+  const txCostDragBps = round(opts?.txCostDragBps ?? 0, 1);
+  const trialsTested = Math.max(1, opts?.trialsTested ?? 1);
   if (n < 2) {
     return {
       cagr_pct: 0,
@@ -2311,8 +2329,14 @@ function computeSeriesMetrics(values: number[], rfPct = 4.0, rebalanceCount = 0)
       max_drawdown_pct: 0,
       sharpe: 0,
       sharpe_se: 0,
+      deflated_sharpe_prob_pct: 50,
       sortino: 0,
+      cvar_95_weekly_pct: 0,
+      skewness: 0,
+      excess_kurtosis: 0,
       rebalance_count: rebalanceCount,
+      total_turnover_pct: totalTurnoverPct,
+      tx_cost_drag_bps: txCostDragBps,
       rolling_3y_cagr_min_pct: null,
       rolling_3y_cagr_median_pct: null,
       rolling_3y_cagr_max_pct: null,
@@ -2349,6 +2373,12 @@ function computeSeriesMetrics(values: number[], rfPct = 4.0, rebalanceCount = 0)
   const sharpe = volAnn > 1e-9 ? round(annExcessMean / volAnn, 2) : 0;
   const sharpeSe = round(Math.sqrt((1 + 0.5 * sharpe * sharpe) / Math.max(0.25, years)), 2);
   const sortino = downDevAnn > 1e-9 ? round(annExcessMean / downDevAnn, 2) : 0;
+  const moments = computeHigherMoments(rets);
+  const dsr = computeDeflatedSharpeRatio({
+    annualizedSharpe: sharpe,
+    weeklyReturns: rets,
+    trialsTested,
+  });
 
   let rollMin: number | null = null;
   let rollMed: number | null = null;
@@ -2379,8 +2409,14 @@ function computeSeriesMetrics(values: number[], rfPct = 4.0, rebalanceCount = 0)
     max_drawdown_pct: round(maxDd * 100, 2),
     sharpe,
     sharpe_se: sharpeSe,
+    deflated_sharpe_prob_pct: dsr.dsr_prob_pct,
     sortino,
+    cvar_95_weekly_pct: moments.cvar_95_pct,
+    skewness: moments.skewness,
+    excess_kurtosis: moments.excess_kurtosis,
     rebalance_count: rebalanceCount,
+    total_turnover_pct: totalTurnoverPct,
+    tx_cost_drag_bps: txCostDragBps,
     rolling_3y_cagr_min_pct: rollMin,
     rolling_3y_cagr_median_pct: rollMed,
     rolling_3y_cagr_max_pct: rollMax,
@@ -2419,15 +2455,22 @@ function simulatePortfolioPath(
   numPoints: number,
   rebalanceBandFrac: number,
   rfPct = 4.0,
-): { curve: number[]; rebalanceCount: number } {
+  txCostBps = 0,
+  initialTurnoverFrac = 0,
+): { curve: number[]; rebalanceCount: number; totalTurnoverPct: number; txCostDragBps: number } {
   const assets = Array.from(weights.entries()).filter(([, w]) => w > 1e-6);
+  const costRate = Math.max(0, txCostBps) / 10_000;
+  const initTurn = Math.max(0, initialTurnoverFrac);
+  const initCostMult = Math.max(0.9, 1 - initTurn * costRate);
   const alloc = new Map<string, number>();
   for (const [k, w] of assets) {
-    alloc.set(k, 100 * w);
+    alloc.set(k, 100 * initCostMult * w);
   }
   const curve: number[] = [100];
   const cashGrowthWeekly = Math.pow(1 + Math.max(0, rfPct) / 100, 1 / 52);
   let rebalanceCount = 0;
+  let totalTurnoverFrac = initTurn;
+  let totalCostFrac = initTurn * costRate;
 
   for (let t = 1; t < numPoints; t += 1) {
     let total = 0;
@@ -2459,6 +2502,16 @@ function simulatePortfolioPath(
       }
       if (breached) {
         rebalanceCount += 1;
+        let oneWayTurn = 0;
+        for (const [k, targetW] of assets) {
+          const curW = (alloc.get(k) ?? 0) / total;
+          oneWayTurn += Math.abs(curW - targetW);
+        }
+        oneWayTurn *= 0.5;
+        totalTurnoverFrac += oneWayTurn;
+        const stepCost = oneWayTurn * costRate;
+        totalCostFrac += stepCost;
+        total = Math.max(0.01, total * (1 - stepCost));
         for (const [k, targetW] of assets) {
           alloc.set(k, total * targetW);
         }
@@ -2467,7 +2520,13 @@ function simulatePortfolioPath(
 
     curve.push(round(total, 4));
   }
-  return { curve, rebalanceCount };
+  const years = Math.max(1 / 52, (numPoints - 1) / 52);
+  return {
+    curve,
+    rebalanceCount,
+    totalTurnoverPct: round(totalTurnoverFrac * 100, 1),
+    txCostDragBps: round((totalCostFrac / years) * 10_000, 1),
+  };
 }
 
 function computeWindowCagrAndDd(
@@ -2500,6 +2559,7 @@ function computeWindowCagrAndDd(
 
 export interface BacktestRunOptions {
   defaultRfPct?: number;
+  defaultTrialsTested?: number;
 }
 
 export function runDeterministicBacktest(
@@ -2805,17 +2865,42 @@ export function runDeterministicBacktest(
   }
 
   const bandFrac = Math.max(0.05, req.rebalance_band_pct / 100);
-  const baselineSim = simulatePortfolioPath(baseWeights, alignedPrices, finalDates.length, bandFrac, rfPct);
-  const simulatedSim = simulatePortfolioPath(simWeights, alignedPrices, finalDates.length, bandFrac, rfPct);
+  const txCostBps = round(req.tx_cost_bps ?? 10, 1);
+  const trialsTested = Math.max(1, Math.round(req.trials_tested ?? opts?.defaultTrialsTested ?? 1));
+
+  // Initial one-way turnover between baseline and simulated weights (charged at entry on simulated path)
+  const allWeightKeys = new Set([...baseWeights.keys(), ...simWeights.keys()]);
+  let initTurnFrac = 0;
+  for (const k of allWeightKeys) {
+    initTurnFrac += Math.abs((simWeights.get(k) ?? 0) - (baseWeights.get(k) ?? 0));
+  }
+  initTurnFrac *= 0.5;
+
+  const baselineSim = simulatePortfolioPath(baseWeights, alignedPrices, finalDates.length, bandFrac, rfPct, txCostBps, 0);
+  const simulatedSim = simulatePortfolioPath(simWeights, alignedPrices, finalDates.length, bandFrac, rfPct, txCostBps, initTurnFrac);
   const baselineCurve = baselineSim.curve;
   const simulatedCurve = simulatedSim.curve;
   const benchRaw = alignedPrices.get("__BENCH__")!;
   const benchStart = benchRaw[0]!;
   const benchmarkCurve = benchRaw.map((p) => round((p / benchStart) * 100, 4));
 
-  const baselineMetrics = computeSeriesMetrics(baselineCurve, rfPct, baselineSim.rebalanceCount);
-  const simulatedMetrics = computeSeriesMetrics(simulatedCurve, rfPct, simulatedSim.rebalanceCount);
-  const benchmarkMetrics = computeSeriesMetrics(benchmarkCurve, rfPct, 0);
+  const baselineMetrics = computeSeriesMetrics(baselineCurve, rfPct, baselineSim.rebalanceCount, {
+    totalTurnoverPct: baselineSim.totalTurnoverPct,
+    txCostDragBps: baselineSim.txCostDragBps,
+    trialsTested: 1,
+  });
+  const simulatedMetrics = computeSeriesMetrics(simulatedCurve, rfPct, simulatedSim.rebalanceCount, {
+    totalTurnoverPct: simulatedSim.totalTurnoverPct,
+    txCostDragBps: simulatedSim.txCostDragBps,
+    trialsTested,
+  });
+  const benchmarkMetrics = computeSeriesMetrics(benchmarkCurve, rfPct, 0, { trialsTested: 1 });
+  const simWeeklyRetsForDsr = simulatedCurve.slice(1).map((v, i) => (simulatedCurve[i]! > 0 ? v / simulatedCurve[i]! - 1 : 0));
+  const simDsrDetail = computeDeflatedSharpeRatio({
+    annualizedSharpe: simulatedMetrics.sharpe,
+    weeklyReturns: simWeeklyRetsForDsr,
+    trialsTested,
+  });
 
   const toWeeklyReturns = (arr: number[]): number[] => {
     const out: number[] = [];
@@ -2916,7 +3001,7 @@ export function runDeterministicBacktest(
     benchmark_idx: round(benchmarkCurve[idx]!, 2),
   }));
 
-  const baseCaveat = `Deterministic weekly backtest (${finalDates.length - 1}w, hybrid max(2%, ${req.rebalance_band_pct}%) drift rebalance, rf=${rfPct}%, survivor/hindsight caveats apply).`;
+  const baseCaveat = `Deterministic weekly backtest (${finalDates.length - 1}w, hybrid max(2%, ${req.rebalance_band_pct}%) drift rebalance, rf=${rfPct}%, tx=${txCostBps}bps, DSR M=${trialsTested}, survivor/hindsight caveats apply).`;
   const caveat = caveats.length > 0 ? `${baseCaveat} ${caveats.join(" ")}` : baseCaveat;
 
   return {
@@ -2927,6 +3012,9 @@ export function runDeterministicBacktest(
     funding_source: req.funding_source,
     rebalance_band_pct: round(req.rebalance_band_pct, 1),
     rf_pct: rfPct,
+    tx_cost_bps: txCostBps,
+    trials_tested: trialsTested,
+    sr0_annual_threshold: simDsrDetail.sr0_annual_threshold,
     include_external_wealth: includeExternalWealth,
     fx_converted_tickers: fxConvertedTickers,
     overlap_start: finalDates[0]!,

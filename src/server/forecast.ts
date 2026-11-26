@@ -8,6 +8,14 @@ import {
   type CapitalRotationQueue,
   type ScenarioSummary,
 } from "./quant.js";
+import {
+  computeBlackLittermanPosterior,
+  computeFactorRiskDecomposition,
+  computeHrpWeights,
+  runCorrelatedWealthSimulation,
+  type BlackLittermanResult,
+  type FactorRiskDecomposition,
+} from "./quant_sota.js";
 import type {
   DossierModel,
   EtfWeightsConfig,
@@ -45,6 +53,7 @@ export interface ForecastYearPoint {
 
 export interface ForecastPathSummary {
   starting_wealth_base: number;
+  ending_cvar_10_base: number;
   ending_p10_base: number;
   ending_p50_base: number;
   ending_p90_base: number;
@@ -52,6 +61,8 @@ export interface ForecastPathSummary {
   expected_cagr_p50_pct: number;
   p10_cagr_pct: number;
   p90_cagr_pct: number;
+  sim_max_dd_p50_pct: number;
+  sim_max_dd_p95_pct: number;
   annual_vol_pct: number;
   expected_sharpe: number;
   prob_beat_benchmark_pct: number;
@@ -62,6 +73,7 @@ export interface ForecastPathSummary {
   cap_breaches_count: number;
   breached_cap_labels: string[];
   ending_cash_base: number;
+  factor_risk: FactorRiskDecomposition;
   trajectory: ForecastYearPoint[];
 }
 
@@ -74,12 +86,16 @@ export interface ForecastPositionSizingRow {
   before_weight_pct: number;
   after_weight_pct: number;
   expected_cagr_pct: number;
+  prior_cagr_pct: number;
+  raw_view_cagr_pct: number | null;
+  bl_shrinkage_pct: number;
   annual_vol_pct: number;
-  return_source: "dossier_scenarios" | "benchmark" | "etf_benchmark" | "unmodeled_default" | "risk_free";
+  return_source: "black_litterman" | "dossier_scenarios" | "benchmark" | "etf_benchmark" | "unmodeled_default" | "risk_free";
   marginal_risk_contrib_pct: number;
   corr_with_portfolio: number;
   corr_adjusted_hurdle_pct: number;
   quarter_kelly_weight_pct: number;
+  hrp_weight_pct: number;
   quality_grade?: "A" | "B" | "C" | "D" | null;
 }
 
@@ -97,20 +113,28 @@ export interface PortfolioForecastResult {
   base_currency: string;
   include_external_wealth: boolean;
   regime_vol_multiplier: number;
+  return_model: "black_litterman" | "raw_dossier";
+  simulation_engine_requested: "block_bootstrap" | "student_t";
+  simulation_engine_used: "block_bootstrap" | "student_t";
+  block_length_weeks: number;
+  aligned_history_weeks: number;
   simulations: number;
   rf_pct: number;
   benchmark_ticker: string;
   benchmark_cagr_pct: number;
   benchmark_ending_base: number;
+  black_litterman: BlackLittermanResult;
   baseline: ForecastPathSummary;
   simulated: ForecastPathSummary;
   deltas: {
     p50_base: number;
     p10_base: number;
+    cvar_10_base: number;
     p90_base: number;
     cagr_p50_pct: number;
     annual_vol_pct: number;
     sharpe: number;
+    effective_bets: number;
     estate_tax_saved_base: number;
     annual_wht_saved_base: number;
     us_situs_delta_pct: number;
@@ -122,41 +146,6 @@ export interface PortfolioForecastResult {
   cash_shortfall_base: number;
   positions: ForecastPositionSizingRow[];
   methodology_note: string;
-}
-
-function mulberry32(seedInit: number): () => number {
-  let a = seedInit >>> 0;
-  return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function boxMullerPair(rng: () => number): [number, number] {
-  const u1 = Math.max(1e-12, rng());
-  const u2 = rng();
-  const r = Math.sqrt(-2.0 * Math.log(u1));
-  const theta = 2.0 * Math.PI * u2;
-  return [r * Math.cos(theta), r * Math.sin(theta)];
-}
-
-function sampleStandardNormal(rng: () => number): number {
-  return boxMullerPair(rng)[0];
-}
-
-function sampleStudentTScale(rng: () => number, df = 6): number {
-  // Variance-normalized Student-t multiplier: sqrt((df - 2) / chi2(df))
-  let chi2 = 0;
-  for (let i = 0; i < df; i += 2) {
-    const [z1, z2] = boxMullerPair(rng);
-    chi2 += z1 * z1;
-    if (i + 1 < df) chi2 += z2 * z2;
-  }
-  const safeChi2 = Math.max(0.25, chi2);
-  return Math.sqrt((df - 2) / safeChi2);
 }
 
 function quantile(sorted: number[], p: number): number {
@@ -413,6 +402,8 @@ export interface ForecastRunOptions {
   vix?: number | null;
   liveExternalBase?: number | null;
   livePricesMap?: Map<string, number>;
+  brierScore?: number | null;
+  brierResolvedCount?: number;
 }
 
 export function runPortfolioForecast(
@@ -692,10 +683,18 @@ export function runPortfolioForecast(
   const estMarginalRate =
     profile.tax_profile.nra_us_estate_tax_enabled && baseRiskTax.estate_tax_base > 0 ? 34 : 0;
 
+  const returnModel = req.return_model ?? "black_litterman";
+  const simEngineReq = req.simulation_engine ?? "block_bootstrap";
+  const blockLenWeeks = Math.max(2, Math.min(26, req.block_length_weeks ?? 6));
+
   interface CalibratedAsset {
     key: string;
     slot: HoldingSlot;
-    mu: number; // annual after-tax arithmetic expected return (decimal)
+    rawMu: number; // raw dossier/benchmark after-tax expected return (decimal)
+    mu: number; // active expected return used for simulation (BL posterior or rawMu)
+    hasDossierView: boolean;
+    viewWarningsCount: number;
+    dispersionSpread: number | null;
     vol: number; // annual volatility (decimal)
     returnSource: ForecastPositionSizingRow["return_source"];
     retMap: Map<string, number>;
@@ -709,7 +708,11 @@ export function runPortfolioForecast(
       return {
         key,
         slot,
+        rawMu: rfPct / 100,
         mu: rfPct / 100,
+        hasDossierView: false,
+        viewWarningsCount: 0,
+        dispersionSpread: null,
         vol: 0.005,
         returnSource: "risk_free",
         retMap: new Map(),
@@ -730,28 +733,32 @@ export function runPortfolioForecast(
       },
     );
 
-    let mu = (benchCagrPct - taxInfo.total_tax_drag_pct) / 100;
+    let rawMu = (benchCagrPct - taxInfo.total_tax_drag_pct) / 100;
     let returnSource: ForecastPositionSizingRow["return_source"] = "unmodeled_default";
+    let hasDossierView = false;
+    let viewWarningsCount = 0;
+    let dispersionSpread: number | null = null;
     let scenVol: number | null = null;
 
     if (th?.scenario_summary) {
       const s = th.scenario_summary;
-      mu = Math.max(-0.2, Math.min(0.35, s.expected_after_tax_cagr_pct / 100));
+      rawMu = Math.max(-0.2, Math.min(0.35, s.expected_after_tax_cagr_pct / 100));
       returnSource = "dossier_scenarios";
-      // Derive annualized fundamental dispersion from Bear-to-Bull 5Y spread
+      hasDossierView = true;
+      viewWarningsCount = s.valuation_warnings?.length ?? 0;
       const bearR = s.cases.bear.after_tax_cagr_pct / 100;
       const bullR = s.cases.bull.after_tax_cagr_pct / 100;
       const spread = Math.max(0.06, bullR - bearR);
-      // 5Y CAGR spread maps roughly to ~1.5-2.0x annual vol
+      dispersionSpread = spread;
       scenVol = Math.max(0.14, Math.min(0.75, spread * 1.15));
     } else if (slot.ticker === benchTicker) {
-      mu = benchCagrPct / 100;
+      rawMu = benchCagrPct / 100;
       returnSource = "benchmark";
     } else if (slot.is_etf) {
-      mu = (benchCagrPct - taxInfo.total_tax_drag_pct) / 100;
+      rawMu = (benchCagrPct - taxInfo.total_tax_drag_pct) / 100;
       returnSource = "etf_benchmark";
     } else {
-      mu = (benchCagrPct + 0.5 - taxInfo.total_tax_drag_pct) / 100;
+      rawMu = (benchCagrPct + 0.5 - taxInfo.total_tax_drag_pct) / 100;
       returnSource = "unmodeled_default";
     }
 
@@ -767,7 +774,11 @@ export function runPortfolioForecast(
     return {
       key,
       slot,
-      mu,
+      rawMu,
+      mu: rawMu,
+      hasDossierView,
+      viewWarningsCount,
+      dispersionSpread,
       vol,
       returnSource,
       retMap,
@@ -811,6 +822,7 @@ export function runPortfolioForecast(
 
   const avgCorr = pairwiseCount > 0 ? Math.max(0.1, Math.min(0.8, pairwiseSum / pairwiseCount)) : 0.45;
   const shrinkLambda = 0.25;
+  const shrunkCorr: number[][] = Array.from({ length: n }, () => Array<number>(n).fill(0));
   const cov: number[][] = Array.from({ length: n }, () => Array<number>(n).fill(0));
   for (let i = 0; i < n; i += 1) {
     for (let j = 0; j < n; j += 1) {
@@ -820,70 +832,114 @@ export function runPortfolioForecast(
       if (i !== j && !a.slot.is_cash && !b.slot.is_cash) {
         corrIJ = (1 - shrinkLambda) * corrIJ + shrinkLambda * avgCorr;
       }
+      shrunkCorr[i]![j] = corrIJ;
       cov[i]![j] = a.vol * b.vol * corrIJ;
     }
   }
 
   const L = choleskyDecompose(cov);
 
-  // 6. Correlated Fat-Tail Monte Carlo (Seeded Student-t df=6, shared shocks for fair Before vs After comparison!)
   const baseStartVec = assets.map((a) => baselineMap.get(a.key)?.value_base ?? 0);
   const simStartVec = assets.map((a) => simMap.get(a.key)?.value_base ?? 0);
   const baseStartTotal = baseStartVec.reduce((acc, v) => acc + v, 0);
   const simStartTotal = simStartVec.reduce((acc, v) => acc + v, 0);
   const benchEndBase = round(baseStartTotal * Math.pow(1 + benchCagrPct / 100, horizon), 2);
 
-  const baseYearSamples: number[][] = Array.from({ length: horizon + 1 }, () => []);
-  const simYearSamples: number[][] = Array.from({ length: horizon + 1 }, () => []);
+  // 5b. Black-Litterman Posterior Expected Returns (Brier-Calibrated & GIGO-Adjusted)
+  const eqTotal = Math.max(1, baseStartTotal);
+  const blResult = computeBlackLittermanPosterior(
+    assets.map((a, idx) => ({
+      ticker: a.slot.ticker,
+      is_cash: a.slot.is_cash,
+      market_weight: (baseStartVec[idx] ?? 0) / eqTotal,
+      raw_view_cagr: a.hasDossierView ? a.rawMu : null,
+      view_warnings_count: a.viewWarningsCount,
+      dispersion_spread: a.dispersionSpread,
+    })),
+    cov,
+    {
+      rfPct,
+      benchmarkCagrPct: benchCagrPct,
+      brierScore: opts?.brierScore ?? null,
+      brierResolvedCount: opts?.brierResolvedCount ?? 0,
+    },
+  );
 
-  const rng = mulberry32(20260601 ^ (horizon * 31) ^ (simulations * 17));
-  const zStd = new Float64Array(n);
-  const corrShock = new Float64Array(n);
-  const baseCur = new Float64Array(n);
-  const simCur = new Float64Array(n);
-
-  for (let p = 0; p < simulations; p += 1) {
-    let bSum0 = 0;
-    let sSum0 = 0;
+  if (returnModel === "black_litterman") {
     for (let i = 0; i < n; i += 1) {
-      baseCur[i] = baseStartVec[i]!;
-      simCur[i] = simStartVec[i]!;
-      bSum0 += baseCur[i]!;
-      sSum0 += simCur[i]!;
-    }
-    baseYearSamples[0]!.push(bSum0);
-    simYearSamples[0]!.push(sSum0);
-
-    for (let yr = 1; yr <= horizon; yr += 1) {
-      for (let i = 0; i < n; i += 1) {
-        zStd[i] = sampleStandardNormal(rng);
+      const a = assets[i]!;
+      if (a.slot.is_cash) continue;
+      if (a.slot.ticker === benchTicker && !a.hasDossierView) {
+        a.mu = benchCagrPct / 100;
+        continue;
       }
-      const tScale = sampleStudentTScale(rng, 6);
-      let bSum = 0;
-      let sSum = 0;
-
-      for (let i = 0; i < n; i += 1) {
-        let dot = 0;
-        const rowL = L[i]!;
-        for (let k = 0; k <= i; k += 1) {
-          dot += rowL[k]! * zStd[k]!;
-        }
-        // Apply fat-tail scaling to correlated equity shock; keep cash shock tiny
-        const a = assets[i]!;
-        const shock = a.slot.is_cash ? dot : dot * tScale;
-        corrShock[i] = shock;
-        const drift = a.mu - 0.5 * a.vol * a.vol;
-        const growth = Math.exp(Math.max(-2.2, Math.min(1.6, drift + shock)));
-        baseCur[i] = baseCur[i]! * growth;
-        simCur[i] = simCur[i]! * growth;
-        bSum += baseCur[i]!;
-        sSum += simCur[i]!;
+      const blAsset = blResult.assets[i]!;
+      a.mu = blAsset.posterior_cagr_pct / 100;
+      if (a.hasDossierView) {
+        a.returnSource = "black_litterman";
       }
-
-      baseYearSamples[yr]!.push(bSum);
-      simYearSamples[yr]!.push(sSum);
     }
   }
+
+  // 5c. PCA Factor Risk Decomposition & Effective Bets (Before vs After) + HRP Benchmark Weights
+  const tickersList = assets.map((a) => a.slot.ticker);
+  const cashFlags = assets.map((a) => a.slot.is_cash);
+  const benchAssetIdx = assets.findIndex((a) => !a.slot.is_cash && a.slot.ticker === benchTicker);
+  const baseWeights = baseStartVec.map((v) => (baseStartTotal > 0 ? v / baseStartTotal : 0));
+  const simWeights = simStartVec.map((v) => (simStartTotal > 0 ? v / simStartTotal : 0));
+
+  const baseFactorRisk = computeFactorRiskDecomposition(
+    tickersList,
+    cashFlags,
+    baseWeights,
+    cov,
+    benchAssetIdx >= 0 ? benchAssetIdx : null,
+  );
+  const simFactorRisk = computeFactorRiskDecomposition(
+    tickersList,
+    cashFlags,
+    simWeights,
+    cov,
+    benchAssetIdx >= 0 ? benchAssetIdx : null,
+  );
+
+  const hrpActiveIndices = assets
+    .map((a, idx) => ({ a, idx }))
+    .filter((x) => !x.a.slot.is_cash && (simStartVec[x.idx] ?? 0) > 0.01)
+    .map((x) => x.idx);
+  const hrpSubCov = hrpActiveIndices.map((r) => hrpActiveIndices.map((c) => cov[r]![c]!));
+  const hrpSubCorr = hrpActiveIndices.map((r) => hrpActiveIndices.map((c) => shrunkCorr[r]![c]!));
+  const hrpRes = computeHrpWeights(
+    hrpActiveIndices.map((idx) => ({
+      ticker: assets[idx]!.slot.ticker,
+      is_cash: false,
+      max_weight_pct: assets[idx]!.maxWeightPct,
+    })),
+    hrpSubCov,
+    hrpSubCorr,
+  );
+
+  // 6. Correlated Multi-Path Simulation (Politis-Romano Stationary Block Bootstrap or Student-t df=6)
+  const simRun = runCorrelatedWealthSimulation({
+    engineRequested: simEngineReq,
+    blockLengthWeeks: blockLenWeeks,
+    horizonYears: horizon,
+    simulations,
+    volMultiplier: volMult,
+    assets: assets.map((a) => ({
+      mu: a.mu,
+      vol: a.vol,
+      is_cash: a.slot.is_cash,
+      retMap: a.retMap,
+    })),
+    cholL: L,
+    baseStartVec,
+    simStartVec,
+    seed: 20260701 ^ (horizon * 31) ^ (simulations * 17) ^ (blockLenWeeks * 7),
+  });
+
+  const baseYearSamples = simRun.base_year_samples;
+  const simYearSamples = simRun.sim_year_samples;
 
   const computeAnalyticalStats = (vec: number[], total: number): { volPct: number; sharpe: number; mrcPct: number[]; corrWithPort: number[] } => {
     const w = vec.map((v) => (total > 0 ? v / total : 0));
@@ -915,10 +971,12 @@ export function runPortfolioForecast(
 
   const summarizePath = (
     yearSamples: number[][],
+    pathMaxDds: number[],
     startTotal: number,
     analytics: { volPct: number; sharpe: number },
     riskTax: RiskTaxEvaluation,
     endingCashBase: number,
+    factorRisk: FactorRiskDecomposition,
   ): ForecastPathSummary => {
     const trajectory: ForecastYearPoint[] = yearSamples.map((arr, yr) => {
       const sorted = [...arr].sort((a, b) => a - b);
@@ -935,6 +993,16 @@ export function runPortfolioForecast(
     });
 
     const finalSamples = yearSamples[horizon] ?? [startTotal];
+    const sortedFinal = [...finalSamples].sort((a, b) => a - b);
+    const tailCount = Math.max(1, Math.floor(sortedFinal.length * 0.1));
+    let tailSum = 0;
+    for (let i = 0; i < tailCount; i += 1) tailSum += sortedFinal[i]!;
+    const cvar10Base = round(tailSum / tailCount, 0);
+
+    const sortedDd = [...pathMaxDds].sort((a, b) => a - b); // most negative first
+    const ddP95 = sortedDd.length > 0 ? round(quantile(sortedDd, 0.05), 1) : 0;
+    const ddP50 = sortedDd.length > 0 ? round(quantile(sortedDd, 0.5), 1) : 0;
+
     const finalPt = trajectory[horizon]!;
     const safeStart = Math.max(1, startTotal);
     const cagrFrom = (endVal: number) => round((Math.pow(Math.max(0.01, endVal / safeStart), 1 / horizon) - 1) * 100, 2);
@@ -943,6 +1011,7 @@ export function runPortfolioForecast(
 
     return {
       starting_wealth_base: round(startTotal, 2),
+      ending_cvar_10_base: cvar10Base,
       ending_p10_base: finalPt.p10_base,
       ending_p50_base: finalPt.p50_base,
       ending_p90_base: finalPt.p90_base,
@@ -950,6 +1019,8 @@ export function runPortfolioForecast(
       expected_cagr_p50_pct: cagrFrom(finalPt.p50_base),
       p10_cagr_pct: cagrFrom(finalPt.p10_base),
       p90_cagr_pct: cagrFrom(finalPt.p90_base),
+      sim_max_dd_p50_pct: ddP50,
+      sim_max_dd_p95_pct: ddP95,
       annual_vol_pct: analytics.volPct,
       expected_sharpe: analytics.sharpe,
       prob_beat_benchmark_pct: round((beatCount / Math.max(1, finalSamples.length)) * 100, 1),
@@ -960,23 +1031,28 @@ export function runPortfolioForecast(
       cap_breaches_count: riskTax.cap_breaches_count,
       breached_cap_labels: riskTax.breached_cap_labels,
       ending_cash_base: round(endingCashBase, 2),
+      factor_risk: factorRisk,
       trajectory,
     };
   };
 
   const baseSummary = summarizePath(
     baseYearSamples,
+    simRun.base_path_max_dd_pct,
     baseStartTotal,
     baseAnalytics,
     baseRiskTax,
     baselineMap.get("__CASH__")?.value_base ?? 0,
+    baseFactorRisk,
   );
   const simSummary = summarizePath(
     simYearSamples,
+    simRun.sim_path_max_dd_pct,
     simStartTotal,
     simAnalytics,
     simRiskTax,
     simMap.get("__CASH__")?.value_base ?? 0,
+    simFactorRisk,
   );
 
   const simBreachSet = new Set(simRiskTax.breached_cap_labels);
@@ -988,13 +1064,11 @@ export function runPortfolioForecast(
       const bVal = baseStartVec[idx]!;
       const sVal = simStartVec[idx]!;
       const corrP = simAnalytics.corrWithPort[idx]!;
-      // Correlation-adjusted hurdle: high correlation (>0.65) adds marginal concentration bar; diversifier (<0.45) earns relief
       const corrAdjHurdle = a.slot.is_cash
         ? rfPct
         : a.slot.ticker === benchTicker
           ? benchCagrPct
           : round(Math.max(benchCagrPct, baseHurdlePct + (corrP - 0.55) * 3.0), 2);
-      // Quarter-Kelly sizing bounded by dossier cap (penalized modestly for high cluster correlation)
       const excessMu = a.mu - rfPct / 100;
       const varI = Math.max(0.01, a.vol * a.vol);
       const rawQuarterKellyPct =
@@ -1002,6 +1076,7 @@ export function runPortfolioForecast(
           ? 0
           : (0.25 * (excessMu / varI) * (1 - 0.3 * Math.max(0, corrP - 0.5))) * 100;
       const boundedKelly = round(Math.max(0, Math.min(a.maxWeightPct, rawQuarterKellyPct)), 1);
+      const blRow = blResult.assets[idx]!;
 
       return {
         ticker: a.slot.ticker,
@@ -1012,36 +1087,54 @@ export function runPortfolioForecast(
         before_weight_pct: baseStartTotal > 0 ? round((bVal / baseStartTotal) * 100, 2) : 0,
         after_weight_pct: simStartTotal > 0 ? round((sVal / simStartTotal) * 100, 2) : 0,
         expected_cagr_pct: round(a.mu * 100, 2),
+        prior_cagr_pct: blRow.prior_cagr_pct,
+        raw_view_cagr_pct: blRow.raw_view_cagr_pct,
+        bl_shrinkage_pct: blRow.shrinkage_pct,
         annual_vol_pct: round(a.vol * 100, 1),
         return_source: a.returnSource,
         marginal_risk_contrib_pct: simAnalytics.mrcPct[idx]!,
         corr_with_portfolio: corrP,
         corr_adjusted_hurdle_pct: corrAdjHurdle,
         quarter_kelly_weight_pct: boundedKelly,
+        hrp_weight_pct: a.slot.is_cash ? 0 : (hrpRes.weights_by_ticker[a.slot.ticker] ?? 0),
         quality_grade: a.qualityGrade,
       };
     })
     .sort((a, b) => b.after_value_base - a.after_value_base);
+
+  const engineLabel =
+    simRun.engine_used === "block_bootstrap"
+      ? `Politis-Romano Stationary Block Bootstrap (L=${blockLenWeeks}w across ${simRun.aligned_weeks} aligned weeks)`
+      : `Correlated Student-t (df=6) weekly shocks${simEngineReq === "block_bootstrap" ? ` (fallback: ${simRun.aligned_weeks}w < 80w aligned)` : ""}`;
+  const retLabel = returnModel === "black_litterman" ? "Black-Litterman Brier-calibrated posterior" : "Raw 5Y dossier scenarios";
 
   return {
     horizon_years: horizon,
     base_currency: profile.base_currency,
     include_external_wealth: includeExt,
     regime_vol_multiplier: round(volMult, 2),
+    return_model: returnModel,
+    simulation_engine_requested: simEngineReq,
+    simulation_engine_used: simRun.engine_used,
+    block_length_weeks: blockLenWeeks,
+    aligned_history_weeks: simRun.aligned_weeks,
     simulations,
     rf_pct: rfPct,
     benchmark_ticker: benchTicker,
     benchmark_cagr_pct: benchCagrPct,
     benchmark_ending_base: benchEndBase,
+    black_litterman: blResult,
     baseline: baseSummary,
     simulated: simSummary,
     deltas: {
       p50_base: round(simSummary.ending_p50_base - baseSummary.ending_p50_base, 0),
       p10_base: round(simSummary.ending_p10_base - baseSummary.ending_p10_base, 0),
+      cvar_10_base: round(simSummary.ending_cvar_10_base - baseSummary.ending_cvar_10_base, 0),
       p90_base: round(simSummary.ending_p90_base - baseSummary.ending_p90_base, 0),
       cagr_p50_pct: round(simSummary.expected_cagr_p50_pct - baseSummary.expected_cagr_p50_pct, 2),
       annual_vol_pct: round(simSummary.annual_vol_pct - baseSummary.annual_vol_pct, 2),
       sharpe: round(simSummary.expected_sharpe - baseSummary.expected_sharpe, 2),
+      effective_bets: round(simFactorRisk.effective_bets - baseFactorRisk.effective_bets, 2),
       estate_tax_saved_base: round(baseSummary.estate_tax_base - simSummary.estate_tax_base, 2),
       annual_wht_saved_base: round(baseSummary.annual_wht_drag_base - simSummary.annual_wht_drag_base, 2),
       us_situs_delta_pct: round(simSummary.us_situs_portfolio_pct - baseSummary.us_situs_portfolio_pct, 2),
@@ -1052,6 +1145,6 @@ export function runPortfolioForecast(
     applied_actions: appliedLog,
     cash_shortfall_base: cashShortfallBase,
     positions: positionRows,
-    methodology_note: `Seeded ${simulations}-path correlated Student-t (df=6) simulation using Ledoit-Wolf shrunk covariance (λ=0.25) blended with dossier 5Y after-tax scenarios, Rf=${rfPct}%, Vol×${round(volMult, 2)}. Forecast bands reflect modeled assumptions & historical covariance, not guarantees.`,
+    methodology_note: `Seeded ${simulations}-path ${engineLabel} using Ledoit-Wolf shrunk covariance (λ=0.25), ${retLabel}, Rf=${rfPct}%, Vol×${round(volMult, 2)}. Forecast cones reflect modeled assumptions & historical covariance, not guarantees.`,
   };
 }

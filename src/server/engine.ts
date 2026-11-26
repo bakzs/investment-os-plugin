@@ -3241,6 +3241,8 @@ export async function buildDashboardPayload(opts: {
         vix: vixVal,
         liveExternalBase: extLiveMarked ? extTotalBase - extPortfolioBase : null,
         livePricesMap: currentPricesMap,
+        brierScore: lab.scorecard.brier_calibration.overall_brier_score,
+        brierResolvedCount: lab.scorecard.brier_calibration.resolved_total,
       },
     );
   } catch {
@@ -3514,7 +3516,10 @@ export async function executePortfolioBacktest(opts: {
     effectiveProfile,
     historyCache,
     payload.fx_rates,
-    { defaultRfPct: payload.macro_regime?.us3m_pct ?? 4.0 },
+    {
+      defaultRfPct: payload.macro_regime?.us3m_pct ?? 4.0,
+      defaultTrialsTested: Math.max(1, payload.theses.length),
+    },
   );
   payload.lab.latest_backtest = backtest;
   return { backtest, payload };
@@ -3639,6 +3644,8 @@ export async function executePortfolioForecast(opts: {
         ? payload.summary.ext_total_base - payload.summary.ext_portfolio_base
         : null,
       livePricesMap,
+      brierScore: payload.lab.scorecard.brier_calibration.overall_brier_score,
+      brierResolvedCount: payload.lab.scorecard.brier_calibration.resolved_total,
     },
   );
   payload.forecast = forecast;
@@ -3686,7 +3693,7 @@ export function buildSummaryText(payload: DashboardPayload): string {
   if (payload.forecast) {
     const fc = payload.forecast;
     lines.push(
-      `- ${fc.horizon_years}Y Forward Forecast (Base P50): ${fc.baseline.ending_p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} -> ${fc.simulated.ending_p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy} (${fc.deltas.p50_base >= 0 ? "+" : ""}${fc.deltas.p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy} with recommended rotations; P10 downside ${fc.deltas.p10_base >= 0 ? "+" : ""}${fc.deltas.p10_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy})`,
+      `- ${fc.horizon_years}Y Forward Forecast (${fc.return_model === "black_litterman" ? "BL" : "Raw"} | ${fc.simulation_engine_used === "block_bootstrap" ? "Bootstrap" : "Student-t"}): P50 ${fc.baseline.ending_p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} -> ${fc.simulated.ending_p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy} (${fc.deltas.p50_base >= 0 ? "+" : ""}${fc.deltas.p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy}; CVaR10 ${fc.deltas.cvar_10_base >= 0 ? "+" : ""}${fc.deltas.cvar_10_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy}; Effective Bets ${fc.baseline.factor_risk.effective_bets.toFixed(1)} -> ${fc.simulated.factor_risk.effective_bets.toFixed(1)})`,
     );
   }
   lines.push(`- Risk Cap Breaches (${breaches.length}): ${breaches.length > 0 ? breaches.join(", ") : "None"}`);

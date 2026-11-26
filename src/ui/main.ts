@@ -819,8 +819,14 @@ interface BacktestSeriesMetrics {
   max_drawdown_pct: number;
   sharpe: number;
   sharpe_se?: number | null;
+  deflated_sharpe_prob_pct?: number;
   sortino: number;
+  cvar_95_weekly_pct?: number;
+  skewness?: number;
+  excess_kurtosis?: number;
   rebalance_count?: number;
+  total_turnover_pct?: number;
+  tx_cost_drag_bps?: number;
   rolling_3y_cagr_min_pct: number | null;
   rolling_3y_cagr_median_pct: number | null;
   rolling_3y_cagr_max_pct: number | null;
@@ -853,6 +859,9 @@ interface BacktestResult {
   funding_source: string;
   rebalance_band_pct: number;
   rf_pct?: number;
+  tx_cost_bps?: number;
+  trials_tested?: number;
+  sr0_annual_threshold?: number;
   include_external_wealth?: boolean;
   fx_converted_tickers?: string[];
   overlap_start: string;
@@ -927,8 +936,35 @@ interface ForecastYearPoint {
   mean_base: number;
 }
 
+interface LatentRiskFactor {
+  id: string;
+  variance_share_pct: number;
+  eigenvalue_share_pct: number;
+  top_tickers: string[];
+  label: string;
+}
+
+interface FactorRiskDecomposition {
+  effective_bets: number;
+  asset_count: number;
+  market_beta: number | null;
+  systematic_risk_pct: number | null;
+  idiosyncratic_risk_pct: number | null;
+  top_factors: LatentRiskFactor[];
+}
+
+interface BlackLittermanResult {
+  tau: number;
+  risk_aversion_delta: number;
+  brier_score_used: number | null;
+  brier_resolved_count: number;
+  brier_omega_multiplier: number;
+  note: string;
+}
+
 interface ForecastPathSummary {
   starting_wealth_base: number;
+  ending_cvar_10_base?: number;
   ending_p10_base: number;
   ending_p50_base: number;
   ending_p90_base: number;
@@ -936,6 +972,8 @@ interface ForecastPathSummary {
   expected_cagr_p50_pct: number;
   p10_cagr_pct: number;
   p90_cagr_pct: number;
+  sim_max_dd_p50_pct?: number;
+  sim_max_dd_p95_pct?: number;
   annual_vol_pct: number;
   expected_sharpe: number;
   prob_beat_benchmark_pct: number;
@@ -946,6 +984,7 @@ interface ForecastPathSummary {
   cap_breaches_count: number;
   breached_cap_labels: string[];
   ending_cash_base: number;
+  factor_risk?: FactorRiskDecomposition;
   trajectory: ForecastYearPoint[];
 }
 
@@ -958,12 +997,16 @@ interface ForecastPositionSizingRow {
   before_weight_pct: number;
   after_weight_pct: number;
   expected_cagr_pct: number;
+  prior_cagr_pct?: number;
+  raw_view_cagr_pct?: number | null;
+  bl_shrinkage_pct?: number;
   annual_vol_pct: number;
   return_source: string;
   marginal_risk_contrib_pct: number;
   corr_with_portfolio: number;
   corr_adjusted_hurdle_pct: number;
   quarter_kelly_weight_pct: number;
+  hrp_weight_pct?: number;
   quality_grade?: "A" | "B" | "C" | "D" | null;
 }
 
@@ -981,20 +1024,28 @@ interface PortfolioForecastResult {
   base_currency: string;
   include_external_wealth: boolean;
   regime_vol_multiplier: number;
+  return_model?: "black_litterman" | "raw_dossier";
+  simulation_engine_requested?: "block_bootstrap" | "student_t";
+  simulation_engine_used?: "block_bootstrap" | "student_t";
+  block_length_weeks?: number;
+  aligned_history_weeks?: number;
   simulations: number;
   rf_pct: number;
   benchmark_ticker: string;
   benchmark_cagr_pct: number;
   benchmark_ending_base: number;
+  black_litterman?: BlackLittermanResult;
   baseline: ForecastPathSummary;
   simulated: ForecastPathSummary;
   deltas: {
     p50_base: number;
     p10_base: number;
+    cvar_10_base?: number;
     p90_base: number;
     cagr_p50_pct: number;
     annual_vol_pct: number;
     sharpe: number;
+    effective_bets?: number;
     estate_tax_saved_base: number;
     annual_wht_saved_base: number;
     us_situs_delta_pct: number;
@@ -1110,7 +1161,7 @@ const SLICE_PALETTE = [
   "var(--viz-8)",
 ];
 
-const app = new App({ name: "Investment OS", version: "0.6.0" }, {});
+const app = new App({ name: "Investment OS", version: "0.7.0" }, {});
 let state: DashboardPayload | null = null;
 let activeTab: TabId = "overview";
 let hostCaps: McpUiHostCapabilities | undefined;
@@ -1143,11 +1194,15 @@ let btWeight = 5;
 let btFunding = "cash";
 let btBand = 25;
 let btIncludeExternal = true;
+let btTxCostBps = 10;
+let btTrialsTested = 0; // 0 = auto (total dossiers)
 let forecastResult: PortfolioForecastResult | null = null;
 let forecastBusy = false;
 let forecastError = "";
 let forecastHorizon = 5;
 let forecastVolMult = 1.0;
+let forecastReturnModel: "black_litterman" | "raw_dossier" = "black_litterman";
+let forecastSimEngine: "block_bootstrap" | "student_t" = "block_bootstrap";
 let forecastIncludeExt = true;
 let forecastParkCash = false;
 const forecastDisabledRotations = new Set<string>();
@@ -2597,6 +2652,11 @@ function renderForecast(data: DashboardPayload, canMessage: boolean): string {
         .join("")}</div>`
     : `<div class="muted-sub" style="margin-top:0.45rem">No new buys queued yet—add a buy above or toggle excess cash sweep into ${esc(benchTicker)}.</div>`;
 
+  const baseFr = fc?.baseline.factor_risk;
+  const simFr = fc?.simulated.factor_risk;
+  const cvar10Sim = fc?.simulated.ending_cvar_10_base ?? fc?.simulated.ending_p10_base ?? 0;
+  const cvar10Delta = fc?.deltas.cvar_10_base ?? fc?.deltas.p10_base ?? 0;
+
   const kpiHtml = fc
     ? `
       <div class="forecast-kpi-grid">
@@ -2604,29 +2664,57 @@ function renderForecast(data: DashboardPayload, canMessage: boolean): string {
           <span class="micro-label">${fc.horizon_years}Y Base Wealth (P50)</span>
           <span class="metric-val">${fmtCompact(fc.simulated.ending_p50_base, ccy)}</span>
           <span class="${fc.deltas.p50_base >= 0 ? "pos-ok" : "pos-bad"}" style="font-size:0.74rem;font-weight:600">
-            ${fc.deltas.p50_base >= 0 ? "+" : ""}${fmtCompact(fc.deltas.p50_base, ccy)} vs do-nothing (${fc.simulated.expected_cagr_p50_pct.toFixed(1)}% CAGR)
+            ${fc.deltas.p50_base >= 0 ? "+" : ""}${fmtCompact(fc.deltas.p50_base, ccy)} vs hold (${fc.simulated.expected_cagr_p50_pct.toFixed(1)}% CAGR)
           </span>
         </div>
         <div class="forecast-kpi-card">
-          <span class="micro-label">${fc.horizon_years}Y Bear Downside (P10)</span>
-          <span class="metric-val">${fmtCompact(fc.simulated.ending_p10_base, ccy)}</span>
-          <span class="${fc.deltas.p10_base >= 0 ? "pos-ok" : "pos-bad"}" style="font-size:0.74rem;font-weight:600">
-            ${fc.deltas.p10_base >= 0 ? "+" : ""}${fmtCompact(fc.deltas.p10_base, ccy)} tail impact · ${fc.simulated.prob_beat_benchmark_pct.toFixed(0)}% beat ${esc(fc.benchmark_ticker)}
+          <span class="micro-label">Tail Floor (P10 · CVaR 10%)</span>
+          <span class="metric-val">${fmtCompact(fc.simulated.ending_p10_base, ccy)} <span class="muted-sub" style="font-size:0.76rem;font-weight:500">/ ${fmtCompact(cvar10Sim, ccy)}</span></span>
+          <span class="${cvar10Delta >= 0 ? "pos-ok" : "pos-bad"}" style="font-size:0.73rem;font-weight:600">
+            CVaR ${cvar10Delta >= 0 ? "+" : ""}${fmtCompact(cvar10Delta, ccy)} · P95 DD ${fc.simulated.sim_max_dd_p95_pct !== undefined ? `${fc.simulated.sim_max_dd_p95_pct.toFixed(0)}%` : "—"}
           </span>
         </div>
         <div class="forecast-kpi-card">
-          <span class="micro-label">Estate Tax &amp; US-Situs</span>
-          <span class="metric-val pos-ok">${fc.deltas.estate_tax_saved_base > 0 ? `Saves ${fmtCompact(fc.deltas.estate_tax_saved_base, ccy)}` : fmtCompact(fc.simulated.estate_tax_base, ccy)}</span>
-          <span class="muted-sub">US-Situs ${fc.baseline.us_situs_portfolio_pct.toFixed(1)}% &rarr; ${fc.simulated.us_situs_portfolio_pct.toFixed(1)}%${fc.deltas.annual_wht_saved_base > 0 ? ` · +${fmtMoney(fc.deltas.annual_wht_saved_base, ccy)}/yr WHT` : ""}</span>
+          <span class="micro-label">PCA Effective Bets (N_eff)</span>
+          <span class="metric-val">${baseFr && simFr ? `${baseFr.effective_bets.toFixed(1)} &rarr; ${simFr.effective_bets.toFixed(1)}` : "—"}</span>
+          <span class="muted-sub">
+            ${simFr?.market_beta !== null && simFr?.market_beta !== undefined ? `Beta ${simFr.market_beta.toFixed(2)}` : `Vol ${fc.simulated.annual_vol_pct.toFixed(1)}%`}
+            ${simFr?.systematic_risk_pct !== null && simFr?.systematic_risk_pct !== undefined ? ` · ${simFr.systematic_risk_pct.toFixed(0)}% mkt-driven` : ""} · Sharpe ${fc.simulated.expected_sharpe.toFixed(2)}
+          </span>
         </div>
         <div class="forecast-kpi-card">
-          <span class="micro-label">Risk Guardrails &amp; Sharpe</span>
-          <span class="metric-val">${fc.baseline.cap_breaches_count} &rarr; ${fc.simulated.cap_breaches_count} Breaches</span>
-          <span class="muted-sub">Vol ${fc.baseline.annual_vol_pct.toFixed(1)}% &rarr; ${fc.simulated.annual_vol_pct.toFixed(1)}% · Sharpe ${fc.baseline.expected_sharpe.toFixed(2)} &rarr; ${fc.simulated.expected_sharpe.toFixed(2)}</span>
+          <span class="micro-label">Tax &amp; Risk Guardrails</span>
+          <span class="metric-val pos-ok">${fc.deltas.estate_tax_saved_base > 0 ? `Saves ${fmtCompact(fc.deltas.estate_tax_saved_base, ccy)}` : `${fc.baseline.cap_breaches_count} → ${fc.simulated.cap_breaches_count} Caps`}</span>
+          <span class="muted-sub">Caps ${fc.baseline.cap_breaches_count} &rarr; ${fc.simulated.cap_breaches_count} · US-Situs ${fc.simulated.us_situs_portfolio_pct.toFixed(1)}%${fc.deltas.annual_wht_saved_base > 0 ? ` · +${fmtMoney(fc.deltas.annual_wht_saved_base, ccy)}/yr` : ""}</span>
         </div>
       </div>
     `
     : "";
+
+  const factorStripHtml =
+    simFr && simFr.top_factors.length > 0
+      ? `
+        <div class="factor-strip">
+          <div class="factor-strip-head">
+            <span class="micro-label">Hidden Latent Factors (PCA Variance Share)</span>
+            <span class="muted-sub">${esc(fc?.black_litterman?.note || "")}</span>
+          </div>
+          <div class="factor-bars">
+            ${simFr.top_factors
+              .map(
+                (f) => `
+              <div class="factor-bar-row">
+                <span class="factor-bar-label"><strong>${esc(f.id)}</strong> (${esc(f.top_tickers.join(", "))})</span>
+                <div class="factor-bar-track"><div class="factor-bar-fill" style="width:${Math.min(100, f.variance_share_pct).toFixed(1)}%"></div></div>
+                <span class="factor-bar-pct">${f.variance_share_pct.toFixed(1)}%</span>
+              </div>
+            `,
+              )
+              .join("")}
+          </div>
+        </div>
+      `
+      : "";
 
   const posRowsHtml = fc
     ? fc.positions
@@ -2638,6 +2726,10 @@ function renderForecast(data: DashboardPayload, canMessage: boolean): string {
               ? ` <span class="${wtDelta > 0 ? "pos-ok" : "pos-bad"}">(${wtDelta > 0 ? "+" : ""}${wtDelta.toFixed(1)}%)</span>`
               : "";
           const rowClick = !p.is_cash ? `class="clickable-row" data-inspect-ticker="${esc(p.ticker)}"` : "";
+          const blSub =
+            fc.return_model === "black_litterman" && p.raw_view_cagr_pct !== null && p.raw_view_cagr_pct !== undefined && Math.abs((p.bl_shrinkage_pct ?? 0)) >= 0.2
+              ? ` <span class="muted-sub" title="Raw dossier 5Y target before Black-Litterman shrinkage">(raw ${p.raw_view_cagr_pct.toFixed(1)}%)</span>`
+              : "";
           return `
             <tr ${rowClick}>
               <th scope="row">
@@ -2646,10 +2738,11 @@ function renderForecast(data: DashboardPayload, canMessage: boolean): string {
                 ${qualityGradeBadge(p.quality_grade, true)}
               </th>
               <td class="num" data-label="Before → After">${p.before_weight_pct.toFixed(1)}% &rarr; <strong>${p.after_weight_pct.toFixed(1)}%</strong>${wtDeltaStr}</td>
-              <td class="num" data-label="Exp. CAGR">${p.expected_cagr_pct.toFixed(1)}%</td>
+              <td class="num" data-label="Exp. CAGR">${p.expected_cagr_pct.toFixed(1)}%${blSub}</td>
               <td class="num" data-label="Risk Share">${p.marginal_risk_contrib_pct.toFixed(1)}%</td>
               <td class="num" data-label="Corr Hurdle">${p.is_cash ? "—" : `${p.corr_adjusted_hurdle_pct.toFixed(1)}%`}</td>
-              <td class="num" data-label="¼-Kelly Guide">${p.is_cash ? "—" : `${p.quarter_kelly_weight_pct.toFixed(1)}%`}</td>
+              <td class="num" data-label="¼-Kelly">${p.is_cash ? "—" : `${p.quarter_kelly_weight_pct.toFixed(1)}%`}</td>
+              <td class="num" data-label="HRP Balanced">${p.is_cash ? "—" : `${(p.hrp_weight_pct ?? 0).toFixed(1)}%`}</td>
             </tr>
           `;
         })
@@ -2662,9 +2755,17 @@ function renderForecast(data: DashboardPayload, canMessage: boolean): string {
         <div class="forecast-toolbar">
           <div>
             <h2 class="section-title">Portfolio Forward Forecast &amp; Action Simulator</h2>
-            <div class="muted-sub">Toggle rotations and planned buys to project correlated Bear / Base / Bull wealth trajectories.</div>
+            <div class="muted-sub">Toggle Bayesian return shrinkage, empirical crash bootstrap, rotations, and buys to compare trajectories.</div>
           </div>
-          <div class="actions-row">
+          <div class="actions-row" style="flex-wrap:wrap">
+            <div class="seg-switch" role="group" aria-label="Expected return model">
+              <button type="button" data-fc-return-model="black_litterman" aria-pressed="${forecastReturnModel === "black_litterman" ? "true" : "false"}" title="Shrinks 5Y dossier targets toward market equilibrium using Brier calibration">Black-Litterman</button>
+              <button type="button" data-fc-return-model="raw_dossier" aria-pressed="${forecastReturnModel === "raw_dossier" ? "true" : "false"}" title="Uses unshrunk raw 5Y after-tax dossier scenarios">Raw Dossier</button>
+            </div>
+            <div class="seg-switch" role="group" aria-label="Shock simulation engine">
+              <button type="button" data-fc-sim-engine="block_bootstrap" aria-pressed="${forecastSimEngine === "block_bootstrap" ? "true" : "false"}" title="Politis-Romano stationary weekly block bootstrap preserving real crash streaks">Block Bootstrap</button>
+              <button type="button" data-fc-sim-engine="student_t" aria-pressed="${forecastSimEngine === "student_t" ? "true" : "false"}" title="Parametric correlated Student-t (df=6) weekly shocks">Student-t</button>
+            </div>
             <div class="seg-switch" role="group" aria-label="Forecast horizon">
               ${[1, 3, 5]
                 .map(
@@ -2674,8 +2775,8 @@ function renderForecast(data: DashboardPayload, canMessage: boolean): string {
                 .join("")}
             </div>
             <div class="seg-switch" role="group" aria-label="Volatility stress">
-              <button type="button" data-fc-vol="1" aria-pressed="${forecastVolMult === 1 ? "true" : "false"}">Normal Vol</button>
-              <button type="button" data-fc-vol="1.25" aria-pressed="${forecastVolMult > 1 ? "true" : "false"}">Stress 1.25×</button>
+              <button type="button" data-fc-vol="1" aria-pressed="${forecastVolMult === 1 ? "true" : "false"}">1.0× Vol</button>
+              <button type="button" data-fc-vol="1.25" aria-pressed="${forecastVolMult > 1 ? "true" : "false"}">1.25× Stress</button>
             </div>
             ${
               data.profile.external_exposure.enabled
@@ -2689,11 +2790,12 @@ function renderForecast(data: DashboardPayload, canMessage: boolean): string {
         ${fc?.cash_shortfall_base && fc.cash_shortfall_base > 0 ? `<div class="warn-box" style="margin-top:0.55rem">Planned buys exceed available cash + freed proceeds by ${fmtMoney(fc.cash_shortfall_base, ccy)}; excess buy orders were capped at available cash.</div>` : ""}
 
         <div style="margin-top:0.75rem">
-          ${forecastBusy ? `<div class="muted-sub" style="padding:0.4rem 0">Running correlated Monte Carlo simulation...</div>` : ""}
+          ${forecastBusy ? `<div class="muted-sub" style="padding:0.4rem 0">Running correlated simulation...</div>` : ""}
           ${fc ? renderForecastFanSvg(fc, ccy) : `<div class="muted-sub">Click Simulate Plan below to project your portfolio.</div>`}
         </div>
 
         <div style="margin-top:0.75rem">${kpiHtml}</div>
+        ${factorStripHtml}
 
         ${
           fc && fc.deltas.cured_caps.length > 0
@@ -2755,7 +2857,7 @@ function renderForecast(data: DashboardPayload, canMessage: boolean): string {
           <div class="section-head">
             <div>
               <h2 class="section-title">Post-Action Allocation, Risk Contribution &amp; Sizing Guide</h2>
-              <div class="muted-sub">Marginal risk share shows which holdings drive portfolio volatility; ¼-Kelly &amp; correlation-adjusted hurdles penalize crowded clusters.</div>
+              <div class="muted-sub">Compare Marginal Risk Share against return-driven ¼-Kelly and cluster-diversified HRP weights.</div>
             </div>
           </div>
           <div tabindex="0" role="region" aria-labelledby="cap-fc-pos" class="table-wrapper">
@@ -2765,10 +2867,11 @@ function renderForecast(data: DashboardPayload, canMessage: boolean): string {
                 <tr>
                   <th scope="col">Holding</th>
                   <th scope="col" class="num">Weight Before &rarr; After</th>
-                  <th scope="col" class="num">Exp. CAGR</th>
+                  <th scope="col" class="num">${fc.return_model === "black_litterman" ? "BL CAGR" : "Exp. CAGR"}</th>
                   <th scope="col" class="num">Risk Share</th>
                   <th scope="col" class="num">Corr Hurdle</th>
                   <th scope="col" class="num">¼-Kelly</th>
+                  <th scope="col" class="num">HRP Balanced</th>
                 </tr>
               </thead>
               <tbody>${posRowsHtml}</tbody>
@@ -3360,11 +3463,19 @@ function renderBacktestOutput(res: BacktestResult): string {
   const fxConverted = res.fx_converted_tickers ?? [];
   const metaBadges: string[] = [];
   if (res.rf_pct !== undefined) metaBadges.push(`<span class="src-badge">Rf ${res.rf_pct.toFixed(2)}%</span>`);
+  if (res.tx_cost_bps !== undefined) metaBadges.push(`<span class="src-badge">Tx ${res.tx_cost_bps.toFixed(0)}bps</span>`);
+  if (res.trials_tested !== undefined) metaBadges.push(`<span class="src-badge">DSR M=${res.trials_tested}</span>`);
   if (res.include_external_wealth) metaBadges.push(`<span class="src-badge">Ext Wealth On</span>`);
   if (fxConverted.length > 0) metaBadges.push(`<span class="src-badge">FX: ${esc(fxConverted.join(", "))}</span>`);
   if (res.baseline.rebalance_count !== undefined || res.simulated.rebalance_count !== undefined) {
     metaBadges.push(`<span class="src-badge">Rebal ${res.baseline.rebalance_count ?? 0} / ${res.simulated.rebalance_count ?? 0}</span>`);
   }
+
+  const fmtDsrCell = (prob: number | undefined) => {
+    if (prob === undefined || prob === null) return "—";
+    const cls = prob >= 80 ? "pos-ok" : prob >= 50 ? "pos-warn" : "pos-bad";
+    return `<strong class="${cls}">${prob.toFixed(1)}%</strong>`;
+  };
 
   return `
     <div style="display:flex;flex-direction:column;gap:0.65rem;margin-top:0.65rem">
@@ -3425,11 +3536,25 @@ function renderBacktestOutput(res: BacktestResult): string {
               <td class="num">${res.benchmark.sortino.toFixed(2)}</td>
             </tr>
             <tr>
-              <th scope="row">Rebalances</th>
-              <td class="num">${res.baseline.rebalance_count ?? "—"}</td>
-              <td class="num">${res.simulated.rebalance_count ?? "—"}</td>
-              <td class="num muted-sub">—</td>
-              <td class="num">${res.benchmark.rebalance_count ?? "—"}</td>
+              <th scope="row" title="Probability true Sharpe exceeds multiple-testing luck threshold (Bailey &amp; López de Prado)">Deflated Sharpe Prob</th>
+              <td class="num">${fmtDsrCell(res.baseline.deflated_sharpe_prob_pct)}</td>
+              <td class="num">${fmtDsrCell(res.simulated.deflated_sharpe_prob_pct)}</td>
+              <td class="num muted-sub">${res.sr0_annual_threshold !== undefined ? `SR₀ ${res.sr0_annual_threshold.toFixed(2)}` : "—"}</td>
+              <td class="num">${fmtDsrCell(res.benchmark.deflated_sharpe_prob_pct)}</td>
+            </tr>
+            <tr>
+              <th scope="row" title="Average weekly return in the worst 5% of weeks (Expected Shortfall)">Weekly CVaR 95%</th>
+              <td class="num">${res.baseline.cvar_95_weekly_pct !== undefined ? fmtPct(res.baseline.cvar_95_weekly_pct, 2) : "—"}</td>
+              <td class="num"><strong>${res.simulated.cvar_95_weekly_pct !== undefined ? fmtPct(res.simulated.cvar_95_weekly_pct, 2) : "—"}</strong></td>
+              <td class="num">${res.simulated.cvar_95_weekly_pct !== undefined && res.baseline.cvar_95_weekly_pct !== undefined ? deltaFmt(res.simulated.cvar_95_weekly_pct - res.baseline.cvar_95_weekly_pct, "%", true) : "—"}</td>
+              <td class="num">${res.benchmark.cvar_95_weekly_pct !== undefined ? fmtPct(res.benchmark.cvar_95_weekly_pct, 2) : "—"}</td>
+            </tr>
+            <tr>
+              <th scope="row">Rebalances &amp; Slippage</th>
+              <td class="num">${res.baseline.rebalance_count ?? 0} (${res.baseline.tx_cost_drag_bps ?? 0} bps/yr)</td>
+              <td class="num">${res.simulated.rebalance_count ?? 0} (${res.simulated.tx_cost_drag_bps ?? 0} bps/yr)</td>
+              <td class="num muted-sub">${res.simulated.total_turnover_pct !== undefined ? `${res.simulated.total_turnover_pct.toFixed(0)}% turn` : "—"}</td>
+              <td class="num">0</td>
             </tr>
             <tr>
               <th scope="row">Rolling 3Y (Min/Med/Max)</th>
@@ -3677,6 +3802,12 @@ function renderLab(data: DashboardPayload): string {
             </label>
             <label>Rebalance Band (%)
               <input id="bt-band" type="number" min="5" max="100" step="5" value="${btBand}" required />
+            </label>
+            <label>Tx Cost (bps)
+              <input id="bt-tx-bps" type="number" min="0" max="100" step="2" value="${btTxCostBps}" />
+            </label>
+            <label title="Number of candidate ideas tested (M) for Deflated Sharpe multiple-testing filter">Ideas Tested (M)
+              <input id="bt-trials" type="number" min="1" max="200" step="1" value="${btTrialsTested > 0 ? btTrialsTested : ""}" placeholder="Auto (${data.theses.length || 1})" />
             </label>
             <button type="submit" class="primary" id="btn-run-backtest" ${backtestBusy ? "disabled" : ""}>${backtestBusy ? "Running..." : "Run Deterministic Backtest"}</button>
           </div>
@@ -5566,7 +5697,7 @@ function render(): void {
               <path d="M78 40 H96 V58" stroke="currentColor" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
             <div class="brand-text">
-              <div class="brand-title-row"><h1>Investment OS</h1><span class="ver-badge">v0.6</span><span class="status-tag"><span class="dot"></span>Setup</span></div>
+              <div class="brand-title-row"><h1>Investment OS</h1><span class="ver-badge">v0.7</span><span class="status-tag"><span class="dot"></span>Setup</span></div>
               <div class="meta-line">Local data vault ready</div>
             </div>
           </div>
@@ -5612,7 +5743,7 @@ function render(): void {
           <div class="brand-text">
             <div class="brand-title-row">
               <h1>Investment OS</h1>
-              <span class="ver-badge">v0.6</span>
+              <span class="ver-badge">v0.7</span>
               <span class="status-tag"><span class="dot ${statusDotCls}"></span>${statusLbl}</span>
             </div>
             <div class="meta-line">Base ${esc(state.base_currency)} · ${esc(fmtHeaderTimestamp(state.generated_at))}</div>
@@ -5801,6 +5932,8 @@ async function runInteractiveForecast(): Promise<void> {
         apply_recommended_rotations: false,
         actions,
         regime_vol_multiplier: forecastVolMult,
+        return_model: forecastReturnModel,
+        simulation_engine: forecastSimEngine,
         simulations: 1500,
         demo: state.is_demo,
       },
@@ -5826,6 +5959,8 @@ async function runDeterministicBacktestFromForm(root: HTMLElement): Promise<void
   const weightEl = root.querySelector<HTMLInputElement>("#bt-weight");
   const fundingEl = root.querySelector<HTMLSelectElement>("#bt-funding");
   const bandEl = root.querySelector<HTMLInputElement>("#bt-band");
+  const txEl = root.querySelector<HTMLInputElement>("#bt-tx-bps");
+  const trialsEl = root.querySelector<HTMLInputElement>("#bt-trials");
   const includeExtEl = root.querySelector<HTMLInputElement>("#bt-include-ext");
 
   const sym = (tickerEl?.value ?? btTicker).trim().toUpperCase();
@@ -5838,6 +5973,9 @@ async function runDeterministicBacktestFromForm(root: HTMLElement): Promise<void
   btWeight = Math.min(15, Math.max(1, Number(weightEl?.value) || 5));
   btFunding = fundingEl?.value || "cash";
   btBand = Math.min(100, Math.max(5, Number(bandEl?.value) || 25));
+  btTxCostBps = Math.min(100, Math.max(0, Number(txEl?.value ?? btTxCostBps) || 0));
+  const rawTrials = trialsEl?.value.trim() ? Math.round(Number(trialsEl.value)) : 0;
+  btTrialsTested = Number.isFinite(rawTrials) && rawTrials >= 1 ? Math.min(200, rawTrials) : 0;
   if (includeExtEl) btIncludeExternal = includeExtEl.checked;
 
   const matchedThesis = state.theses.find((t) => t.ticker === sym);
@@ -5854,9 +5992,11 @@ async function runDeterministicBacktestFromForm(root: HTMLElement): Promise<void
       target_weight_pct: btWeight,
       funding_source: btFunding,
       rebalance_band_pct: btBand,
+      tx_cost_bps: btTxCostBps,
       include_external_wealth: state.profile.external_exposure.enabled ? btIncludeExternal : false,
       demo: state.is_demo,
     };
+    if (btTrialsTested > 0) args.trials_tested = btTrialsTested;
     if (yfSym) args.candidate_yf_symbol = yfSym;
     const res = await app.callServerTool({ name: "app_run_backtest", arguments: args });
     backtestBusy = false;
@@ -6069,6 +6209,26 @@ function bindPanelEvents(root: HTMLElement): void {
   });
 
   // Forecast & Action Simulator bindings
+  root.querySelectorAll<HTMLButtonElement>("[data-fc-return-model]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const next = btn.dataset.fcReturnModel === "raw_dossier" ? "raw_dossier" : "black_litterman";
+      if (next !== forecastReturnModel) {
+        forecastReturnModel = next;
+        void runInteractiveForecast();
+      }
+    });
+  });
+
+  root.querySelectorAll<HTMLButtonElement>("[data-fc-sim-engine]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const next = btn.dataset.fcSimEngine === "student_t" ? "student_t" : "block_bootstrap";
+      if (next !== forecastSimEngine) {
+        forecastSimEngine = next;
+        void runInteractiveForecast();
+      }
+    });
+  });
+
   root.querySelectorAll<HTMLButtonElement>("[data-fc-horizon]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const next = Number(btn.dataset.fcHorizon) || 5;

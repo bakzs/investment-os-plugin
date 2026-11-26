@@ -60,7 +60,7 @@ import {
 import { runWatchdogSweep } from "./watchdog.js";
 import { syncFundamentalsXbrl } from "./xbrl.js";
 
-const APP_URI = "ui://investment-os/v6/dashboard.html";
+const APP_URI = "ui://investment-os/v7/dashboard.html";
 const APP_MIME = "text/html;profile=mcp-app";
 
 const currentDir =
@@ -561,6 +561,8 @@ const TOOLS: Tool[] = [
         rebalance_band_pct: { type: "number", description: "Relative drift rebalancing threshold % (default 25, floored at 2% absolute NAV drift)." },
         include_external_wealth: { type: "boolean", description: "Include configured external equity ticker in weights & cluster correlation (default true)." },
         rf_pct: { type: "number", description: "Annual risk-free rate % for Sharpe/Sortino and cash yield (defaults to cached 3M T-bill or 4.0%)." },
+        tx_cost_bps: { type: "number", description: "Transaction cost & FX slippage in basis points per dollar traded (0-100, default 10)." },
+        trials_tested: { type: "integer", description: "Number of candidate trials M for Bailey & López de Prado Deflated Sharpe Ratio (defaults to total dossier count)." },
         demo: { type: "boolean", description: "If true, simulate against Demo Preview portfolio and synthetic histories." },
       },
       required: ["candidate_ticker"],
@@ -600,6 +602,9 @@ const TOOLS: Tool[] = [
         regime_vol_multiplier: { type: "number", description: "Volatility stress multiplier (0.5-2.5, default 1.0; use 1.25 for High-Vol stress)." },
         simulations: { type: "integer", description: "Number of seeded Monte Carlo paths (200-5000, default 1500)." },
         rf_pct: { type: "number", description: "Annual risk-free rate % (defaults to cached 3M T-bill or 3.8%)." },
+        return_model: { type: "string", enum: ["black_litterman", "raw_dossier"], description: "Expected return engine: Brier-calibrated Black-Litterman posterior (default) or raw 5Y dossier scenarios." },
+        simulation_engine: { type: "string", enum: ["block_bootstrap", "student_t"], description: "Multivariate shock generator: Politis-Romano stationary block bootstrap (default, auto-falls back to Student-t if <80w aligned) or Student-t df=6." },
+        block_length_weeks: { type: "integer", description: "Mean geometric block length in weeks for Politis-Romano bootstrap (2-26, default 6)." },
         demo: { type: "boolean", description: "Simulate against synthetic Demo Mode portfolio." },
       },
     },
@@ -864,6 +869,8 @@ const TOOLS: Tool[] = [
         rebalance_band_pct: { type: "number" },
         include_external_wealth: { type: "boolean" },
         rf_pct: { type: "number" },
+        tx_cost_bps: { type: "number" },
+        trials_tested: { type: "integer" },
         demo: { type: "boolean" },
       },
       required: ["candidate_ticker"],
@@ -873,7 +880,7 @@ const TOOLS: Tool[] = [
   {
     name: "app_simulate_forecast",
     title: "App Simulate Forward Portfolio Forecast",
-    description: "Internal UI tool to run the correlated Monte Carlo forward portfolio forecast & what-if action simulator from the Forecast tab.",
+    description: "Internal UI tool to run the Black-Litterman + Block Bootstrap / Student-t forward portfolio forecast & what-if action simulator from the Forecast tab.",
     inputSchema: {
       type: "object",
       properties: {
@@ -884,6 +891,9 @@ const TOOLS: Tool[] = [
         regime_vol_multiplier: { type: "number" },
         simulations: { type: "integer" },
         rf_pct: { type: "number" },
+        return_model: { type: "string", enum: ["black_litterman", "raw_dossier"] },
+        simulation_engine: { type: "string", enum: ["block_bootstrap", "student_t"] },
+        block_length_weeks: { type: "integer" },
         demo: { type: "boolean" },
       },
     },
@@ -960,11 +970,11 @@ function mergeProfileUpdate(current: UserProfile, args: Record<string, unknown>)
 }
 
 const server = new Server(
-  { name: "investment-os-dashboard", version: "0.6.0" },
+  { name: "investment-os-dashboard", version: "0.7.0" },
   {
     capabilities: { tools: {}, resources: {} },
     instructions:
-      "Quantamental Personal-CIO executive portfolio workstation, correlated Monte Carlo forward portfolio forecast & action simulator, 3-layer research graph, automated SEC/XBRL (Owner Earnings, ROIC, Accruals)/Form 4 signal harness, and local analytics server for Investment OS.",
+      "Institutional Quantamental Personal-CIO workstation: Black-Litterman & Politis-Romano Block Bootstrap forward portfolio forecasting with CVaR, PCA Effective Bets & HRP sizing, 3-layer research graph, automated SEC/XBRL (Owner Earnings, ROIC, Accruals)/Form 4 signal harness, and Deflated Sharpe backtest lab for Investment OS.",
   },
 );
 
@@ -1371,10 +1381,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         rawRequest: args,
       });
       const text = [
-        `Deterministic Backtest: ${backtest.candidate_ticker} @ ${backtest.target_weight_pct}% (funded: ${backtest.funding_source}, band: max(2%, ${backtest.rebalance_band_pct}%), rf=${backtest.rf_pct}%)`,
+        `Deterministic Backtest: ${backtest.candidate_ticker} @ ${backtest.target_weight_pct}% (funded: ${backtest.funding_source}, band: max(2%, ${backtest.rebalance_band_pct}%), rf=${backtest.rf_pct}%, tx=${backtest.tx_cost_bps}bps, DSR M=${backtest.trials_tested})`,
         `- Window: ${backtest.overlap_start} to ${backtest.overlap_end} (${backtest.weeks_analyzed}w | External Wealth: ${backtest.include_external_wealth ? "Included" : "Excluded"})`,
-        `- Baseline: CAGR ${backtest.baseline.cagr_pct}% | Max DD ${backtest.baseline.max_drawdown_pct}% | Sharpe ${backtest.baseline.sharpe} ± ${backtest.baseline.sharpe_se} | Rebalances: ${backtest.baseline.rebalance_count}`,
-        `- Simulated: CAGR ${backtest.simulated.cagr_pct}% (${backtest.deltas.cagr_pct >= 0 ? "+" : ""}${backtest.deltas.cagr_pct}%) | Max DD ${backtest.simulated.max_drawdown_pct}% | Sharpe ${backtest.simulated.sharpe} ± ${backtest.simulated.sharpe_se} | Rebalances: ${backtest.simulated.rebalance_count}`,
+        `- Baseline: CAGR ${backtest.baseline.cagr_pct}% | Max DD ${backtest.baseline.max_drawdown_pct}% | Sharpe ${backtest.baseline.sharpe} ± ${backtest.baseline.sharpe_se} | Wk CVaR95 ${backtest.baseline.cvar_95_weekly_pct}% | Rebalances: ${backtest.baseline.rebalance_count}`,
+        `- Simulated: CAGR ${backtest.simulated.cagr_pct}% (${backtest.deltas.cagr_pct >= 0 ? "+" : ""}${backtest.deltas.cagr_pct}%) | Max DD ${backtest.simulated.max_drawdown_pct}% | Sharpe ${backtest.simulated.sharpe} ± ${backtest.simulated.sharpe_se} | DSR Prob ${backtest.simulated.deflated_sharpe_prob_pct}% (SR0=${backtest.sr0_annual_threshold}) | Wk CVaR95 ${backtest.simulated.cvar_95_weekly_pct}% | Turnover ${backtest.simulated.total_turnover_pct}% (${backtest.simulated.tx_cost_drag_bps} bps/yr drag)`,
         `- Benchmark (${backtest.benchmark_symbol}): CAGR ${backtest.benchmark.cagr_pct}% | Max DD ${backtest.benchmark.max_drawdown_pct}% | Sharpe ${backtest.benchmark.sharpe}`,
         `- Correlation vs Portfolio: ${backtest.candidate_corr_portfolio ?? "N/A"} | vs Primary Cluster: ${backtest.candidate_corr_cluster ?? "N/A"}`,
         `- Caveat: ${backtest.caveat}`,
@@ -1394,13 +1404,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const ccy = forecast.base_currency;
       const fmtM = (n: number) => `${Math.round(n).toLocaleString("en-US")} ${ccy}`;
       const fmtDeltaM = (n: number) => `${n >= 0 ? "+" : ""}${Math.round(n).toLocaleString("en-US")} ${ccy}`;
+      const pc1Base = forecast.baseline.factor_risk.top_factors[0];
+      const pc1Sim = forecast.simulated.factor_risk.top_factors[0];
       const text = [
-        `Forward Portfolio Forecast (${forecast.horizon_years}Y | ${forecast.simulations} correlated Student-t paths | External Wealth: ${forecast.include_external_wealth ? "Included" : "Excluded"} | Vol×${forecast.regime_vol_multiplier}):`,
+        `Forward Portfolio Forecast (${forecast.horizon_years}Y | ${forecast.return_model} | ${forecast.simulation_engine_used} | ${forecast.simulations} paths | External Wealth: ${forecast.include_external_wealth ? "Included" : "Excluded"} | Vol×${forecast.regime_vol_multiplier}):`,
         `- Starting Wealth: ${fmtM(forecast.baseline.starting_wealth_base)} | Actions Applied: ${forecast.applied_actions.length}${forecast.cash_shortfall_base > 0 ? ` (Cash shortfall: ${fmtM(forecast.cash_shortfall_base)})` : ""}`,
-        `- Current Path (${forecast.horizon_years}Y): Bear P10 ${fmtM(forecast.baseline.ending_p10_base)} | Base P50 ${fmtM(forecast.baseline.ending_p50_base)} (${forecast.baseline.expected_cagr_p50_pct}% CAGR) | Bull P90 ${fmtM(forecast.baseline.ending_p90_base)} | Vol ${forecast.baseline.annual_vol_pct}% | Sharpe ${forecast.baseline.expected_sharpe}`,
-        `- Action Plan (${forecast.horizon_years}Y): Bear P10 ${fmtM(forecast.simulated.ending_p10_base)} (${fmtDeltaM(forecast.deltas.p10_base)}) | Base P50 ${fmtM(forecast.simulated.ending_p50_base)} (${fmtDeltaM(forecast.deltas.p50_base)}, ${forecast.simulated.expected_cagr_p50_pct}% CAGR) | Bull P90 ${fmtM(forecast.simulated.ending_p90_base)} | Vol ${forecast.simulated.annual_vol_pct}% | Sharpe ${forecast.simulated.expected_sharpe}`,
+        `- Current Path (${forecast.horizon_years}Y): CVaR10 ${fmtM(forecast.baseline.ending_cvar_10_base)} | Bear P10 ${fmtM(forecast.baseline.ending_p10_base)} | Base P50 ${fmtM(forecast.baseline.ending_p50_base)} (${forecast.baseline.expected_cagr_p50_pct}% CAGR) | Bull P90 ${fmtM(forecast.baseline.ending_p90_base)} | MaxDD P95 ${forecast.baseline.sim_max_dd_p95_pct}% | Vol ${forecast.baseline.annual_vol_pct}% | Sharpe ${forecast.baseline.expected_sharpe}`,
+        `- Action Plan (${forecast.horizon_years}Y): CVaR10 ${fmtM(forecast.simulated.ending_cvar_10_base)} (${fmtDeltaM(forecast.deltas.cvar_10_base)}) | Bear P10 ${fmtM(forecast.simulated.ending_p10_base)} (${fmtDeltaM(forecast.deltas.p10_base)}) | Base P50 ${fmtM(forecast.simulated.ending_p50_base)} (${fmtDeltaM(forecast.deltas.p50_base)}, ${forecast.simulated.expected_cagr_p50_pct}% CAGR) | Bull P90 ${fmtM(forecast.simulated.ending_p90_base)} | MaxDD P95 ${forecast.simulated.sim_max_dd_p95_pct}% | Vol ${forecast.simulated.annual_vol_pct}% | Sharpe ${forecast.simulated.expected_sharpe}`,
+        `- Latent Factor Risk (PCA): Effective Bets ${forecast.baseline.factor_risk.effective_bets} -> ${forecast.simulated.factor_risk.effective_bets} (${forecast.deltas.effective_bets >= 0 ? "+" : ""}${forecast.deltas.effective_bets}) | Beta ${forecast.baseline.factor_risk.market_beta ?? "n/a"} -> ${forecast.simulated.factor_risk.market_beta ?? "n/a"}${pc1Base && pc1Sim ? ` | PC1 ${pc1Base.variance_share_pct}% -> ${pc1Sim.variance_share_pct}% (${pc1Sim.top_tickers.join(", ")})` : ""}`,
         `- Tax & Risk Impact: Estate Tax Saved ${fmtM(forecast.deltas.estate_tax_saved_base)} | Annual WHT Saved ${fmtM(forecast.deltas.annual_wht_saved_base)}/yr | US-Situs ${forecast.baseline.us_situs_portfolio_pct}% -> ${forecast.simulated.us_situs_portfolio_pct}% | Cap Breaches ${forecast.baseline.cap_breaches_count} -> ${forecast.simulated.cap_breaches_count}${forecast.deltas.cured_caps.length > 0 ? ` (Cured: ${forecast.deltas.cured_caps.join(", ")})` : ""}`,
         `- Benchmark (${forecast.benchmark_ticker} @ ${forecast.benchmark_cagr_pct}%): ${fmtM(forecast.benchmark_ending_base)} | Prob Beat Bench: ${forecast.baseline.prob_beat_benchmark_pct}% -> ${forecast.simulated.prob_beat_benchmark_pct}%`,
+        `- Black-Litterman: ${forecast.black_litterman.note}`,
         `- Methodology: ${forecast.methodology_note}`,
       ].join("\n");
       return {

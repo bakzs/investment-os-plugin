@@ -854,6 +854,8 @@ export const BacktestRequestSchema = z.object({
   rebalance_band_pct: z.number().finite().min(5).max(100).default(25),
   include_external_wealth: z.boolean().default(true),
   rf_pct: z.number().finite().min(0).max(20).optional(),
+  tx_cost_bps: z.number().finite().min(0).max(100).default(10),
+  trials_tested: z.number().int().min(1).max(200).optional(),
   demo: z.boolean().optional(),
 });
 
@@ -897,6 +899,9 @@ export const ForecastRequestSchema = z.object({
   regime_vol_multiplier: z.number().finite().min(0.5).max(2.5).default(1.0),
   simulations: z.number().int().min(200).max(5000).default(1500),
   rf_pct: z.number().finite().min(0).max(20).optional(),
+  return_model: z.enum(["black_litterman", "raw_dossier"]).default("black_litterman"),
+  simulation_engine: z.enum(["block_bootstrap", "student_t"]).default("block_bootstrap"),
+  block_length_weeks: z.number().int().min(2).max(26).default(6),
   demo: z.boolean().optional(),
 });
 

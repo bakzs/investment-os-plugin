@@ -3,6 +3,20 @@
 All notable changes to **Investment OS** are documented in this file.
 Versions stay aligned across `plugin.json`, `package.json`, and `src/server/index.ts`.
 
+## [0.7.0] - 2026-11-26
+
+### Added
+- **Zero-Dependency Institutional Quantitative Core (`src/server/quant_sota.ts`):**
+  - **Black-Litterman Posterior Expected Returns:** Conjugate Bayesian blend combining market-equilibrium implied returns (`Π = δ Σ w_mkt`) with 5Y dossier scenarios, automatically scaling view uncertainty `Ω` via empirical Hypothesis Brier Calibration and GIGO `valuation_warnings`. Toggleable side-by-side (`return_model: "black_litterman" | "raw_dossier"`).
+  - **Jacobi PCA Latent Factor Risk & Meucci Effective Bets (`N_eff`):** Exact symmetric eigendecomposition of the Ledoit-Wolf shrunk covariance matrix exposing Top-3 orthogonal variance drivers (auto-labeled by driving tickers), Market Beta (`β`), Systematic vs. Idiosyncratic risk split, and Effective Number of Independent Bets (`exp(-Σ p_k ln p_k)`).
+  - **Politis-Romano Stationary Block Bootstrap + CVaR (Expected Shortfall):** Multivariate geometric-block weekly resampling (`L=6w`, auto-falling back to correlated Student-t `df=6` if `<80w` aligned history) preserving crash persistence and cross-asset tail co-skewness, plus Terminal `CVaR 10%` and simulated Path Max-Drawdown (`P50`/`P95`).
+  - **López de Prado Hierarchical Risk Parity (HRP):** Correlation-distance UPGMA clustering + tree-respecting recursive inverse-variance bisection with cap-bounded water-filling redistribution surfaced alongside Quarter-Kelly sizing.
+  - **Bailey & López de Prado Deflated Sharpe Ratio (DSR) + Transaction-Cost Slippage:** Upgraded Backtest Lab (`run_portfolio_backtest` / `app_run_backtest`) with configurable `tx_cost_bps` (default `10 bps`), `trials_tested` (`M`), realized turnover & annualized slippage drag, weekly `CVaR 95%`, skewness, excess kurtosis, and multiple-testing-adjusted DSR probability.
+
+### Changed
+- Bumped MCP App resource URI (`APP_URI`) to `ui://investment-os/v7/dashboard.html`, Server version to `0.7.0`, and outbound Yahoo/SEC User-Agent strings to `0.7.0`.
+- Upgraded Forecast UI toolbar and Lab Backtest diagnostics while keeping `dist/dashboard.html` well within the 1 MB bundle budget.
+
 ## [0.6.0] - 2026-11-26
 
 ### Added

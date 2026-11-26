@@ -34059,6 +34059,8 @@ var BacktestRequestSchema = external_exports.object({
   rebalance_band_pct: external_exports.number().finite().min(5).max(100).default(25),
   include_external_wealth: external_exports.boolean().default(true),
   rf_pct: external_exports.number().finite().min(0).max(20).optional(),
+  tx_cost_bps: external_exports.number().finite().min(0).max(100).default(10),
+  trials_tested: external_exports.number().int().min(1).max(200).optional(),
   demo: external_exports.boolean().optional()
 });
 var ForecastActionSchema = external_exports.discriminatedUnion("type", [
@@ -34096,6 +34098,9 @@ var ForecastRequestSchema = external_exports.object({
   regime_vol_multiplier: external_exports.number().finite().min(0.5).max(2.5).default(1),
   simulations: external_exports.number().int().min(200).max(5e3).default(1500),
   rf_pct: external_exports.number().finite().min(0).max(20).optional(),
+  return_model: external_exports.enum(["black_litterman", "raw_dossier"]).default("black_litterman"),
+  simulation_engine: external_exports.enum(["block_bootstrap", "student_t"]).default("block_bootstrap"),
+  block_length_weeks: external_exports.number().int().min(2).max(26).default(6),
   demo: external_exports.boolean().optional()
 });
 var EtfMetadataSchema = external_exports.object({
@@ -34657,7 +34662,7 @@ function loadThesisTestLog(dataDir, ticker, limit = 25) {
 }
 
 // src/server/edgar.ts
-var DEFAULT_SEC_USER_AGENT = "InvestmentOS-Plugin/0.6.0 (contact@investment-os.local)";
+var DEFAULT_SEC_USER_AGENT = "InvestmentOS-Plugin/0.7.0 (contact@investment-os.local)";
 var SEC_PACING_MS = 150;
 var PERIODIC_FORMS = /* @__PURE__ */ new Set(["10-K", "10-Q", "20-F", "10-K/A", "10-Q/A", "20-F/A"]);
 var EVENT_FORMS = /* @__PURE__ */ new Set([
@@ -34909,6 +34914,818 @@ async function pollEdgarFilings(dataDir, profile, tickers, catalysts, nowIso, fe
   return { cache, skippedTickers, redFlags: extractSecRedFlags(filingsByTicker) };
 }
 
+// src/server/quant_sota.ts
+function round(val, decimals = 2) {
+  const factor = 10 ** decimals;
+  return Math.round((val + Number.EPSILON) * factor) / factor;
+}
+function clamp(val, lo, hi) {
+  return Math.max(lo, Math.min(hi, val));
+}
+function normalCdf(z2) {
+  if (!Number.isFinite(z2)) return z2 > 0 ? 1 : 0;
+  if (z2 < -8) return 0;
+  if (z2 > 8) return 1;
+  const sign = z2 < 0 ? -1 : 1;
+  const x = Math.abs(z2) / Math.SQRT2;
+  const t = 1 / (1 + 0.3275911 * x);
+  const a1 = 0.254829592;
+  const a2 = -0.284496736;
+  const a3 = 1.421413741;
+  const a4 = -1.453152027;
+  const a5 = 1.061405429;
+  const poly = ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t;
+  const erf = 1 - poly * Math.exp(-x * x);
+  return 0.5 * (1 + sign * erf);
+}
+function normalInvCdf(pRaw) {
+  const p = clamp(pRaw, 1e-12, 1 - 1e-12);
+  const a = [
+    -39.69683028665376,
+    220.9460984245205,
+    -275.9285104469687,
+    138.357751867269,
+    -30.66479806614716,
+    2.506628277459239
+  ];
+  const b = [
+    -54.47609879822406,
+    161.5858368580409,
+    -155.6989798598866,
+    66.80131188771972,
+    -13.28068155288572
+  ];
+  const c = [
+    -0.007784894002430293,
+    -0.3223964580411365,
+    -2.400758277161838,
+    -2.549732539343734,
+    4.374664141464968,
+    2.938163982698783
+  ];
+  const d = [
+    0.007784695709041462,
+    0.3224671290700398,
+    2.445134137142996,
+    3.754408661907416
+  ];
+  const pLow = 0.02425;
+  const pHigh = 1 - pLow;
+  if (p < pLow) {
+    const q2 = Math.sqrt(-2 * Math.log(p));
+    return (((((c[0] * q2 + c[1]) * q2 + c[2]) * q2 + c[3]) * q2 + c[4]) * q2 + c[5]) / ((((d[0] * q2 + d[1]) * q2 + d[2]) * q2 + d[3]) * q2 + 1);
+  }
+  if (p <= pHigh) {
+    const q2 = p - 0.5;
+    const r = q2 * q2;
+    return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q2 / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
+  }
+  const q = Math.sqrt(-2 * Math.log(1 - p));
+  return -((((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1));
+}
+function solveLinearSystem(A, b) {
+  const n = b.length;
+  if (n === 0) return [];
+  const aug = Array.from({ length: n }, (_, i) => {
+    const row = Array(n + 1).fill(0);
+    for (let j = 0; j < n; j += 1) {
+      row[j] = A[i]?.[j] ?? 0;
+    }
+    row[n] = b[i] ?? 0;
+    return row;
+  });
+  for (let col = 0; col < n; col += 1) {
+    let pivotRow = col;
+    let maxAbs = Math.abs(aug[col][col]);
+    for (let r = col + 1; r < n; r += 1) {
+      const v = Math.abs(aug[r][col]);
+      if (v > maxAbs) {
+        maxAbs = v;
+        pivotRow = r;
+      }
+    }
+    if (pivotRow !== col) {
+      const tmp = aug[col];
+      aug[col] = aug[pivotRow];
+      aug[pivotRow] = tmp;
+    }
+    let pivot = aug[col][col];
+    if (Math.abs(pivot) < 1e-11) {
+      pivot = pivot >= 0 ? 1e-9 : -1e-9;
+      aug[col][col] = pivot;
+    }
+    for (let r = col + 1; r < n; r += 1) {
+      const factor = aug[r][col] / pivot;
+      if (factor === 0) continue;
+      for (let j = col; j <= n; j += 1) {
+        aug[r][j] = aug[r][j] - factor * aug[col][j];
+      }
+    }
+  }
+  const x = Array(n).fill(0);
+  for (let i = n - 1; i >= 0; i -= 1) {
+    let sum = aug[i][n];
+    for (let j = i + 1; j < n; j += 1) {
+      sum -= aug[i][j] * x[j];
+    }
+    const diag = aug[i][i];
+    x[i] = Math.abs(diag) > 1e-12 ? sum / diag : 0;
+  }
+  return x;
+}
+function jacobiEigenSymmetric(matrix, maxSweeps = 120) {
+  const n = matrix.length;
+  if (n === 0) return [];
+  if (n === 1) return [{ eigenvalue: matrix[0][0], eigenvector: [1] }];
+  const A = Array.from(
+    { length: n },
+    (_, i) => Array.from({ length: n }, (_2, j) => 0.5 * ((matrix[i]?.[j] ?? 0) + (matrix[j]?.[i] ?? 0)))
+  );
+  const V = Array.from(
+    { length: n },
+    (_, i) => Array.from({ length: n }, (_2, j) => i === j ? 1 : 0)
+  );
+  const tol = 1e-12;
+  const maxRotations = maxSweeps * n * n;
+  for (let iter = 0; iter < maxRotations; iter += 1) {
+    let p = 0;
+    let q = 1;
+    let maxOff = 0;
+    for (let i = 0; i < n; i += 1) {
+      for (let j = i + 1; j < n; j += 1) {
+        const val = Math.abs(A[i][j]);
+        if (val > maxOff) {
+          maxOff = val;
+          p = i;
+          q = j;
+        }
+      }
+    }
+    if (maxOff < tol) break;
+    const app = A[p][p];
+    const aqq = A[q][q];
+    const apq = A[p][q];
+    const tau = (aqq - app) / (2 * apq);
+    const t = tau >= 0 ? 1 / (tau + Math.sqrt(1 + tau * tau)) : -1 / (-tau + Math.sqrt(1 + tau * tau));
+    const c = 1 / Math.sqrt(1 + t * t);
+    const s = t * c;
+    A[p][p] = app - t * apq;
+    A[q][q] = aqq + t * apq;
+    A[p][q] = 0;
+    A[q][p] = 0;
+    for (let k = 0; k < n; k += 1) {
+      if (k === p || k === q) continue;
+      const akp = A[k][p];
+      const akq = A[k][q];
+      A[k][p] = c * akp - s * akq;
+      A[p][k] = A[k][p];
+      A[k][q] = s * akp + c * akq;
+      A[q][k] = A[k][q];
+    }
+    for (let k = 0; k < n; k += 1) {
+      const vkp = V[k][p];
+      const vkq = V[k][q];
+      V[k][p] = c * vkp - s * vkq;
+      V[k][q] = s * vkp + c * vkq;
+    }
+  }
+  const pairs2 = [];
+  for (let i = 0; i < n; i += 1) {
+    const vec = Array.from({ length: n }, (_, row) => V[row][i]);
+    let maxIdx = 0;
+    for (let r = 1; r < n; r += 1) {
+      if (Math.abs(vec[r]) > Math.abs(vec[maxIdx])) maxIdx = r;
+    }
+    if (vec[maxIdx] < 0) {
+      for (let r = 0; r < n; r += 1) vec[r] = -vec[r];
+    }
+    pairs2.push({ eigenvalue: A[i][i], eigenvector: vec });
+  }
+  pairs2.sort((a, b) => b.eigenvalue - a.eigenvalue);
+  return pairs2;
+}
+function computeHigherMoments(returns) {
+  const n = returns.length;
+  if (n < 3) {
+    return { mean: 0, std: 0, skewness: 0, excess_kurtosis: 0, var_95_pct: 0, cvar_95_pct: 0 };
+  }
+  const mean = returns.reduce((s, r) => s + r, 0) / n;
+  let m2 = 0;
+  let m3 = 0;
+  let m4 = 0;
+  for (const r of returns) {
+    const d = r - mean;
+    const d2 = d * d;
+    m2 += d2;
+    m3 += d2 * d;
+    m4 += d2 * d2;
+  }
+  const variance = m2 / (n - 1);
+  const std = Math.sqrt(Math.max(0, variance));
+  let skewness = 0;
+  let excessKurtosis = 0;
+  if (std > 1e-10) {
+    const rawM2 = m2 / n;
+    const rawM3 = m3 / n;
+    const rawM4 = m4 / n;
+    skewness = rawM3 / Math.pow(rawM2, 1.5);
+    excessKurtosis = rawM4 / (rawM2 * rawM2) - 3;
+  }
+  const sorted = [...returns].sort((a, b) => a - b);
+  const tailCount = Math.max(1, Math.floor(n * 0.05));
+  const var95 = sorted[Math.min(n - 1, tailCount - 1)];
+  let cvarSum = 0;
+  for (let i = 0; i < tailCount; i += 1) {
+    cvarSum += sorted[i];
+  }
+  const cvar95 = cvarSum / tailCount;
+  return {
+    mean,
+    std,
+    skewness: round(clamp(skewness, -10, 10), 3),
+    excess_kurtosis: round(clamp(excessKurtosis, -2, 30), 3),
+    var_95_pct: round(var95 * 100, 2),
+    cvar_95_pct: round(cvar95 * 100, 2)
+  };
+}
+function computeBlackLittermanPosterior(assets, cov, opts) {
+  const tau = opts.tau ?? 0.05;
+  const rf = opts.rfPct / 100;
+  const benchExcess = Math.max(0.02, opts.benchmarkCagrPct / 100 - rf);
+  const brierScore = opts.brierScore ?? null;
+  const brierResolved = opts.brierResolvedCount ?? 0;
+  let brierMult = 1;
+  if (brierScore !== null && brierResolved >= 5) {
+    brierMult = round(clamp(0.65 + (brierScore - 0.14) / 0.16 * 0.95, 0.6, 1.85), 2);
+  }
+  const riskyIdx = [];
+  for (let i = 0; i < assets.length; i += 1) {
+    if (!assets[i].is_cash) riskyIdx.push(i);
+  }
+  const m = riskyIdx.length;
+  if (m === 0) {
+    return {
+      tau,
+      risk_aversion_delta: 2.5,
+      brier_score_used: brierScore,
+      brier_resolved_count: brierResolved,
+      brier_omega_multiplier: brierMult,
+      assets: assets.map((a) => ({
+        ticker: a.ticker,
+        prior_cagr_pct: round(opts.rfPct, 2),
+        raw_view_cagr_pct: null,
+        posterior_cagr_pct: round(opts.rfPct, 2),
+        shrinkage_pct: 0,
+        confidence_weight_pct: 0
+      })),
+      note: "Cash-only portfolio; Black-Litterman prior equals risk-free rate."
+    };
+  }
+  const sigR = Array.from(
+    { length: m },
+    (_, r) => Array.from({ length: m }, (_2, c) => cov[riskyIdx[r]][riskyIdx[c]])
+  );
+  let wSum = 0;
+  const wEq = riskyIdx.map((idx) => {
+    const w = Math.max(5e-3, assets[idx].market_weight);
+    wSum += w;
+    return w;
+  });
+  for (let i = 0; i < m; i += 1) wEq[i] = wEq[i] / wSum;
+  const sigW = Array(m).fill(0);
+  let eqVar = 0;
+  for (let i = 0; i < m; i += 1) {
+    let s = 0;
+    for (let j = 0; j < m; j += 1) s += sigR[i][j] * wEq[j];
+    sigW[i] = s;
+    eqVar += wEq[i] * s;
+  }
+  const delta = clamp(eqVar > 1e-6 ? benchExcess / eqVar : 2.5, 1.2, 5.5);
+  const pi = sigW.map((v) => clamp(delta * v, 0.01, 0.2));
+  const views = [];
+  for (let r = 0; r < m; r += 1) {
+    const a = assets[riskyIdx[r]];
+    if (a.raw_view_cagr === null || !Number.isFinite(a.raw_view_cagr)) continue;
+    const assetVar = Math.max(1e-4, sigR[r][r]);
+    const warnPenalty = 1 + Math.min(4, Math.max(0, a.view_warnings_count)) * 0.35;
+    const dispPenalty = typeof a.dispersion_spread === "number" && a.dispersion_spread > 0.25 ? 1 + Math.min(0.6, (a.dispersion_spread - 0.25) * 1.2) : 1;
+    const omega = Math.max(1e-6, tau * assetVar * brierMult * warnPenalty * dispPenalty);
+    views.push({
+      localIdx: r,
+      qExcess: clamp(a.raw_view_cagr - rf, -0.25, 0.35),
+      omega
+    });
+  }
+  let postExcess = [...pi];
+  const confByLocal = /* @__PURE__ */ new Map();
+  if (views.length > 0) {
+    const k = views.length;
+    const M = Array.from({ length: k }, () => Array(k).fill(0));
+    const rhs = Array(k).fill(0);
+    for (let i = 0; i < k; i += 1) {
+      const vi = views[i];
+      rhs[i] = vi.qExcess - pi[vi.localIdx];
+      const priorVarI = tau * sigR[vi.localIdx][vi.localIdx];
+      confByLocal.set(vi.localIdx, round(priorVarI / (priorVarI + vi.omega) * 100, 0));
+      for (let j = 0; j < k; j += 1) {
+        const vj = views[j];
+        M[i][j] = tau * sigR[vi.localIdx][vj.localIdx] + (i === j ? vi.omega : 0);
+      }
+    }
+    const z2 = solveLinearSystem(M, rhs);
+    postExcess = pi.map((pVal, row) => {
+      let adj = 0;
+      for (let j = 0; j < k; j += 1) {
+        adj += tau * sigR[row][views[j].localIdx] * z2[j];
+      }
+      return clamp(pVal + adj, -0.2, 0.35);
+    });
+  }
+  const outByGlobal = /* @__PURE__ */ new Map();
+  for (let r = 0; r < m; r += 1) {
+    const gIdx = riskyIdx[r];
+    const a = assets[gIdx];
+    const priorPct = round((pi[r] + rf) * 100, 2);
+    const postPct = round((postExcess[r] + rf) * 100, 2);
+    const rawPct = a.raw_view_cagr !== null ? round(a.raw_view_cagr * 100, 2) : null;
+    const shrink = rawPct !== null ? round(postPct - rawPct, 2) : round(postPct - priorPct, 2);
+    outByGlobal.set(gIdx, {
+      ticker: a.ticker,
+      prior_cagr_pct: priorPct,
+      raw_view_cagr_pct: rawPct,
+      posterior_cagr_pct: postPct,
+      shrinkage_pct: shrink,
+      confidence_weight_pct: confByLocal.get(r) ?? 0
+    });
+  }
+  const finalAssets = assets.map((a, idx) => {
+    if (a.is_cash) {
+      return {
+        ticker: a.ticker,
+        prior_cagr_pct: round(opts.rfPct, 2),
+        raw_view_cagr_pct: null,
+        posterior_cagr_pct: round(opts.rfPct, 2),
+        shrinkage_pct: 0,
+        confidence_weight_pct: 0
+      };
+    }
+    return outByGlobal.get(idx);
+  });
+  const brierText = brierScore !== null && brierResolved >= 5 ? `Brier=${brierScore.toFixed(2)} (${brierResolved} resolved -> \u03A9\xD7${brierMult})` : `neutral prior calibration (\u03A9\xD7${brierMult}; need >=5 resolved hypotheses for empirical Brier scaling)`;
+  return {
+    tau,
+    risk_aversion_delta: round(delta, 2),
+    brier_score_used: brierScore,
+    brier_resolved_count: brierResolved,
+    brier_omega_multiplier: brierMult,
+    assets: finalAssets,
+    note: `Black-Litterman conjugate blend (\u03C4=${tau}, \u03B4=${round(delta, 2)}, ${views.length} dossier views, ${brierText}).`
+  };
+}
+function computeFactorRiskDecomposition(tickers, isCashFlags, weights, cov, benchmarkIdx) {
+  const activeIdx = [];
+  for (let i = 0; i < tickers.length; i += 1) {
+    if (!isCashFlags[i] && (weights[i] ?? 0) > 1e-6) {
+      activeIdx.push(i);
+    }
+  }
+  const m = activeIdx.length;
+  if (m === 0) {
+    return {
+      effective_bets: 0,
+      asset_count: 0,
+      market_beta: 0,
+      systematic_risk_pct: 0,
+      idiosyncratic_risk_pct: 100,
+      top_factors: []
+    };
+  }
+  const subCov = Array.from(
+    { length: m },
+    (_, r) => Array.from({ length: m }, (_2, c) => cov[activeIdx[r]][activeIdx[c]])
+  );
+  const wRisk = activeIdx.map((idx) => weights[idx]);
+  const wRiskSum = wRisk.reduce((s, v) => s + v, 0);
+  const wNorm = wRisk.map((v) => wRiskSum > 0 ? v / wRiskSum : 0);
+  const eigenpairs = jacobiEigenSymmetric(subCov);
+  const totalTrace = Math.max(
+    1e-9,
+    eigenpairs.reduce((s, ep) => s + Math.max(0, ep.eigenvalue), 0)
+  );
+  const factorVars = eigenpairs.map((ep) => {
+    const lam = Math.max(0, ep.eigenvalue);
+    let proj = 0;
+    for (let i = 0; i < m; i += 1) proj += ep.eigenvector[i] * wNorm[i];
+    return proj * proj * lam;
+  });
+  const totalPortVar = Math.max(1e-12, factorVars.reduce((s, v) => s + v, 0));
+  const pShares = factorVars.map((v) => v / totalPortVar);
+  let entropy = 0;
+  for (const p of pShares) {
+    if (p > 1e-10) entropy -= p * Math.log(p);
+  }
+  const effectiveBets = round(clamp(Math.exp(entropy), 1, m), 2);
+  const ranked = eigenpairs.map((ep, k) => ({
+    ep,
+    varShare: pShares[k],
+    eigShare: Math.max(0, ep.eigenvalue) / totalTrace
+  })).sort((a, b) => b.varShare - a.varShare);
+  const topFactors = ranked.slice(0, 3).map((item, rankIdx) => {
+    const loadings = activeIdx.map((gIdx, localIdx) => ({
+      ticker: tickers[gIdx],
+      impact: Math.abs(item.ep.eigenvector[localIdx] * wNorm[localIdx])
+    })).sort((a, b) => b.impact - a.impact);
+    const topTickers = loadings.slice(0, 3).map((x) => x.ticker);
+    const id = `PC${rankIdx + 1}`;
+    return {
+      id,
+      variance_share_pct: round(item.varShare * 100, 1),
+      eigenvalue_share_pct: round(item.eigShare * 100, 1),
+      top_tickers: topTickers,
+      label: `${id}: ${topTickers.join(" \xB7 ")}`
+    };
+  });
+  let marketBeta = null;
+  let systematicPct = null;
+  let idiosyncraticPct = null;
+  if (benchmarkIdx !== null && benchmarkIdx >= 0 && benchmarkIdx < tickers.length) {
+    const benchVar = cov[benchmarkIdx][benchmarkIdx];
+    if (benchVar > 1e-8) {
+      let covPortBench = 0;
+      let fullPortVar = 0;
+      for (let i = 0; i < tickers.length; i += 1) {
+        const wi = weights[i] ?? 0;
+        covPortBench += wi * cov[i][benchmarkIdx];
+        let sw = 0;
+        for (let j = 0; j < tickers.length; j += 1) sw += cov[i][j] * (weights[j] ?? 0);
+        fullPortVar += wi * sw;
+      }
+      if (fullPortVar > 1e-10) {
+        const beta = covPortBench / benchVar;
+        const r2 = clamp(beta * beta * benchVar / fullPortVar, 0, 1);
+        marketBeta = round(beta, 2);
+        systematicPct = round(r2 * 100, 1);
+        idiosyncraticPct = round((1 - r2) * 100, 1);
+      }
+    }
+  }
+  return {
+    effective_bets: effectiveBets,
+    asset_count: m,
+    market_beta: marketBeta,
+    systematic_risk_pct: systematicPct,
+    idiosyncratic_risk_pct: idiosyncraticPct,
+    top_factors: topFactors
+  };
+}
+function computeHrpWeights(assets, cov, corr) {
+  const riskyIdx = [];
+  for (let i = 0; i < assets.length; i += 1) {
+    if (!assets[i].is_cash) riskyIdx.push(i);
+  }
+  const m = riskyIdx.length;
+  if (m === 0) return { weights_by_ticker: {}, ordered_tickers: [] };
+  if (m === 1) {
+    const sym = assets[riskyIdx[0]].ticker;
+    return { weights_by_ticker: { [sym]: 100 }, ordered_tickers: [sym] };
+  }
+  const subCov = Array.from(
+    { length: m },
+    (_, r) => Array.from({ length: m }, (_2, c) => cov[riskyIdx[r]][riskyIdx[c]])
+  );
+  const dist = Array.from(
+    { length: m },
+    (_, r) => Array.from({ length: m }, (_2, c) => {
+      if (r === c) return 0;
+      const rho = clamp(corr[riskyIdx[r]][riskyIdx[c]], -0.99, 0.9999);
+      return Math.sqrt(Math.max(0, 0.5 * (1 - rho)));
+    })
+  );
+  const clusters = Array.from({ length: m }, (_, i) => ({
+    members: [i],
+    order: [i]
+  }));
+  const clusterDist = (a, b) => {
+    let sum = 0;
+    for (const i of a.members) {
+      for (const j of b.members) {
+        sum += dist[i][j];
+      }
+    }
+    return sum / (a.members.length * b.members.length);
+  };
+  while (clusters.length > 1) {
+    let bestI = 0;
+    let bestJ = 1;
+    let bestD = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < clusters.length; i += 1) {
+      for (let j = i + 1; j < clusters.length; j += 1) {
+        const d = clusterDist(clusters[i], clusters[j]);
+        if (d < bestD - 1e-12) {
+          bestD = d;
+          bestI = i;
+          bestJ = j;
+        }
+      }
+    }
+    const left = clusters[bestI];
+    const right = clusters[bestJ];
+    const merged = {
+      members: [...left.members, ...right.members],
+      order: [...left.order, ...right.order],
+      left,
+      right
+    };
+    clusters.splice(bestJ, 1);
+    clusters[bestI] = merged;
+  }
+  const root = clusters[0];
+  const orderedLocal = root.order;
+  const weights = Array(m).fill(1);
+  const clusterVariance = (indices) => {
+    const invDiag = indices.map((idx) => 1 / Math.max(1e-6, subCov[idx][idx]));
+    const sumInv = invDiag.reduce((s, v2) => s + v2, 0);
+    const ivp = invDiag.map((v2) => v2 / sumInv);
+    let v = 0;
+    for (let a = 0; a < indices.length; a += 1) {
+      for (let b = 0; b < indices.length; b += 1) {
+        v += ivp[a] * subCov[indices[a]][indices[b]] * ivp[b];
+      }
+    }
+    return Math.max(1e-8, v);
+  };
+  const queue = [root];
+  while (queue.length > 0) {
+    const node2 = queue.shift();
+    if (!node2.left || !node2.right) continue;
+    const leftIdx = node2.left.members;
+    const rightIdx = node2.right.members;
+    const vLeft = clusterVariance(leftIdx);
+    const vRight = clusterVariance(rightIdx);
+    const alpha = 1 - vLeft / (vLeft + vRight);
+    for (const idx of leftIdx) weights[idx] = weights[idx] * alpha;
+    for (const idx of rightIdx) weights[idx] = weights[idx] * (1 - alpha);
+    if (node2.left.left && node2.left.right) queue.push(node2.left);
+    if (node2.right.left && node2.right.right) queue.push(node2.right);
+  }
+  const rawSum = weights.reduce((s, v) => s + v, 0);
+  const pct = weights.map((v) => rawSum > 0 ? v / rawSum * 100 : 100 / m);
+  const caps = riskyIdx.map((gIdx) => Math.max(2, Math.min(100, assets[gIdx].max_weight_pct || 100)));
+  const capTotal = caps.reduce((s, v) => s + v, 0);
+  if (capTotal >= 100) {
+    for (let pass = 0; pass < 8; pass += 1) {
+      let excess = 0;
+      let uncappedWeight = 0;
+      for (let i = 0; i < m; i += 1) {
+        if (pct[i] > caps[i] + 1e-6) {
+          excess += pct[i] - caps[i];
+          pct[i] = caps[i];
+        } else if (pct[i] < caps[i] - 1e-6) {
+          uncappedWeight += pct[i];
+        }
+      }
+      if (excess <= 1e-4 || uncappedWeight <= 1e-6) break;
+      for (let i = 0; i < m; i += 1) {
+        if (pct[i] < caps[i] - 1e-6) {
+          pct[i] = pct[i] + excess * (pct[i] / uncappedWeight);
+        }
+      }
+    }
+  }
+  const byTicker = {};
+  for (let i = 0; i < m; i += 1) {
+    const sym = assets[riskyIdx[i]].ticker;
+    byTicker[sym] = round((byTicker[sym] ?? 0) + pct[i], 1);
+  }
+  return {
+    weights_by_ticker: byTicker,
+    ordered_tickers: orderedLocal.map((localIdx) => assets[riskyIdx[localIdx]].ticker)
+  };
+}
+function mulberry32(seedInit) {
+  let a = seedInit >>> 0;
+  return () => {
+    a |= 0;
+    a = a + 1831565813 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function boxMullerPair(rng) {
+  const u1 = Math.max(1e-12, rng());
+  const u2 = rng();
+  const r = Math.sqrt(-2 * Math.log(u1));
+  const theta = 2 * Math.PI * u2;
+  return [r * Math.cos(theta), r * Math.sin(theta)];
+}
+function sampleStandardNormal(rng) {
+  return boxMullerPair(rng)[0];
+}
+function sampleStudentTScale(rng, df = 6) {
+  let chi2 = 0;
+  for (let i = 0; i < df; i += 2) {
+    const [z1, z2] = boxMullerPair(rng);
+    chi2 += z1 * z1;
+    if (i + 1 < df) chi2 += z2 * z2;
+  }
+  return Math.sqrt((df - 2) / Math.max(0.25, chi2));
+}
+function runCorrelatedWealthSimulation(params) {
+  const {
+    engineRequested,
+    blockLengthWeeks,
+    horizonYears,
+    simulations,
+    volMultiplier,
+    assets,
+    cholL,
+    baseStartVec,
+    simStartVec,
+    seed
+  } = params;
+  const n = assets.length;
+  const weeksPerYear = 52;
+  const totalWeeks = horizonYears * weeksPerYear;
+  const rng = mulberry32(seed);
+  const riskyWithHist = assets.map((a, idx) => ({ a, idx })).filter((x) => !x.a.is_cash && x.a.retMap.size >= 80);
+  let commonWeeks = [];
+  if (engineRequested === "block_bootstrap" && riskyWithHist.length > 0) {
+    const weekCounts = /* @__PURE__ */ new Map();
+    for (const item of riskyWithHist) {
+      for (const wk of item.a.retMap.keys()) {
+        weekCounts.set(wk, (weekCounts.get(wk) ?? 0) + 1);
+      }
+    }
+    const minNeeded = Math.max(1, Math.ceil(riskyWithHist.length * 0.75));
+    commonWeeks = Array.from(weekCounts.entries()).filter(([, cnt]) => cnt >= minNeeded).map(([wk]) => wk).sort();
+  }
+  const useBootstrap = engineRequested === "block_bootstrap" && commonWeeks.length >= 80;
+  const T = commonWeeks.length;
+  const hasHistMask = new Uint8Array(n);
+  const histShocks = [];
+  if (useBootstrap) {
+    for (let i = 0; i < n; i += 1) {
+      const a = assets[i];
+      const arr = new Float64Array(T);
+      if (!a.is_cash) {
+        let present = 0;
+        let sum = 0;
+        for (let t = 0; t < T; t += 1) {
+          const v = a.retMap.get(commonWeeks[t]);
+          if (v !== void 0) {
+            present += 1;
+            sum += v;
+          }
+        }
+        if (present >= Math.floor(T * 0.75)) {
+          hasHistMask[i] = 1;
+          const meanW = sum / present;
+          let sumSq = 0;
+          for (let t = 0; t < T; t += 1) {
+            const v = a.retMap.get(commonWeeks[t]);
+            const centered = v !== void 0 ? v - meanW : 0;
+            arr[t] = centered;
+            sumSq += centered * centered;
+          }
+          const empWeeklyVol = Math.sqrt(Math.max(1e-10, sumSq / Math.max(1, present - 1)));
+          const targetWeeklyVol = a.vol / Math.sqrt(weeksPerYear);
+          const scale = clamp(targetWeeklyVol / empWeeklyVol, 0.55 * volMultiplier, 1.65 * volMultiplier);
+          for (let t = 0; t < T; t += 1) {
+            arr[t] = arr[t] * scale;
+          }
+        }
+      }
+      histShocks.push(arr);
+    }
+  }
+  const baseYearSamples = Array.from({ length: horizonYears + 1 }, () => []);
+  const simYearSamples = Array.from({ length: horizonYears + 1 }, () => []);
+  const basePathMaxDd = [];
+  const simPathMaxDd = [];
+  const weeklyDrift = assets.map((a) => (a.mu - 0.5 * a.vol * a.vol) / weeksPerYear);
+  const invSqrt52 = 1 / Math.sqrt(weeksPerYear);
+  const pNewBlock = 1 / Math.max(2, Math.min(26, blockLengthWeeks));
+  const zStd = new Float64Array(n);
+  const baseCur = new Float64Array(n);
+  const simCur = new Float64Array(n);
+  let needParametric = !useBootstrap;
+  if (useBootstrap) {
+    for (let i = 0; i < n; i += 1) {
+      if (!assets[i].is_cash && hasHistMask[i] === 0) {
+        needParametric = true;
+        break;
+      }
+    }
+  }
+  for (let p = 0; p < simulations; p += 1) {
+    let bSum0 = 0;
+    let sSum0 = 0;
+    for (let i = 0; i < n; i += 1) {
+      baseCur[i] = baseStartVec[i];
+      simCur[i] = simStartVec[i];
+      bSum0 += baseCur[i];
+      sSum0 += simCur[i];
+    }
+    baseYearSamples[0].push(bSum0);
+    simYearSamples[0].push(sSum0);
+    let bPeak = Math.max(1e-6, bSum0);
+    let sPeak = Math.max(1e-6, sSum0);
+    let bMaxDd = 0;
+    let sMaxDd = 0;
+    let histIdx = useBootstrap ? Math.floor(rng() * T) : 0;
+    for (let wk = 1; wk <= totalWeeks; wk += 1) {
+      if (useBootstrap && wk > 1) {
+        histIdx = rng() < pNewBlock ? Math.floor(rng() * T) : (histIdx + 1) % T;
+      }
+      let tScale = 1;
+      if (needParametric) {
+        for (let i = 0; i < n; i += 1) zStd[i] = sampleStandardNormal(rng);
+        tScale = sampleStudentTScale(rng, 6);
+      }
+      let bSum = 0;
+      let sSum = 0;
+      for (let i = 0; i < n; i += 1) {
+        const a = assets[i];
+        let wkShock = 0;
+        if (a.is_cash) {
+          wkShock = 0;
+        } else if (useBootstrap && hasHistMask[i] === 1) {
+          wkShock = histShocks[i][histIdx];
+        } else {
+          let dot = 0;
+          const rowL = cholL[i];
+          for (let k = 0; k <= i; k += 1) dot += rowL[k] * zStd[k];
+          wkShock = dot * invSqrt52 * tScale;
+        }
+        const logRet = clamp(weeklyDrift[i] + wkShock, -0.45, 0.45);
+        const growth = Math.exp(logRet);
+        baseCur[i] = baseCur[i] * growth;
+        simCur[i] = simCur[i] * growth;
+        bSum += baseCur[i];
+        sSum += simCur[i];
+      }
+      if (bSum > bPeak) bPeak = bSum;
+      const bDd = (bSum - bPeak) / bPeak;
+      if (bDd < bMaxDd) bMaxDd = bDd;
+      if (sSum > sPeak) sPeak = sSum;
+      const sDd = (sSum - sPeak) / sPeak;
+      if (sDd < sMaxDd) sMaxDd = sDd;
+      if (wk % weeksPerYear === 0) {
+        const yr = wk / weeksPerYear;
+        baseYearSamples[yr].push(bSum);
+        simYearSamples[yr].push(sSum);
+      }
+    }
+    basePathMaxDd.push(round(bMaxDd * 100, 2));
+    simPathMaxDd.push(round(sMaxDd * 100, 2));
+  }
+  return {
+    engine_used: useBootstrap ? "block_bootstrap" : "student_t",
+    aligned_weeks: T,
+    base_year_samples: baseYearSamples,
+    sim_year_samples: simYearSamples,
+    base_path_max_dd_pct: basePathMaxDd,
+    sim_path_max_dd_pct: simPathMaxDd
+  };
+}
+function computeDeflatedSharpeRatio(params) {
+  const { annualizedSharpe, weeklyReturns } = params;
+  const T = weeklyReturns.length;
+  const M = Math.max(1, Math.round(params.trialsTested || 1));
+  const moments = computeHigherMoments(weeklyReturns);
+  if (T < 8) {
+    return {
+      dsr_prob_pct: 50,
+      trials_tested: M,
+      sr0_annual_threshold: 0,
+      skewness: moments.skewness,
+      excess_kurtosis: moments.excess_kurtosis
+    };
+  }
+  const srWeekly = annualizedSharpe / Math.sqrt(52);
+  const eulerGamma = 0.5772156649;
+  const srTrialStdAnn = Math.sqrt(Math.max(0.04, params.crossTrialAnnualSharpeVar ?? 0.25));
+  let sr0Ann = 0;
+  if (M > 1) {
+    const z1 = normalInvCdf(1 - 1 / M);
+    const z2 = normalInvCdf(1 - 1 / (M * Math.E));
+    sr0Ann = Math.max(0, srTrialStdAnn * ((1 - eulerGamma) * z1 + eulerGamma * z2));
+  }
+  const sr0Weekly = sr0Ann / Math.sqrt(52);
+  const denomInner = 1 - moments.skewness * srWeekly + (moments.excess_kurtosis + 2) / 4 * srWeekly * srWeekly;
+  const denom = Math.sqrt(Math.max(0.1, denomInner));
+  const zScore = (srWeekly - sr0Weekly) * Math.sqrt(T - 1) / denom;
+  const probPct = round(normalCdf(zScore) * 100, 1);
+  return {
+    dsr_prob_pct: probPct,
+    trials_tested: M,
+    sr0_annual_threshold: round(sr0Ann, 2),
+    skewness: moments.skewness,
+    excess_kurtosis: moments.excess_kurtosis
+  };
+}
+
 // src/server/quant.ts
 var SHARE_CLASS_GROUPS = {
   GOOG: { canonical: "GOOG/GOOGL", members: ["GOOGL", "GOOG"] },
@@ -34929,7 +35746,7 @@ var KNOWN_US_ETF_TICKERS = /* @__PURE__ */ new Set([
   "QQQM",
   "SPLG"
 ]);
-function round(value, decimals = 2) {
+function round2(value, decimals = 2) {
   const factor = 10 ** decimals;
   return Math.round((value + Number.EPSILON) * factor) / factor;
 }
@@ -34947,7 +35764,7 @@ function memberTickersForCanonical(canonical) {
 function computeUsEstateTaxNra(usSitusUsd) {
   if (!Number.isFinite(usSitusUsd) || usSitusUsd <= 6e4) {
     return {
-      us_situs_usd: round(Math.max(0, usSitusUsd || 0), 2),
+      us_situs_usd: round2(Math.max(0, usSitusUsd || 0), 2),
       taxable_excess_over_60k_usd: 0,
       tentative_tax_usd: 0,
       unified_credit_usd: 13e3,
@@ -34985,20 +35802,20 @@ function computeUsEstateTaxNra(usSitusUsd) {
   }
   const netTax = Math.max(0, tentative - 13e3);
   return {
-    us_situs_usd: round(usSitusUsd, 2),
-    taxable_excess_over_60k_usd: round(usSitusUsd - 6e4, 2),
-    tentative_tax_usd: round(tentative, 2),
+    us_situs_usd: round2(usSitusUsd, 2),
+    taxable_excess_over_60k_usd: round2(usSitusUsd - 6e4, 2),
+    tentative_tax_usd: round2(tentative, 2),
     unified_credit_usd: 13e3,
-    net_estate_tax_usd: round(netTax, 2),
-    effective_rate_pct: round(netTax / usSitusUsd * 100, 2),
-    marginal_rate_pct: round(marginal * 100, 1)
+    net_estate_tax_usd: round2(netTax, 2),
+    effective_rate_pct: round2(netTax / usSitusUsd * 100, 2),
+    marginal_rate_pct: round2(marginal * 100, 1)
   };
 }
 function computeAfterTaxHurdle(profile, usSitus, dividendYieldPct = 0, marginalEstateRatePct, opts) {
   const bench = profile.benchmark;
-  const benchmarkCagrPct = round(bench.expected_cagr_pct ?? 8, 2);
-  const alphaBufferPct = round(bench.alpha_buffer_pct ?? 2.5, 2);
-  const hurdleCagrPct = round(benchmarkCagrPct + alphaBufferPct, 2);
+  const benchmarkCagrPct = round2(bench.expected_cagr_pct ?? 8, 2);
+  const alphaBufferPct = round2(bench.alpha_buffer_pct ?? 2.5, 2);
+  const hurdleCagrPct = round2(benchmarkCagrPct + alphaBufferPct, 2);
   const safeDivYield = Number.isFinite(dividendYieldPct) && dividendYieldPct > 0 ? dividendYieldPct : 0;
   const accumulating = Boolean(opts?.accumulating);
   let effectiveWhtPct = 0;
@@ -35009,30 +35826,30 @@ function computeAfterTaxHurdle(profile, usSitus, dividendYieldPct = 0, marginalE
       effectiveWhtPct = usSitus ? profile.tax_profile.us_dividend_wht_pct : profile.tax_profile.ucits_dividend_wht_pct;
     }
   }
-  const divWhtDragPct = accumulating ? 0 : round(safeDivYield * effectiveWhtPct / 100, 2);
+  const divWhtDragPct = accumulating ? 0 : round2(safeDivYield * effectiveWhtPct / 100, 2);
   const resolvedMarginal = marginalEstateRatePct !== null && marginalEstateRatePct !== void 0 && Number.isFinite(marginalEstateRatePct) ? marginalEstateRatePct : 34;
   let estateTaxDragPct = 0;
   let estateTaxDragMode = "none";
   if (profile.tax_profile.nra_us_estate_tax_enabled && usSitus) {
     if (bench.estate_tax_annual_drag_pct !== null && bench.estate_tax_annual_drag_pct !== void 0) {
-      estateTaxDragPct = round(bench.estate_tax_annual_drag_pct, 2);
+      estateTaxDragPct = round2(bench.estate_tax_annual_drag_pct, 2);
       estateTaxDragMode = "override";
     } else if (resolvedMarginal <= 0) {
       estateTaxDragPct = 0;
       estateTaxDragMode = bench.estate_tax_drag_mode ?? "hedge";
     } else if ((bench.estate_tax_drag_mode ?? "hedge") === "hedge") {
       const hedgeBps = Number.isFinite(bench.estate_tax_hedge_bps) ? bench.estate_tax_hedge_bps : 35;
-      estateTaxDragPct = round(Math.max(0, hedgeBps) / 100, 2);
+      estateTaxDragPct = round2(Math.max(0, hedgeBps) / 100, 2);
       estateTaxDragMode = "hedge";
     } else {
       const rateFrac = Math.min(0.4, Math.max(0, resolvedMarginal / 100));
       const years = Math.max(1, bench.estate_tax_amortize_years || 20);
-      estateTaxDragPct = round((1 - Math.pow(1 - rateFrac, 1 / years)) * 100, 2);
+      estateTaxDragPct = round2((1 - Math.pow(1 - rateFrac, 1 / years)) * 100, 2);
       estateTaxDragMode = "amortized";
     }
   }
-  const totalTaxDragPct = round(divWhtDragPct + estateTaxDragPct, 2);
-  const requiredGrossCagrPct = round(hurdleCagrPct + totalTaxDragPct, 2);
+  const totalTaxDragPct = round2(divWhtDragPct + estateTaxDragPct, 2);
+  const requiredGrossCagrPct = round2(hurdleCagrPct + totalTaxDragPct, 2);
   return {
     benchmark_ticker: bench.ticker,
     benchmark_label: bench.label,
@@ -35041,8 +35858,8 @@ function computeAfterTaxHurdle(profile, usSitus, dividendYieldPct = 0, marginalE
     hurdle_cagr_pct: hurdleCagrPct,
     us_situs: usSitus,
     accumulating,
-    dividend_yield_pct: round(safeDivYield, 2),
-    effective_wht_pct: round(effectiveWhtPct, 2),
+    dividend_yield_pct: round2(safeDivYield, 2),
+    effective_wht_pct: round2(effectiveWhtPct, 2),
     div_wht_drag_pct: divWhtDragPct,
     estate_tax_drag_mode: estateTaxDragMode,
     estate_tax_drag_pct: estateTaxDragPct,
@@ -35063,12 +35880,12 @@ function computeScenarioSummary(price, model, taxInfo, opts) {
     const c = rawCases[label];
     const ratio = c.target_price_5y / price;
     const priceCagrPct = ratio > 0 ? (Math.pow(ratio, 1 / horizon) - 1) * 100 : -95;
-    const grossPct = round(priceCagrPct + rawDivYieldPct, 2);
-    const afterTaxPct = round(grossPct - taxInfo.total_tax_drag_pct, 2);
+    const grossPct = round2(priceCagrPct + rawDivYieldPct, 2);
+    const afterTaxPct = round2(grossPct - taxInfo.total_tax_drag_pct, 2);
     return {
       label,
-      probability: round(c.probability, 4),
-      target_price_5y: round(c.target_price_5y, 2),
+      probability: round2(c.probability, 4),
+      target_price_5y: round2(c.target_price_5y, 2),
       multiple: c.multiple ?? null,
       metric_cagr_pct: c.metric_cagr_pct ?? null,
       summary: c.summary,
@@ -35095,23 +35912,23 @@ function computeScenarioSummary(price, model, taxInfo, opts) {
     expectedTerminalAfterTax += w * price * Math.pow(Math.max(0.01, 1 + rAfterTax), horizon);
     logAfterTaxSum += w * Math.log(Math.max(0.05, 1 + rAfterTax));
   }
-  const expectedPrice5y = round(expectedPrice, 2);
-  const expectedGrossCagrPct = round(
+  const expectedPrice5y = round2(expectedPrice, 2);
+  const expectedGrossCagrPct = round2(
     (Math.pow(Math.max(1e-4, expectedTerminalGross / price), 1 / horizon) - 1) * 100,
     2
   );
-  const expectedAfterTaxCagrPct = round(
+  const expectedAfterTaxCagrPct = round2(
     (Math.pow(Math.max(1e-4, expectedTerminalAfterTax / price), 1 / horizon) - 1) * 100,
     2
   );
-  const standaloneKellyCagrPct = round((Math.exp(logAfterTaxSum) - 1) * 100, 2);
+  const standaloneKellyCagrPct = round2((Math.exp(logAfterTaxSum) - 1) * 100, 2);
   const dispersionDragBps = Math.max(0, Math.round((expectedAfterTaxCagrPct - standaloneKellyCagrPct) * 100));
-  const spreadVsBenchmark = round(expectedAfterTaxCagrPct - taxInfo.benchmark_cagr_pct, 2);
-  const spreadVsHurdle = round(expectedAfterTaxCagrPct - taxInfo.hurdle_cagr_pct, 2);
+  const spreadVsBenchmark = round2(expectedAfterTaxCagrPct - taxInfo.benchmark_cagr_pct, 2);
+  const spreadVsHurdle = round2(expectedAfterTaxCagrPct - taxInfo.hurdle_cagr_pct, 2);
   const valuationWarnings = [];
   const isSingleStock = !opts?.isEtf && !isAccumulating;
   if (isSingleStock) {
-    const bearTotalRetPct = round((bear.target_price_5y - price) / price * 100, 1);
+    const bearTotalRetPct = round2((bear.target_price_5y - price) / price * 100, 1);
     if (bearTotalRetPct > -10) {
       valuationWarnings.push(
         `Bear case implies ${bearTotalRetPct >= 0 ? "+" : ""}${bearTotalRetPct}% 5Y price return (> -10%); single-stock downside may be cushioned.`
@@ -35120,7 +35937,7 @@ function computeScenarioSummary(price, model, taxInfo, opts) {
   }
   const rd = model.reverse_dcf;
   if (rd?.current_revenue_b && rd.current_revenue_b > 0 && rd.shares_diluted_m && rd.shares_diluted_m > 0) {
-    const impliedCurMarginPct = round(
+    const impliedCurMarginPct = round2(
       rd.current_metric_per_share * rd.shares_diluted_m / 1e3 / rd.current_revenue_b * 100,
       1
     );
@@ -35132,7 +35949,7 @@ function computeScenarioSummary(price, model, taxInfo, opts) {
     const xbrlMargin = rd.basis === "fcf" ? opts?.fundamentals?.latest_ratios.fcf_margin_pct : opts?.fundamentals?.latest_ratios.operating_margin_pct;
     if (typeof xbrlMargin === "number" && Number.isFinite(xbrlMargin) && Math.abs(impliedCurMarginPct - xbrlMargin) >= 20) {
       valuationWarnings.push(
-        `Implied current ${rd.basis.toUpperCase()} margin (${impliedCurMarginPct}%) diverges by ${round(Math.abs(impliedCurMarginPct - xbrlMargin), 1)}pp from XBRL (${round(xbrlMargin, 1)}%).`
+        `Implied current ${rd.basis.toUpperCase()} margin (${impliedCurMarginPct}%) diverges by ${round2(Math.abs(impliedCurMarginPct - xbrlMargin), 1)}pp from XBRL (${round2(xbrlMargin, 1)}%).`
       );
     }
   }
@@ -35140,7 +35957,7 @@ function computeScenarioSummary(price, model, taxInfo, opts) {
     let baseRevWarned = false;
     if (rd.base_revenue_cagr_pct !== null && rd.base_revenue_cagr_pct !== void 0 && rd.base_revenue_cagr_pct > 15) {
       valuationWarnings.push(
-        `Base revenue CAGR (${rd.base_revenue_cagr_pct}%) exceeds 15% outside-view cap on $${round(rd.current_revenue_b, 1)}B revenue base.`
+        `Base revenue CAGR (${rd.base_revenue_cagr_pct}%) exceeds 15% outside-view cap on $${round2(rd.current_revenue_b, 1)}B revenue base.`
       );
       baseRevWarned = true;
     }
@@ -35153,7 +35970,7 @@ function computeScenarioSummary(price, model, taxInfo, opts) {
         const impliedCaseRevCagr = (Math.pow(Math.max(1e-4, impliedRevNB / rd.current_revenue_b), 1 / horizon) - 1) * 100;
         if (impliedCaseRevCagr > 15 && !(sc.label === "base" && baseRevWarned)) {
           valuationWarnings.push(
-            `${sc.label.toUpperCase()} scenario implies ${round(impliedCaseRevCagr, 1)}% 5Y revenue CAGR (>15% guardrail above $25B revenue).`
+            `${sc.label.toUpperCase()} scenario implies ${round2(impliedCaseRevCagr, 1)}% 5Y revenue CAGR (>15% guardrail above $25B revenue).`
           );
         }
       }
@@ -35165,7 +35982,7 @@ function computeScenarioSummary(price, model, taxInfo, opts) {
       const termMcapB = sc.target_price_5y * sharesN / 1e3;
       if (termMcapB > 5e3) {
         valuationWarnings.push(
-          `${sc.label.toUpperCase()} scenario implies $${round(termMcapB / 1e3, 2)}T terminal market cap (> $5T outside-view guardrail).`
+          `${sc.label.toUpperCase()} scenario implies $${round2(termMcapB / 1e3, 2)}T terminal market cap (> $5T outside-view guardrail).`
         );
       }
     }
@@ -35174,12 +35991,12 @@ function computeScenarioSummary(price, model, taxInfo, opts) {
   const oeMarginXbrl = opts?.fundamentals?.latest_ratios.owner_earnings_margin_pct;
   if (isSingleStock && typeof fcfMarginXbrl === "number" && typeof oeMarginXbrl === "number" && fcfMarginXbrl - oeMarginXbrl >= 8) {
     valuationWarnings.push(
-      `Headline FCF margin (${round(fcfMarginXbrl, 1)}%) exceeds SBC-adjusted Owner Earnings (${round(oeMarginXbrl, 1)}%) by ${round(fcfMarginXbrl - oeMarginXbrl, 1)}pp; verify dilution drag.`
+      `Headline FCF margin (${round2(fcfMarginXbrl, 1)}%) exceeds SBC-adjusted Owner Earnings (${round2(oeMarginXbrl, 1)}%) by ${round2(fcfMarginXbrl - oeMarginXbrl, 1)}pp; verify dilution drag.`
     );
   }
   return {
     horizon_years: horizon,
-    price_used: round(price, 4),
+    price_used: round2(price, 4),
     tax_info: taxInfo,
     cases: { bear, base, bull },
     expected_price_5y: expectedPrice5y,
@@ -35199,7 +36016,7 @@ function computeReverseDcf(price, model, taxInfo, opts) {
   }
   const rd = model.reverse_dcf;
   const horizon = Math.max(1, model.horizon_years || 5);
-  const reqGrossPct = round(taxInfo.hurdle_cagr_pct + taxInfo.total_tax_drag_pct, 2);
+  const reqGrossPct = round2(taxInfo.hurdle_cagr_pct + taxInfo.total_tax_drag_pct, 2);
   const isAccumulating = Boolean(model.accumulating || taxInfo.accumulating);
   const divYieldPct = !isAccumulating && Number.isFinite(model.dividend_yield_pct) && model.dividend_yield_pct > 0 ? model.dividend_yield_pct : 0;
   const reqPriceCagrPct = Math.max(-50, reqGrossPct - divYieldPct);
@@ -35216,12 +36033,12 @@ function computeReverseDcf(price, model, taxInfo, opts) {
   const currentMultiple = evPerShare0 / rd.current_metric_per_share;
   const impliedMetricPerShare = evPerShare5y / rd.exit_multiple;
   const impliedMetricCagrPct = (Math.pow(Math.max(1e-4, impliedMetricPerShare / rd.current_metric_per_share), 1 / horizon) - 1) * 100;
-  const multipleExpansionCagrPct = round(
+  const multipleExpansionCagrPct = round2(
     (Math.pow(Math.max(1e-4, rd.exit_multiple / currentMultiple), 1 / horizon) - 1) * 100,
     2
   );
   const opValCagrFactor = Math.pow(Math.max(1e-4, evPerShare5y / evPerShare0), 1 / horizon);
-  const constantMultMarginRevCagrPct = round((opValCagrFactor * (1 + dilFrac) - 1) * 100, 2);
+  const constantMultMarginRevCagrPct = round2((opValCagrFactor * (1 + dilFrac) - 1) * 100, 2);
   let impliedCurrentMarginPct = null;
   let marginExpansionCagrPct = null;
   let impliedRev5yB = null;
@@ -35229,42 +36046,42 @@ function computeReverseDcf(price, model, taxInfo, opts) {
   let revCagrGapPct = null;
   if (rd.current_revenue_b && rd.current_revenue_b > 0 && shares0M !== null) {
     const currentMetricTotalB = rd.current_metric_per_share * shares0M / 1e3;
-    impliedCurrentMarginPct = round(currentMetricTotalB / rd.current_revenue_b * 100, 2);
+    impliedCurrentMarginPct = round2(currentMetricTotalB / rd.current_revenue_b * 100, 2);
     if (rd.target_margin_pct && rd.target_margin_pct > 0 && shares5yM !== null) {
       if (impliedCurrentMarginPct > 0) {
-        marginExpansionCagrPct = round(
+        marginExpansionCagrPct = round2(
           (Math.pow(Math.max(1e-4, rd.target_margin_pct / impliedCurrentMarginPct), 1 / horizon) - 1) * 100,
           2
         );
       }
       const impliedMetricTotal5yB = impliedMetricPerShare * shares5yM / 1e3;
-      impliedRev5yB = round(impliedMetricTotal5yB / (rd.target_margin_pct / 100), 2);
-      impliedRevCagrPct = round(
+      impliedRev5yB = round2(impliedMetricTotal5yB / (rd.target_margin_pct / 100), 2);
+      impliedRevCagrPct = round2(
         (Math.pow(Math.max(1e-4, impliedRev5yB / rd.current_revenue_b), 1 / horizon) - 1) * 100,
         2
       );
       if (rd.base_revenue_cagr_pct !== null && rd.base_revenue_cagr_pct !== void 0) {
-        revCagrGapPct = round(rd.base_revenue_cagr_pct - impliedRevCagrPct, 2);
+        revCagrGapPct = round2(rd.base_revenue_cagr_pct - impliedRevCagrPct, 2);
       }
     }
   }
-  const consensusRevGrowth = opts?.consensusRevGrowthPct !== null && opts?.consensusRevGrowthPct !== void 0 && Number.isFinite(opts.consensusRevGrowthPct) ? round(opts.consensusRevGrowthPct, 2) : null;
-  const expectationsGapVsConsensus = consensusRevGrowth !== null && impliedRevCagrPct !== null ? round(consensusRevGrowth - impliedRevCagrPct, 2) : null;
+  const consensusRevGrowth = opts?.consensusRevGrowthPct !== null && opts?.consensusRevGrowthPct !== void 0 && Number.isFinite(opts.consensusRevGrowthPct) ? round2(opts.consensusRevGrowthPct, 2) : null;
+  const expectationsGapVsConsensus = consensusRevGrowth !== null && impliedRevCagrPct !== null ? round2(consensusRevGrowth - impliedRevCagrPct, 2) : null;
   return {
     basis: rd.basis,
     horizon_years: horizon,
-    price_used: round(price, 4),
+    price_used: round2(price, 4),
     required_gross_cagr_pct: reqGrossPct,
     hurdle_cagr_pct: taxInfo.hurdle_cagr_pct,
     total_tax_drag_pct: taxInfo.total_tax_drag_pct,
-    implied_target_price_5y: round(impliedTargetPrice, 2),
-    current_multiple: round(currentMultiple, 2),
-    exit_multiple: round(rd.exit_multiple, 2),
-    current_metric_per_share: round(rd.current_metric_per_share, 4),
-    implied_metric_per_share_5y: round(impliedMetricPerShare, 2),
-    implied_metric_cagr_pct: round(impliedMetricCagrPct, 2),
+    implied_target_price_5y: round2(impliedTargetPrice, 2),
+    current_multiple: round2(currentMultiple, 2),
+    exit_multiple: round2(rd.exit_multiple, 2),
+    current_metric_per_share: round2(rd.current_metric_per_share, 4),
+    implied_metric_per_share_5y: round2(impliedMetricPerShare, 2),
+    implied_metric_cagr_pct: round2(impliedMetricCagrPct, 2),
     net_cash_b: netCashB,
-    annual_dilution_pct: round(annualDilPct, 2),
+    annual_dilution_pct: round2(annualDilPct, 2),
     implied_current_margin_pct: impliedCurrentMarginPct,
     multiple_expansion_cagr_pct: multipleExpansionCagrPct,
     margin_expansion_cagr_pct: marginExpansionCagrPct,
@@ -35284,18 +36101,18 @@ function computeReverseDcf(price, model, taxInfo, opts) {
 }
 function percentile(sorted, p) {
   if (sorted.length === 0) return null;
-  if (sorted.length === 1) return round(sorted[0], 2);
+  if (sorted.length === 1) return round2(sorted[0], 2);
   const idx = (sorted.length - 1) * p;
   const lo = Math.floor(idx);
   const hi = Math.ceil(idx);
   const frac = idx - lo;
   const val = sorted[lo] * (1 - frac) + sorted[hi] * frac;
-  return round(val, 2);
+  return round2(val, 2);
 }
 function buildBand(values, current) {
   const sorted = [...values].sort((a, b) => a - b);
   return {
-    current: current !== null && Number.isFinite(current) && current > 0 ? round(current, 2) : null,
+    current: current !== null && Number.isFinite(current) && current > 0 ? round2(current, 2) : null,
     p10: sorted.length >= 4 ? percentile(sorted, 0.1) : null,
     median: sorted.length >= 4 ? percentile(sorted, 0.5) : null,
     p90: sorted.length >= 4 ? percentile(sorted, 0.9) : null,
@@ -35409,7 +36226,7 @@ function evaluateHypothesisRule(rule, fundamentals, edgarRows, insiders, marketE
       const fy = fundamentals.annual[0];
       if (fy) {
         periodLabel = fy.period_end;
-        if (metric === "revenue_b" && typeof fy.revenue_m === "number") observed = round(fy.revenue_m / 1e3, 3);
+        if (metric === "revenue_b" && typeof fy.revenue_m === "number") observed = round2(fy.revenue_m / 1e3, 3);
         else {
           const val = fy[metric];
           if (typeof val === "number" && Number.isFinite(val)) observed = val;
@@ -35430,15 +36247,15 @@ function evaluateHypothesisRule(rule, fundamentals, edgarRows, insiders, marketE
         const ttmOcf = sumField("ocf_m");
         const ttmFcf = sumField("fcf_m");
         const ttmSbc = sumField("sbc_m");
-        if (metric === "gross_margin_pct" && ttmRev && ttmRev > 0 && ttmGp !== null) observed = round(ttmGp / ttmRev * 100, 2);
-        else if (metric === "operating_margin_pct" && ttmRev && ttmRev > 0 && ttmOp !== null) observed = round(ttmOp / ttmRev * 100, 2);
-        else if (metric === "fcf_margin_pct" && ttmRev && ttmRev > 0 && ttmFcf !== null) observed = round(ttmFcf / ttmRev * 100, 2);
+        if (metric === "gross_margin_pct" && ttmRev && ttmRev > 0 && ttmGp !== null) observed = round2(ttmGp / ttmRev * 100, 2);
+        else if (metric === "operating_margin_pct" && ttmRev && ttmRev > 0 && ttmOp !== null) observed = round2(ttmOp / ttmRev * 100, 2);
+        else if (metric === "fcf_margin_pct" && ttmRev && ttmRev > 0 && ttmFcf !== null) observed = round2(ttmFcf / ttmRev * 100, 2);
         else if (metric === "owner_earnings_margin_pct" && ttmRev && ttmRev > 0 && ttmFcf !== null) {
           const oe = ttmSbc !== null ? ttmFcf - ttmSbc : ttmFcf;
-          observed = round(oe / ttmRev * 100, 2);
-        } else if (metric === "ocf_to_ni_pct" && ttmNi && ttmNi > 0 && ttmOcf !== null) observed = round(ttmOcf / ttmNi * 100, 2);
-        else if (metric === "sbc_pct_rev" && ttmRev && ttmRev > 0 && ttmSbc !== null) observed = round(ttmSbc / ttmRev * 100, 2);
-        else if (metric === "revenue_b" && ttmRev !== null) observed = round(ttmRev / 1e3, 3);
+          observed = round2(oe / ttmRev * 100, 2);
+        } else if (metric === "ocf_to_ni_pct" && ttmNi && ttmNi > 0 && ttmOcf !== null) observed = round2(ttmOcf / ttmNi * 100, 2);
+        else if (metric === "sbc_pct_rev" && ttmRev && ttmRev > 0 && ttmSbc !== null) observed = round2(ttmSbc / ttmRev * 100, 2);
+        else if (metric === "revenue_b" && ttmRev !== null) observed = round2(ttmRev / 1e3, 3);
         else {
           const fromRatios = fundamentals.latest_ratios[metric];
           if (typeof fromRatios === "number" && Number.isFinite(fromRatios)) observed = fromRatios;
@@ -35455,7 +36272,7 @@ function evaluateHypothesisRule(rule, fundamentals, edgarRows, insiders, marketE
       if (q0) {
         periodLabel = q0.period_end;
         if (metric === "revenue_b" && typeof q0.revenue_m === "number") {
-          observed = round(q0.revenue_m / 1e3, 3);
+          observed = round2(q0.revenue_m / 1e3, 3);
         } else {
           const qVal = q0[metric];
           if (typeof qVal === "number" && Number.isFinite(qVal)) {
@@ -35484,10 +36301,10 @@ function evaluateHypothesisRule(rule, fundamentals, edgarRows, insiders, marketE
     }
     const passed2 = compareRuleOp(observed, rule.op, rule.threshold);
     return {
-      observed: round(observed, 2),
+      observed: round2(observed, 2),
       period: periodLabel,
       passed: passed2,
-      detail: `XBRL ${rule.metric} = ${round(observed, 2)} (${periodLabel ?? rule.period}${overrideUsed ? ", override" : ""}) vs ${opStr} -> ${passed2 ? "PASS" : "BREACH"}`,
+      detail: `XBRL ${rule.metric} = ${round2(observed, 2)} (${periodLabel ?? rule.period}${overrideUsed ? ", override" : ""}) vs ${opStr} -> ${passed2 ? "PASS" : "BREACH"}`,
       source: "xbrl"
     };
   }
@@ -35552,8 +36369,8 @@ function evaluateHypothesisRule(rule, fundamentals, edgarRows, insiders, marketE
       disc_buy_12m_usd: insiders.window_12m.disc_buy_usd,
       disc_sell_12m_usd: insiders.window_12m.disc_sell_usd,
       plan_sell_12m_usd: insiders.window_12m.plan_sell_usd,
-      net_disc_90d_usd: round(insiders.window_90d.disc_buy_usd - insiders.window_90d.disc_sell_usd, 2),
-      net_disc_12m_usd: round(insiders.window_12m.disc_buy_usd - insiders.window_12m.disc_sell_usd, 2)
+      net_disc_90d_usd: round2(insiders.window_90d.disc_buy_usd - insiders.window_90d.disc_sell_usd, 2),
+      net_disc_12m_usd: round2(insiders.window_12m.disc_buy_usd - insiders.window_12m.disc_sell_usd, 2)
     };
     const observed = map3[metric] ?? null;
     if (observed === null) {
@@ -35595,10 +36412,10 @@ function evaluateHypothesisRule(rule, fundamentals, edgarRows, insiders, marketE
   }
   const passed = compareRuleOp(mVal, rule.op, rule.threshold);
   return {
-    observed: round(mVal, 2),
+    observed: round2(mVal, 2),
     period: marketEntry.quote_time?.slice(0, 10) ?? null,
     passed,
-    detail: `Market ${rule.metric} = ${round(mVal, 2)} vs ${opStr} -> ${passed ? "PASS" : "BREACH"}`,
+    detail: `Market ${rule.metric} = ${round2(mVal, 2)} vs ${opStr} -> ${passed ? "PASS" : "BREACH"}`,
     source: "market"
   };
 }
@@ -35663,12 +36480,12 @@ function computeDipTriage(thesis, price, scenarioSummary, riskCaps, profile, edg
       }
     }
   }
-  const singleRoomRounded = round(singleNameRoomPct, 2);
-  const portfolioRoomRounded = round(portfolioCapRoomPct, 2);
+  const singleRoomRounded = round2(singleNameRoomPct, 2);
+  const portfolioRoomRounded = round2(portfolioCapRoomPct, 2);
   const roomPct = portfolioRoomRounded;
-  const roomBase = round(Math.max(0, roomPct / 100) * Math.max(0, navBase), 2);
-  const roomUsd = usdToBaseFx > 0 ? round(roomBase / usdToBaseFx, 2) : 0;
-  const availableFundingBase = opts?.availableFundingBase !== null && opts?.availableFundingBase !== void 0 && Number.isFinite(opts.availableFundingBase) ? round(Math.max(0, opts.availableFundingBase), 2) : null;
+  const roomBase = round2(Math.max(0, roomPct / 100) * Math.max(0, navBase), 2);
+  const roomUsd = usdToBaseFx > 0 ? round2(roomBase / usdToBaseFx, 2) : 0;
+  const availableFundingBase = opts?.availableFundingBase !== null && opts?.availableFundingBase !== void 0 && Number.isFinite(opts.availableFundingBase) ? round2(Math.max(0, opts.availableFundingBase), 2) : null;
   let capStatus = "PASS";
   let capNote = `${roomPct.toFixed(1)}% NAV room under ${bindingLabel}`;
   if (roomPct <= 0) {
@@ -35698,7 +36515,7 @@ function computeDipTriage(thesis, price, scenarioSummary, riskCaps, profile, edg
     hurdleStatus = "CORE_ANCHOR";
     hurdleExpectedCagr = scenarioSummary ? scenarioSummary.expected_after_tax_cagr_pct : profile.benchmark.expected_cagr_pct;
     hurdleTargetCagr = profile.benchmark.expected_cagr_pct;
-    hurdleSpread = round((hurdleExpectedCagr ?? profile.benchmark.expected_cagr_pct) - profile.benchmark.expected_cagr_pct, 2);
+    hurdleSpread = round2((hurdleExpectedCagr ?? profile.benchmark.expected_cagr_pct) - profile.benchmark.expected_cagr_pct, 2);
     hurdleNote = `Core benchmark anchor (${profile.benchmark.expected_cagr_pct.toFixed(1)}% expected CAGR; exempt from +${profile.benchmark.alpha_buffer_pct.toFixed(1)}% alpha buffer)`;
   } else if (scenarioSummary) {
     const spread = scenarioSummary.spread_vs_hurdle_pct;
@@ -35723,35 +36540,35 @@ function computeDipTriage(thesis, price, scenarioSummary, riskCaps, profile, edg
     for (const tr of thesis.tranches) {
       tranchePlan.push({
         label: tr.label,
-        price: round(tr.price, 2),
-        pct_of_add: round(tr.pct_of_add, 1),
-        amount_base: round(deployableBudgetBase * (tr.pct_of_add / 100), 2),
+        price: round2(tr.price, 2),
+        pct_of_add: round2(tr.pct_of_add, 1),
+        amount_base: round2(deployableBudgetBase * (tr.pct_of_add / 100), 2),
         note: annotateTrancheNote(tr.note)
       });
     }
   } else if (thesis.buy_zone_low !== null && thesis.buy_zone_high !== null && thesis.buy_zone_high > 0 && thesis.buy_zone_low >= 0 && thesis.buy_zone_high >= thesis.buy_zone_low) {
     if (thesis.buy_zone_high > thesis.buy_zone_low) {
-      const mid = round((thesis.buy_zone_low + thesis.buy_zone_high) / 2, 2);
+      const mid = round2((thesis.buy_zone_low + thesis.buy_zone_high) / 2, 2);
       tranchePlan.push(
         {
           label: "Tranche 1 (Top of Zone)",
-          price: round(thesis.buy_zone_high, 2),
+          price: round2(thesis.buy_zone_high, 2),
           pct_of_add: 35,
-          amount_base: round(deployableBudgetBase * 0.35, 2),
+          amount_base: round2(deployableBudgetBase * 0.35, 2),
           note: annotateTrancheNote()
         },
         {
           label: "Tranche 2 (Mid-Zone)",
           price: mid,
           pct_of_add: 40,
-          amount_base: round(deployableBudgetBase * 0.4, 2),
+          amount_base: round2(deployableBudgetBase * 0.4, 2),
           note: annotateTrancheNote()
         },
         {
           label: "Tranche 3 (Deep Value)",
-          price: round(thesis.buy_zone_low, 2),
+          price: round2(thesis.buy_zone_low, 2),
           pct_of_add: 25,
-          amount_base: round(deployableBudgetBase * 0.25, 2),
+          amount_base: round2(deployableBudgetBase * 0.25, 2),
           note: annotateTrancheNote()
         }
       );
@@ -35759,16 +36576,16 @@ function computeDipTriage(thesis, price, scenarioSummary, riskCaps, profile, edg
       tranchePlan.push(
         {
           label: "Tranche 1 (Target Entry)",
-          price: round(thesis.buy_zone_low, 2),
+          price: round2(thesis.buy_zone_low, 2),
           pct_of_add: 50,
-          amount_base: round(deployableBudgetBase * 0.5, 2),
+          amount_base: round2(deployableBudgetBase * 0.5, 2),
           note: annotateTrancheNote()
         },
         {
           label: "Tranche 2 (-8% Buffer)",
-          price: round(thesis.buy_zone_low * 0.92, 2),
+          price: round2(thesis.buy_zone_low * 0.92, 2),
           pct_of_add: 50,
-          amount_base: round(deployableBudgetBase * 0.5, 2),
+          amount_base: round2(deployableBudgetBase * 0.5, 2),
           note: annotateTrancheNote()
         }
       );
@@ -35795,8 +36612,8 @@ function computeDipTriage(thesis, price, scenarioSummary, riskCaps, profile, edg
     readiness,
     risk_cap_check: {
       status: capStatus,
-      current_weight_pct: round(currentPct, 2),
-      effective_cap_pct: effectiveCapPct !== null ? round(effectiveCapPct, 2) : null,
+      current_weight_pct: round2(currentPct, 2),
+      effective_cap_pct: effectiveCapPct !== null ? round2(effectiveCapPct, 2) : null,
       room_pct: roomPct,
       single_name_room_pct: singleRoomRounded,
       portfolio_cap_room_pct: portfolioRoomRounded,
@@ -35844,15 +36661,15 @@ function computeCapitalRotationQueue(portfolio, lookthrough, riskCaps, theses, p
         currency: p.currency,
         qty: p.qty,
         price: p.ref_price,
-        mv_usd: round(mvUsd, 2),
-        mv_base: round(mvBase, 2),
+        mv_usd: round2(mvUsd, 2),
+        mv_base: round2(mvBase, 2),
         weight_nav_pct: 0
       };
     });
-    navBase = portfolio.reported_nav_base ?? round(posSumBase + portfolio.cash_base + portfolio.accruals_base, 2);
+    navBase = portfolio.reported_nav_base ?? round2(posSumBase + portfolio.cash_base + portfolio.accruals_base, 2);
     positions = rawPos.map((p) => ({
       ...p,
-      weight_nav_pct: navBase > 0 ? round(p.mv_base / navBase * 100, 2) : 0
+      weight_nav_pct: navBase > 0 ? round2(p.mv_base / navBase * 100, 2) : 0
     }));
   }
   const heldPositions = positions.filter((p) => p.qty > 0 && p.mv_base > 0.01);
@@ -35891,7 +36708,7 @@ function computeCapitalRotationQueue(portfolio, lookthrough, riskCaps, theses, p
     if (pctNavReduced <= 0) return;
     const canon = canonicalAssetName(tickerSym);
     if (remainingLtPct.has(canon)) {
-      remainingLtPct.set(canon, Math.max(0, round((remainingLtPct.get(canon) ?? 0) - pctNavReduced, 4)));
+      remainingLtPct.set(canon, Math.max(0, round2((remainingLtPct.get(canon) ?? 0) - pctNavReduced, 4)));
     }
     for (const cap of riskCaps) {
       const rule = profile.risk_caps.find((r) => r.id === cap.id);
@@ -35916,8 +36733,8 @@ function computeCapitalRotationQueue(portfolio, lookthrough, riskCaps, theses, p
       const beforeTaxUsd = computeUsEstateTaxNra(runningUsSitusUsd).net_estate_tax_usd;
       const afterTaxUsd = computeUsEstateTaxNra(Math.max(0, runningUsSitusUsd - etf.mv_usd)).net_estate_tax_usd;
       runningUsSitusUsd = Math.max(0, runningUsSitusUsd - etf.mv_usd);
-      const estateSavedBase = round((beforeTaxUsd - afterTaxUsd) * safeFxUsd, 2);
-      const annualWhtSavedBase = round(etf.mv_base * 0.013 * whtDiffFrac, 2);
+      const estateSavedBase = round2((beforeTaxUsd - afterTaxUsd) * safeFxUsd, 2);
+      const annualWhtSavedBase = round2(etf.mv_base * 0.013 * whtDiffFrac, 2);
       const prevMaxLt = remainingLtPct.size > 0 ? Math.max(...remainingLtPct.values(), 0) : 0;
       const fromWeights = etfWeightsMap[etf.ticker];
       if (fromWeights) {
@@ -35933,7 +36750,7 @@ function computeCapitalRotationQueue(portfolio, lookthrough, riskCaps, theses, p
           }
           const delta = (fromShare - toShare) * etf.weight_nav_pct;
           if (delta !== 0) {
-            remainingLtPct.set(canon, Math.max(0, round(curLtPct - delta, 4)));
+            remainingLtPct.set(canon, Math.max(0, round2(curLtPct - delta, 4)));
           }
         }
       }
@@ -35977,10 +36794,10 @@ function computeCapitalRotationQueue(portfolio, lookthrough, riskCaps, theses, p
         ticker: etf.ticker,
         target_ticker: profile.benchmark.yf_symbol || benchTicker,
         shares: etf.qty,
-        price_trading: round(etf.price, 4),
+        price_trading: round2(etf.price, 4),
         currency: etf.currency,
-        proceeds_usd: round(etf.mv_usd, 2),
-        proceeds_base: round(etf.mv_base, 2),
+        proceeds_usd: round2(etf.mv_usd, 2),
+        proceeds_base: round2(etf.mv_base, 2),
         estate_tax_saved_base: estateSavedBase,
         annual_wht_saved_base: annualWhtSavedBase,
         auto_cured_caps: autoCuredCaps,
@@ -36011,10 +36828,10 @@ function computeCapitalRotationQueue(portfolio, lookthrough, riskCaps, theses, p
       verdict: th.verdict ?? null,
       reason: reasons.join(" \xB7 "),
       shares: pos.qty,
-      price_trading: round(pos.price, 4),
+      price_trading: round2(pos.price, 4),
       currency: pos.currency,
-      proceeds_usd: round(pos.mv_usd, 2),
-      proceeds_base: round(pos.mv_base, 2),
+      proceeds_usd: round2(pos.mv_usd, 2),
+      proceeds_base: round2(pos.mv_base, 2),
       weight_nav_pct: pos.weight_nav_pct
     });
     propagateAssetReduction(sym, pos.us_situs, pos.weight_nav_pct);
@@ -36046,14 +36863,14 @@ function computeCapitalRotationQueue(portfolio, lookthrough, riskCaps, theses, p
   };
   for (const { cap, rule } of breachedCapsOrdered) {
     let relief = capReliefPct.get(cap.id) ?? 0;
-    let netPct = round(cap.value_pct - relief, 2);
+    let netPct = round2(cap.value_pct - relief, 2);
     if (rule.kind === "single_name_max" && remainingLtPct.size > 0) {
       const maxLtNow = Math.max(...remainingLtPct.values(), 0);
-      netPct = round(Math.min(cap.value_pct, maxLtNow), 2);
-      relief = Math.max(0, round(cap.value_pct - netPct, 2));
+      netPct = round2(Math.min(cap.value_pct, maxLtNow), 2);
+      relief = Math.max(0, round2(cap.value_pct - netPct, 2));
     }
     if (netPct <= cap.cap_pct + 0.05) continue;
-    const excessPct = round(netPct - cap.cap_pct, 2);
+    const excessPct = round2(netPct - cap.cap_pct, 2);
     const excessBase = excessPct / 100 * navBase;
     if (excessBase <= 1) continue;
     const eligible = nonEtfHeld.filter((p) => (remainingSharesByTicker.get(p.ticker.toUpperCase()) ?? 0) > 1e-6);
@@ -36080,11 +36897,11 @@ function computeCapitalRotationQueue(portfolio, lookthrough, riskCaps, theses, p
     const unitBase = candidate.price * ccyFx;
     if (unitBase <= 0) continue;
     const rawShares = Math.min(availQty, excessBase / unitBase);
-    const sharesToTrim = Number.isInteger(candidate.qty) ? Math.min(Math.floor(availQty), Math.ceil(rawShares)) : round(rawShares, 4);
+    const sharesToTrim = Number.isInteger(candidate.qty) ? Math.min(Math.floor(availQty), Math.ceil(rawShares)) : round2(rawShares, 4);
     if (sharesToTrim <= 0) continue;
-    const proceedsBase = round(sharesToTrim * unitBase, 2);
-    const proceedsUsd = round(proceedsBase / safeFxUsd, 2);
-    remainingSharesByTicker.set(candSym, Math.max(0, round(availQty - sharesToTrim, 6)));
+    const proceedsBase = round2(sharesToTrim * unitBase, 2);
+    const proceedsUsd = round2(proceedsBase / safeFxUsd, 2);
+    remainingSharesByTicker.set(candSym, Math.max(0, round2(availQty - sharesToTrim, 6)));
     const trimPctNav = navBase > 0 ? proceedsBase / navBase * 100 : 0;
     propagateAssetReduction(candidate.ticker, candidate.us_situs, trimPctNav);
     capTrims.push({
@@ -36097,15 +36914,15 @@ function computeCapitalRotationQueue(portfolio, lookthrough, riskCaps, theses, p
       shares_to_trim: sharesToTrim,
       proceeds_usd: proceedsUsd,
       proceeds_base: proceedsBase,
-      note: relief > 0 ? `Net of ${round(relief, 1)}% prior swap/exit/trim relief; trim ${sharesToTrim} sh ${candidate.ticker} to cure ${cap.label}.` : `Trim ${sharesToTrim} sh ${candidate.ticker} to bring ${cap.label} within ${cap.cap_pct}%.`
+      note: relief > 0 ? `Net of ${round2(relief, 1)}% prior swap/exit/trim relief; trim ${sharesToTrim} sh ${candidate.ticker} to cure ${cap.label}.` : `Trim ${sharesToTrim} sh ${candidate.ticker} to bring ${cap.label} within ${cap.cap_pct}%.`
     });
   }
-  const totalSwapBase = round(taxSwaps.reduce((acc, s) => acc + s.proceeds_base, 0), 2);
-  const totalFreedBase = round(
+  const totalSwapBase = round2(taxSwaps.reduce((acc, s) => acc + s.proceeds_base, 0), 2);
+  const totalFreedBase = round2(
     mandatoryExits.reduce((acc, e) => acc + e.proceeds_base, 0) + capTrims.reduce((acc, t) => acc + t.proceeds_base, 0),
     2
   );
-  const totalEstateSavedBase = round(taxSwaps.reduce((acc, s) => acc + s.estate_tax_saved_base, 0), 2);
+  const totalEstateSavedBase = round2(taxSwaps.reduce((acc, s) => acc + s.estate_tax_saved_base, 0), 2);
   return {
     tax_swaps: taxSwaps,
     mandatory_exits: mandatoryExits,
@@ -36206,13 +37023,13 @@ function computeBrierCalibration(testLogAll, allHypotheses) {
       resolved_count: resolved.length,
       supported_count: supportedCount,
       falsified_count: falsifiedCount,
-      empirical_rate_pct: resolved.length > 0 ? round(supportedCount / resolved.length * 100, 1) : null,
-      brier_score: resolved.length > 0 ? round(brierSum / resolved.length, 3) : null
+      empirical_rate_pct: resolved.length > 0 ? round2(supportedCount / resolved.length * 100, 1) : null,
+      brier_score: resolved.length > 0 ? round2(brierSum / resolved.length, 3) : null
     };
   });
   return {
     resolved_total: totalResolved,
-    overall_brier_score: totalResolved > 0 ? round(totalBrierSum / totalResolved, 3) : null,
+    overall_brier_score: totalResolved > 0 ? round2(totalBrierSum / totalResolved, 3) : null,
     tiers
   };
 }
@@ -36249,16 +37066,16 @@ function computeForwardScorecard(testLogAll, currentPrices, historyCache, benchm
     const parsedMs = Date.parse(`${testDate}T00:00:00Z`);
     const daysElapsed = Number.isFinite(parsedMs) ? Math.max(0, Math.floor((nowMs - parsedMs) / 864e5)) : 0;
     const curPrice = currentPrices.get(rec.ticker) ?? null;
-    const stockRet = curPrice !== null && rec.price_at_test > 0 ? round((curPrice - rec.price_at_test) / rec.price_at_test * 100, 2) : null;
+    const stockRet = curPrice !== null && rec.price_at_test > 0 ? round2((curPrice - rec.price_at_test) / rec.price_at_test * 100, 2) : null;
     let benchRet = null;
     const startBenchFromRecord = typeof rec.benchmark_price_at_test === "number" && Number.isFinite(rec.benchmark_price_at_test) && rec.benchmark_price_at_test > 0 ? rec.benchmark_price_at_test : null;
     if (latestBenchPrice !== null && latestBenchPrice > 0) {
       const startBench = startBenchFromRecord ?? (daysElapsed > 0 && benchSeries ? findPriceOnOrNearDate(benchSeries, testDate) : null);
       if (startBench !== null && startBench > 0) {
-        benchRet = round((latestBenchPrice - startBench) / startBench * 100, 2);
+        benchRet = round2((latestBenchPrice - startBench) / startBench * 100, 2);
       }
     }
-    const alphaPct = stockRet !== null && benchRet !== null ? round(stockRet - benchRet, 2) : null;
+    const alphaPct = stockRet !== null && benchRet !== null ? round2(stockRet - benchRet, 2) : null;
     const maturity = daysElapsed >= 30 ? "MATURED" : "PENDING";
     const actionVerdict = rec.action_verdict ?? null;
     const hit = maturity === "MATURED" ? evaluateDirectionalHit(rec.verdict, actionVerdict, stockRet, alphaPct) : null;
@@ -36271,8 +37088,8 @@ function computeForwardScorecard(testLogAll, currentPrices, historyCache, benchm
       maturity,
       hit,
       summary: rec.summary,
-      price_at_test: round(rec.price_at_test, 4),
-      current_price: curPrice !== null ? round(curPrice, 4) : null,
+      price_at_test: round2(rec.price_at_test, 4),
+      current_price: curPrice !== null ? round2(curPrice, 4) : null,
       currency: rec.currency ?? "USD",
       stock_return_pct: stockRet,
       benchmark_return_pct: benchRet,
@@ -36289,11 +37106,11 @@ function computeForwardScorecard(testLogAll, currentPrices, historyCache, benchm
     const pendingInVerdict = subset.filter((e) => e.maturity === "PENDING").length;
     const evaluated = subset.filter((e) => e.maturity === "MATURED" && e.stock_return_pct !== null);
     const withAlpha = evaluated.filter((e) => e.alpha_pct !== null);
-    const avgRet = evaluated.length > 0 ? round(evaluated.reduce((acc, e) => acc + (e.stock_return_pct ?? 0), 0) / evaluated.length, 2) : null;
-    const avgAlpha = withAlpha.length > 0 ? round(withAlpha.reduce((acc, e) => acc + (e.alpha_pct ?? 0), 0) / withAlpha.length, 2) : null;
+    const avgRet = evaluated.length > 0 ? round2(evaluated.reduce((acc, e) => acc + (e.stock_return_pct ?? 0), 0) / evaluated.length, 2) : null;
+    const avgAlpha = withAlpha.length > 0 ? round2(withAlpha.reduce((acc, e) => acc + (e.alpha_pct ?? 0), 0) / withAlpha.length, 2) : null;
     const scored = evaluated.filter((e) => e.hit !== null);
     const hits = scored.filter((e) => e.hit === true).length;
-    const hitRate = scored.length > 0 ? round(hits / scored.length * 100, 1) : null;
+    const hitRate = scored.length > 0 ? round2(hits / scored.length * 100, 1) : null;
     return {
       verdict: v,
       count: subset.length,
@@ -36318,8 +37135,8 @@ function computeForwardScorecard(testLogAll, currentPrices, historyCache, benchm
       horizon,
       min_days,
       count: bucket.length,
-      avg_alpha_pct: withAlpha.length > 0 ? round(withAlpha.reduce((acc, e) => acc + (e.alpha_pct ?? 0), 0) / withAlpha.length, 2) : null,
-      hit_rate_pct: scored.length > 0 ? round(hits / scored.length * 100, 1) : null
+      avg_alpha_pct: withAlpha.length > 0 ? round2(withAlpha.reduce((acc, e) => acc + (e.alpha_pct ?? 0), 0) / withAlpha.length, 2) : null,
+      hit_rate_pct: scored.length > 0 ? round2(hits / scored.length * 100, 1) : null
     };
   });
   return {
@@ -36401,13 +37218,16 @@ function convertWeekMapToUsd(wkMap, currency, historyCache) {
       }
     }
     if (fxRate !== void 0 && fxRate > 0) {
-      out.set(wk, round(px * fxRate, 4));
+      out.set(wk, round2(px * fxRate, 4));
     }
   }
   return out.size >= 12 ? { converted: out, fxApplied: true } : { converted: wkMap, fxApplied: false };
 }
-function computeSeriesMetrics(values, rfPct = 4, rebalanceCount = 0) {
+function computeSeriesMetrics(values, rfPct = 4, rebalanceCount = 0, opts) {
   const n = values.length;
+  const totalTurnoverPct = round2(opts?.totalTurnoverPct ?? 0, 1);
+  const txCostDragBps = round2(opts?.txCostDragBps ?? 0, 1);
+  const trialsTested = Math.max(1, opts?.trialsTested ?? 1);
   if (n < 2) {
     return {
       cagr_pct: 0,
@@ -36416,8 +37236,14 @@ function computeSeriesMetrics(values, rfPct = 4, rebalanceCount = 0) {
       max_drawdown_pct: 0,
       sharpe: 0,
       sharpe_se: 0,
+      deflated_sharpe_prob_pct: 50,
       sortino: 0,
+      cvar_95_weekly_pct: 0,
+      skewness: 0,
+      excess_kurtosis: 0,
       rebalance_count: rebalanceCount,
+      total_turnover_pct: totalTurnoverPct,
+      tx_cost_drag_bps: txCostDragBps,
       rolling_3y_cagr_min_pct: null,
       rolling_3y_cagr_median_pct: null,
       rolling_3y_cagr_max_pct: null
@@ -36427,8 +37253,8 @@ function computeSeriesMetrics(values, rfPct = 4, rebalanceCount = 0) {
   const end = values[n - 1];
   const weeks = n - 1;
   const years = Math.max(1 / 52, weeks / 52);
-  const totalReturnPct = round((end / start - 1) * 100, 2);
-  const cagrPct = round((Math.pow(Math.max(1e-4, end / start), 1 / years) - 1) * 100, 2);
+  const totalReturnPct = round2((end / start - 1) * 100, 2);
+  const cagrPct = round2((Math.pow(Math.max(1e-4, end / start), 1 / years) - 1) * 100, 2);
   const rets = [];
   let peak = start;
   let maxDd = 0;
@@ -36447,9 +37273,15 @@ function computeSeriesMetrics(values, rfPct = 4, rebalanceCount = 0) {
   const downSq = rets.reduce((acc, r) => acc + (r < rfWeekly ? (r - rfWeekly) ** 2 : 0), 0) / rets.length;
   const downDevAnn = Math.sqrt(downSq) * Math.sqrt(52);
   const annExcessMean = (mean - rfWeekly) * 52;
-  const sharpe = volAnn > 1e-9 ? round(annExcessMean / volAnn, 2) : 0;
-  const sharpeSe = round(Math.sqrt((1 + 0.5 * sharpe * sharpe) / Math.max(0.25, years)), 2);
-  const sortino = downDevAnn > 1e-9 ? round(annExcessMean / downDevAnn, 2) : 0;
+  const sharpe = volAnn > 1e-9 ? round2(annExcessMean / volAnn, 2) : 0;
+  const sharpeSe = round2(Math.sqrt((1 + 0.5 * sharpe * sharpe) / Math.max(0.25, years)), 2);
+  const sortino = downDevAnn > 1e-9 ? round2(annExcessMean / downDevAnn, 2) : 0;
+  const moments = computeHigherMoments(rets);
+  const dsr = computeDeflatedSharpeRatio({
+    annualizedSharpe: sharpe,
+    weeklyReturns: rets,
+    trialsTested
+  });
   let rollMin = null;
   let rollMed = null;
   let rollMax = null;
@@ -36465,21 +37297,27 @@ function computeSeriesMetrics(values, rfPct = 4, rebalanceCount = 0) {
     }
     if (rolls.length > 0) {
       rolls.sort((a, b) => a - b);
-      rollMin = round(rolls[0], 2);
+      rollMin = round2(rolls[0], 2);
       const mid = Math.floor(rolls.length / 2);
-      rollMed = round(rolls.length % 2 === 1 ? rolls[mid] : (rolls[mid - 1] + rolls[mid]) / 2, 2);
-      rollMax = round(rolls[rolls.length - 1], 2);
+      rollMed = round2(rolls.length % 2 === 1 ? rolls[mid] : (rolls[mid - 1] + rolls[mid]) / 2, 2);
+      rollMax = round2(rolls[rolls.length - 1], 2);
     }
   }
   return {
     cagr_pct: cagrPct,
     total_return_pct: totalReturnPct,
-    volatility_pct: round(volAnn * 100, 2),
-    max_drawdown_pct: round(maxDd * 100, 2),
+    volatility_pct: round2(volAnn * 100, 2),
+    max_drawdown_pct: round2(maxDd * 100, 2),
     sharpe,
     sharpe_se: sharpeSe,
+    deflated_sharpe_prob_pct: dsr.dsr_prob_pct,
     sortino,
+    cvar_95_weekly_pct: moments.cvar_95_pct,
+    skewness: moments.skewness,
+    excess_kurtosis: moments.excess_kurtosis,
     rebalance_count: rebalanceCount,
+    total_turnover_pct: totalTurnoverPct,
+    tx_cost_drag_bps: txCostDragBps,
     rolling_3y_cagr_min_pct: rollMin,
     rolling_3y_cagr_median_pct: rollMed,
     rolling_3y_cagr_max_pct: rollMax
@@ -36508,17 +37346,22 @@ function pearsonCorrelation(xs, ys) {
   }
   const den = Math.sqrt(denX * denY);
   if (den <= 1e-12) return null;
-  return round(num / den, 3);
+  return round2(num / den, 3);
 }
-function simulatePortfolioPath(weights, weeklyPrices, numPoints, rebalanceBandFrac, rfPct = 4) {
+function simulatePortfolioPath(weights, weeklyPrices, numPoints, rebalanceBandFrac, rfPct = 4, txCostBps = 0, initialTurnoverFrac = 0) {
   const assets = Array.from(weights.entries()).filter(([, w]) => w > 1e-6);
+  const costRate = Math.max(0, txCostBps) / 1e4;
+  const initTurn = Math.max(0, initialTurnoverFrac);
+  const initCostMult = Math.max(0.9, 1 - initTurn * costRate);
   const alloc = /* @__PURE__ */ new Map();
   for (const [k, w] of assets) {
-    alloc.set(k, 100 * w);
+    alloc.set(k, 100 * initCostMult * w);
   }
   const curve = [100];
   const cashGrowthWeekly = Math.pow(1 + Math.max(0, rfPct) / 100, 1 / 52);
   let rebalanceCount = 0;
+  let totalTurnoverFrac = initTurn;
+  let totalCostFrac = initTurn * costRate;
   for (let t = 1; t < numPoints; t += 1) {
     let total = 0;
     for (const [k] of assets) {
@@ -36548,14 +37391,30 @@ function simulatePortfolioPath(weights, weeklyPrices, numPoints, rebalanceBandFr
       }
       if (breached) {
         rebalanceCount += 1;
+        let oneWayTurn = 0;
+        for (const [k, targetW] of assets) {
+          const curW = (alloc.get(k) ?? 0) / total;
+          oneWayTurn += Math.abs(curW - targetW);
+        }
+        oneWayTurn *= 0.5;
+        totalTurnoverFrac += oneWayTurn;
+        const stepCost = oneWayTurn * costRate;
+        totalCostFrac += stepCost;
+        total = Math.max(0.01, total * (1 - stepCost));
         for (const [k, targetW] of assets) {
           alloc.set(k, total * targetW);
         }
       }
     }
-    curve.push(round(total, 4));
+    curve.push(round2(total, 4));
   }
-  return { curve, rebalanceCount };
+  const years = Math.max(1 / 52, (numPoints - 1) / 52);
+  return {
+    curve,
+    rebalanceCount,
+    totalTurnoverPct: round2(totalTurnoverFrac * 100, 1),
+    txCostDragBps: round2(totalCostFrac / years * 1e4, 1)
+  };
 }
 function computeWindowCagrAndDd(dates, values, startDate, endDate) {
   const slice = [];
@@ -36569,7 +37428,7 @@ function computeWindowCagrAndDd(dates, values, startDate, endDate) {
   const start = slice[0];
   const end = slice[slice.length - 1];
   const weeks = slice.length - 1;
-  const cagrPct = round((Math.pow(Math.max(1e-4, end / start), 52 / weeks) - 1) * 100, 2);
+  const cagrPct = round2((Math.pow(Math.max(1e-4, end / start), 52 / weeks) - 1) * 100, 2);
   let peak = start;
   let maxDd = 0;
   for (const v of slice) {
@@ -36577,14 +37436,14 @@ function computeWindowCagrAndDd(dates, values, startDate, endDate) {
     const dd = peak > 0 ? (v - peak) / peak : 0;
     if (dd < maxDd) maxDd = dd;
   }
-  return { weeks, cagr_pct: cagrPct, dd_pct: round(maxDd * 100, 2) };
+  return { weeks, cagr_pct: cagrPct, dd_pct: round2(maxDd * 100, 2) };
 }
 function runDeterministicBacktest(req, portfolio, lookthrough, profile, historyCache, fxRates, opts) {
   const candidateTicker = req.candidate_ticker.toUpperCase();
   const candidateYf = (req.candidate_yf_symbol || candidateTicker).trim();
   const benchmarkSym = profile.benchmark.yf_symbol || profile.benchmark.ticker;
   const benchmarkTicker = profile.benchmark.ticker.toUpperCase();
-  const rfPct = round(req.rf_pct ?? opts?.defaultRfPct ?? 4, 2);
+  const rfPct = round2(req.rf_pct ?? opts?.defaultRfPct ?? 4, 2);
   const includeExternalWealth = req.include_external_wealth !== false;
   const candSeries = lookupHistorySeries(historyCache, candidateYf, candidateTicker);
   if (!candSeries || candSeries.points.length < 12) {
@@ -36779,7 +37638,7 @@ function runDeterministicBacktest(req, portfolio, lookthrough, profile, historyC
       simWeights.set(swapSym, Math.max(0, availSwap - takeSwap));
       remainingToFund -= takeSwap;
       if (remainingToFund > 5e-4) {
-        caveats.push(`Swap source ${swapSym} (${round(availSwap * 100, 1)}%) was smaller than target; remainder funded from cash/pro-rata.`);
+        caveats.push(`Swap source ${swapSym} (${round2(availSwap * 100, 1)}%) was smaller than target; remainder funded from cash/pro-rata.`);
       }
     }
     if (remainingToFund > 5e-4 && (req.funding_source === "cash" || req.funding_source.startsWith("swap:"))) {
@@ -36788,7 +37647,7 @@ function runDeterministicBacktest(req, portfolio, lookthrough, profile, historyC
       simWeights.set("__CASH__", Math.max(0, availCash - takeCash));
       remainingToFund -= takeCash;
       if (remainingToFund > 5e-4 && req.funding_source === "cash") {
-        caveats.push(`Cash (${round(availCash * 100, 1)}%) was insufficient for ${req.target_weight_pct}%; remainder funded pro-rata.`);
+        caveats.push(`Cash (${round2(availCash * 100, 1)}%) was insufficient for ${req.target_weight_pct}%; remainder funded pro-rata.`);
       }
     }
     if (remainingToFund > 5e-4) {
@@ -36839,16 +37698,38 @@ function runDeterministicBacktest(req, portfolio, lookthrough, profile, historyC
     }
   }
   const bandFrac = Math.max(0.05, req.rebalance_band_pct / 100);
-  const baselineSim = simulatePortfolioPath(baseWeights, alignedPrices, finalDates.length, bandFrac, rfPct);
-  const simulatedSim = simulatePortfolioPath(simWeights, alignedPrices, finalDates.length, bandFrac, rfPct);
+  const txCostBps = round2(req.tx_cost_bps ?? 10, 1);
+  const trialsTested = Math.max(1, Math.round(req.trials_tested ?? opts?.defaultTrialsTested ?? 1));
+  const allWeightKeys = /* @__PURE__ */ new Set([...baseWeights.keys(), ...simWeights.keys()]);
+  let initTurnFrac = 0;
+  for (const k of allWeightKeys) {
+    initTurnFrac += Math.abs((simWeights.get(k) ?? 0) - (baseWeights.get(k) ?? 0));
+  }
+  initTurnFrac *= 0.5;
+  const baselineSim = simulatePortfolioPath(baseWeights, alignedPrices, finalDates.length, bandFrac, rfPct, txCostBps, 0);
+  const simulatedSim = simulatePortfolioPath(simWeights, alignedPrices, finalDates.length, bandFrac, rfPct, txCostBps, initTurnFrac);
   const baselineCurve = baselineSim.curve;
   const simulatedCurve = simulatedSim.curve;
   const benchRaw = alignedPrices.get("__BENCH__");
   const benchStart = benchRaw[0];
-  const benchmarkCurve = benchRaw.map((p) => round(p / benchStart * 100, 4));
-  const baselineMetrics = computeSeriesMetrics(baselineCurve, rfPct, baselineSim.rebalanceCount);
-  const simulatedMetrics = computeSeriesMetrics(simulatedCurve, rfPct, simulatedSim.rebalanceCount);
-  const benchmarkMetrics = computeSeriesMetrics(benchmarkCurve, rfPct, 0);
+  const benchmarkCurve = benchRaw.map((p) => round2(p / benchStart * 100, 4));
+  const baselineMetrics = computeSeriesMetrics(baselineCurve, rfPct, baselineSim.rebalanceCount, {
+    totalTurnoverPct: baselineSim.totalTurnoverPct,
+    txCostDragBps: baselineSim.txCostDragBps,
+    trialsTested: 1
+  });
+  const simulatedMetrics = computeSeriesMetrics(simulatedCurve, rfPct, simulatedSim.rebalanceCount, {
+    totalTurnoverPct: simulatedSim.totalTurnoverPct,
+    txCostDragBps: simulatedSim.txCostDragBps,
+    trialsTested
+  });
+  const benchmarkMetrics = computeSeriesMetrics(benchmarkCurve, rfPct, 0, { trialsTested: 1 });
+  const simWeeklyRetsForDsr = simulatedCurve.slice(1).map((v, i) => simulatedCurve[i] > 0 ? v / simulatedCurve[i] - 1 : 0);
+  const simDsrDetail = computeDeflatedSharpeRatio({
+    annualizedSharpe: simulatedMetrics.sharpe,
+    weeklyReturns: simWeeklyRetsForDsr,
+    trialsTested
+  });
   const toWeeklyReturns = (arr) => {
     const out = [];
     for (let i = 1; i < arr.length; i += 1) {
@@ -36935,20 +37816,23 @@ function runDeterministicBacktest(req, portfolio, lookthrough, profile, historyC
   }
   const equityCurve = finalDates.map((date5, idx) => ({
     date: date5,
-    baseline_idx: round(baselineCurve[idx], 2),
-    simulated_idx: round(simulatedCurve[idx], 2),
-    benchmark_idx: round(benchmarkCurve[idx], 2)
+    baseline_idx: round2(baselineCurve[idx], 2),
+    simulated_idx: round2(simulatedCurve[idx], 2),
+    benchmark_idx: round2(benchmarkCurve[idx], 2)
   }));
-  const baseCaveat = `Deterministic weekly backtest (${finalDates.length - 1}w, hybrid max(2%, ${req.rebalance_band_pct}%) drift rebalance, rf=${rfPct}%, survivor/hindsight caveats apply).`;
+  const baseCaveat = `Deterministic weekly backtest (${finalDates.length - 1}w, hybrid max(2%, ${req.rebalance_band_pct}%) drift rebalance, rf=${rfPct}%, tx=${txCostBps}bps, DSR M=${trialsTested}, survivor/hindsight caveats apply).`;
   const caveat = caveats.length > 0 ? `${baseCaveat} ${caveats.join(" ")}` : baseCaveat;
   return {
     candidate_ticker: candidateTicker,
     candidate_yf_symbol: candidateYf,
     benchmark_symbol: benchmarkSym,
-    target_weight_pct: round(req.target_weight_pct, 2),
+    target_weight_pct: round2(req.target_weight_pct, 2),
     funding_source: req.funding_source,
-    rebalance_band_pct: round(req.rebalance_band_pct, 1),
+    rebalance_band_pct: round2(req.rebalance_band_pct, 1),
     rf_pct: rfPct,
+    tx_cost_bps: txCostBps,
+    trials_tested: trialsTested,
+    sr0_annual_threshold: simDsrDetail.sr0_annual_threshold,
     include_external_wealth: includeExternalWealth,
     fx_converted_tickers: fxConvertedTickers,
     overlap_start: finalDates[0],
@@ -36960,10 +37844,10 @@ function runDeterministicBacktest(req, portfolio, lookthrough, profile, historyC
     simulated: simulatedMetrics,
     benchmark: benchmarkMetrics,
     deltas: {
-      cagr_pct: round(simulatedMetrics.cagr_pct - baselineMetrics.cagr_pct, 2),
-      max_drawdown_pct: round(simulatedMetrics.max_drawdown_pct - baselineMetrics.max_drawdown_pct, 2),
-      sharpe: round(simulatedMetrics.sharpe - baselineMetrics.sharpe, 2),
-      sortino: round(simulatedMetrics.sortino - baselineMetrics.sortino, 2)
+      cagr_pct: round2(simulatedMetrics.cagr_pct - baselineMetrics.cagr_pct, 2),
+      max_drawdown_pct: round2(simulatedMetrics.max_drawdown_pct - baselineMetrics.max_drawdown_pct, 2),
+      sharpe: round2(simulatedMetrics.sharpe - baselineMetrics.sharpe, 2),
+      sortino: round2(simulatedMetrics.sortino - baselineMetrics.sortino, 2)
     },
     candidate_corr_portfolio: candCorrPortfolio,
     candidate_corr_cluster: candCorrCluster,
@@ -36974,36 +37858,6 @@ function runDeterministicBacktest(req, portfolio, lookthrough, profile, historyC
 }
 
 // src/server/forecast.ts
-function mulberry32(seedInit) {
-  let a = seedInit >>> 0;
-  return () => {
-    a |= 0;
-    a = a + 1831565813 | 0;
-    let t = Math.imul(a ^ a >>> 15, 1 | a);
-    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
-    return ((t ^ t >>> 14) >>> 0) / 4294967296;
-  };
-}
-function boxMullerPair(rng) {
-  const u1 = Math.max(1e-12, rng());
-  const u2 = rng();
-  const r = Math.sqrt(-2 * Math.log(u1));
-  const theta = 2 * Math.PI * u2;
-  return [r * Math.cos(theta), r * Math.sin(theta)];
-}
-function sampleStandardNormal(rng) {
-  return boxMullerPair(rng)[0];
-}
-function sampleStudentTScale(rng, df = 6) {
-  let chi2 = 0;
-  for (let i = 0; i < df; i += 2) {
-    const [z1, z2] = boxMullerPair(rng);
-    chi2 += z1 * z1;
-    if (i + 1 < df) chi2 += z2 * z2;
-  }
-  const safeChi2 = Math.max(0.25, chi2);
-  return Math.sqrt((df - 2) / safeChi2);
-}
 function quantile(sorted, p) {
   if (sorted.length === 0) return 0;
   if (sorted.length === 1) return sorted[0];
@@ -37154,12 +38008,12 @@ function evaluateRiskAndTaxForHoldings(slots, profile, etfWeightsCfg, fxUsdToBas
     }
     const totUsd = directUsd + viaEtfsUsd;
     if (totUsd <= 0.01) continue;
-    const pct = navBase > 0 ? round(totUsd * safeFx / navBase * 100, 2) : 0;
+    const pct = navBase > 0 ? round2(totUsd * safeFx / navBase * 100, 2) : 0;
     ltUsdMap.set(canon, totUsd);
     ltPctMap.set(canon, pct);
     if (pct > maxSinglePct) maxSinglePct = pct;
   }
-  const usSitusPortfolioPct = navBase > 0 ? round(usSitusPortfolioUsd * safeFx / navBase * 100, 2) : 0;
+  const usSitusPortfolioPct = navBase > 0 ? round2(usSitusPortfolioUsd * safeFx / navBase * 100, 2) : 0;
   const evalBucketUsd = (rule) => {
     const seen = /* @__PURE__ */ new Set();
     let sum = 0;
@@ -37185,17 +38039,17 @@ function evaluateRiskAndTaxForHoldings(slots, profile, etfWeightsCfg, fxUsdToBas
     if (rule.kind === "single_name_max") valPct = maxSinglePct;
     else if (rule.kind === "ticker" && rule.ticker) valPct = ltPctMap.get(canonicalAssetName(rule.ticker)) ?? 0;
     else if (rule.kind === "us_situs") valPct = usSitusPortfolioPct;
-    else if (rule.kind === "bucket") valPct = navBase > 0 ? round(evalBucketUsd(rule) * safeFx / navBase * 100, 2) : 0;
+    else if (rule.kind === "bucket") valPct = navBase > 0 ? round2(evalBucketUsd(rule) * safeFx / navBase * 100, 2) : 0;
     if (valPct > rule.cap_pct + 0.05) {
       breached.push(rule.label);
     }
   }
   const estateEnabled = profile.tax_profile.nra_us_estate_tax_enabled;
-  const estateTaxBase = estateEnabled ? round(computeUsEstateTaxNra(usSitusPortfolioUsd + extUsSitusUsd).net_estate_tax_usd * safeFx, 2) : 0;
+  const estateTaxBase = estateEnabled ? round2(computeUsEstateTaxNra(usSitusPortfolioUsd + extUsSitusUsd).net_estate_tax_usd * safeFx, 2) : 0;
   return {
     us_situs_portfolio_pct: usSitusPortfolioPct,
     estate_tax_base: estateTaxBase,
-    annual_wht_drag_base: round(annualWhtDragBase, 2),
+    annual_wht_drag_base: round2(annualWhtDragBase, 2),
     cap_breaches_count: breached.length,
     breached_cap_labels: breached
   };
@@ -37204,7 +38058,7 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
   const horizon = Math.max(1, Math.min(10, req.horizon_years || 5));
   const simulations = Math.max(200, Math.min(5e3, req.simulations || 1500));
   const volMult = Math.max(0.5, Math.min(2.5, req.regime_vol_multiplier || 1));
-  const rfPct = round(req.rf_pct ?? opts?.defaultRfPct ?? 3.8, 2);
+  const rfPct = round2(req.rf_pct ?? opts?.defaultRfPct ?? 3.8, 2);
   const fxUsdToBase = fxRates.USD && fxRates.USD > 0 ? fxRates.USD : 1;
   const benchTicker = profile.benchmark.ticker.toUpperCase();
   const benchYf = profile.benchmark.yf_symbol || benchTicker;
@@ -37232,11 +38086,11 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
       accumulating,
       is_external: false,
       is_cash: false,
-      value_base: round((prev?.value_base ?? 0) + mvBase, 2),
+      value_base: round2((prev?.value_base ?? 0) + mvBase, 2),
       dividend_yield_pct: divYield
     });
   }
-  const cashStart = Math.max(0, round(portfolio.cash_base + portfolio.accruals_base, 2));
+  const cashStart = Math.max(0, round2(portfolio.cash_base + portfolio.accruals_base, 2));
   baselineMap.set("__CASH__", {
     key: "__CASH__",
     ticker: "CASH",
@@ -37264,7 +38118,7 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
       accumulating: false,
       is_external: true,
       is_cash: false,
-      value_base: round(extAmountBase, 2),
+      value_base: round2(extAmountBase, 2),
       dividend_yield_pct: extTh?.model?.dividend_yield_pct ?? 0
     });
   }
@@ -37342,15 +38196,15 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
       const targetSym = (act.target_ticker || benchTicker).toUpperCase();
       const fromSlot = simMap.get(fromSym);
       if (!fromSlot || fromSlot.value_base <= 0.01) continue;
-      const amt = round(fromSlot.value_base * (Math.min(100, Math.max(1, act.pct ?? 100)) / 100), 2);
-      fromSlot.value_base = round(Math.max(0, fromSlot.value_base - amt), 2);
+      const amt = round2(fromSlot.value_base * (Math.min(100, Math.max(1, act.pct ?? 100)) / 100), 2);
+      fromSlot.value_base = round2(Math.max(0, fromSlot.value_base - amt), 2);
       const targetSlot = ensureSlot(targetSym, {
         yf_symbol: targetSym === benchTicker ? benchYf : void 0,
         us_situs: targetSym === benchTicker ? false : void 0,
         is_etf: targetSym === benchTicker ? true : void 0,
         accumulating: targetSym === benchTicker ? true : void 0
       });
-      targetSlot.value_base = round(targetSlot.value_base + amt, 2);
+      targetSlot.value_base = round2(targetSlot.value_base + amt, 2);
       appliedLog.push({
         label: `Tax swap ${fromSym} \u2192 ${targetSym}`,
         type: "tax_swap",
@@ -37363,11 +38217,11 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
       const fromSlot = simMap.get(sym);
       if (!fromSlot || fromSlot.value_base <= 0.01) continue;
       const rawAmt = act.amount_base !== void 0 ? Math.min(fromSlot.value_base, act.amount_base) : fromSlot.value_base * (Math.min(100, Math.max(1, act.pct ?? 100)) / 100);
-      const amt = round(rawAmt, 2);
+      const amt = round2(rawAmt, 2);
       if (amt <= 0.01) continue;
-      fromSlot.value_base = round(Math.max(0, fromSlot.value_base - amt), 2);
+      fromSlot.value_base = round2(Math.max(0, fromSlot.value_base - amt), 2);
       const cashSlot = simMap.get("__CASH__");
-      cashSlot.value_base = round(cashSlot.value_base + amt, 2);
+      cashSlot.value_base = round2(cashSlot.value_base + amt, 2);
       appliedLog.push({
         label: `Sell ${sym}`,
         type: "sell",
@@ -37380,38 +38234,38 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
     const cashSlot = simMap.get("__CASH__");
     if (act.type === "buy") {
       const sym = act.ticker.toUpperCase();
-      const wanted = round(act.amount_base, 2);
-      const funded = round(Math.min(cashSlot.value_base, wanted), 2);
+      const wanted = round2(act.amount_base, 2);
+      const funded = round2(Math.min(cashSlot.value_base, wanted), 2);
       if (wanted - funded > 0.5) {
-        cashShortfallBase = round(cashShortfallBase + (wanted - funded), 2);
+        cashShortfallBase = round2(cashShortfallBase + (wanted - funded), 2);
       }
       if (funded <= 0.01) continue;
-      cashSlot.value_base = round(Math.max(0, cashSlot.value_base - funded), 2);
+      cashSlot.value_base = round2(Math.max(0, cashSlot.value_base - funded), 2);
       const targetSlot = ensureSlot(sym, {
         yf_symbol: act.yf_symbol,
         us_situs: act.us_situs
       });
-      targetSlot.value_base = round(targetSlot.value_base + funded, 2);
+      targetSlot.value_base = round2(targetSlot.value_base + funded, 2);
       appliedLog.push({
         label: `Buy ${sym}`,
         type: "buy",
         ticker: sym,
         amount_base: funded,
-        note: wanted - funded > 0.5 ? `Capped by available cash (${round(wanted - funded, 0)} shortfall)` : void 0
+        note: wanted - funded > 0.5 ? `Capped by available cash (${round2(wanted - funded, 0)} shortfall)` : void 0
       });
     } else if (act.type === "park_cash_in_benchmark") {
       const reserveAmt = act.keep_reserve && profile.liquidity_reserve.enabled ? profile.liquidity_reserve.amount_base : 0;
       const excessCash = Math.max(0, cashSlot.value_base - reserveAmt);
-      const amt = round(excessCash * (Math.min(100, Math.max(1, act.pct ?? 100)) / 100), 2);
+      const amt = round2(excessCash * (Math.min(100, Math.max(1, act.pct ?? 100)) / 100), 2);
       if (amt <= 0.01) continue;
-      cashSlot.value_base = round(Math.max(0, cashSlot.value_base - amt), 2);
+      cashSlot.value_base = round2(Math.max(0, cashSlot.value_base - amt), 2);
       const benchSlot = ensureSlot(benchTicker, {
         yf_symbol: benchYf,
         us_situs: false,
         is_etf: true,
         accumulating: true
       });
-      benchSlot.value_base = round(benchSlot.value_base + amt, 2);
+      benchSlot.value_base = round2(benchSlot.value_base + amt, 2);
       appliedLog.push({
         label: `Sweep excess cash \u2192 ${benchTicker}`,
         type: "park_cash_in_benchmark",
@@ -37438,13 +38292,20 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
     fxUsdToBase
   );
   const estMarginalRate = profile.tax_profile.nra_us_estate_tax_enabled && baseRiskTax.estate_tax_base > 0 ? 34 : 0;
+  const returnModel = req.return_model ?? "black_litterman";
+  const simEngineReq = req.simulation_engine ?? "block_bootstrap";
+  const blockLenWeeks = Math.max(2, Math.min(26, req.block_length_weeks ?? 6));
   const assets = allKeys.map((key) => {
     const slot = simMap.get(key) ?? baselineMap.get(key);
     if (slot.is_cash) {
       return {
         key,
         slot,
+        rawMu: rfPct / 100,
         mu: rfPct / 100,
+        hasDossierView: false,
+        viewWarningsCount: 0,
+        dispersionSpread: null,
         vol: 5e-3,
         returnSource: "risk_free",
         retMap: /* @__PURE__ */ new Map(),
@@ -37463,25 +38324,31 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
         accumulating: slot.accumulating
       }
     );
-    let mu = (benchCagrPct - taxInfo.total_tax_drag_pct) / 100;
+    let rawMu = (benchCagrPct - taxInfo.total_tax_drag_pct) / 100;
     let returnSource = "unmodeled_default";
+    let hasDossierView = false;
+    let viewWarningsCount = 0;
+    let dispersionSpread = null;
     let scenVol = null;
     if (th?.scenario_summary) {
       const s = th.scenario_summary;
-      mu = Math.max(-0.2, Math.min(0.35, s.expected_after_tax_cagr_pct / 100));
+      rawMu = Math.max(-0.2, Math.min(0.35, s.expected_after_tax_cagr_pct / 100));
       returnSource = "dossier_scenarios";
+      hasDossierView = true;
+      viewWarningsCount = s.valuation_warnings?.length ?? 0;
       const bearR = s.cases.bear.after_tax_cagr_pct / 100;
       const bullR = s.cases.bull.after_tax_cagr_pct / 100;
       const spread = Math.max(0.06, bullR - bearR);
+      dispersionSpread = spread;
       scenVol = Math.max(0.14, Math.min(0.75, spread * 1.15));
     } else if (slot.ticker === benchTicker) {
-      mu = benchCagrPct / 100;
+      rawMu = benchCagrPct / 100;
       returnSource = "benchmark";
     } else if (slot.is_etf) {
-      mu = (benchCagrPct - taxInfo.total_tax_drag_pct) / 100;
+      rawMu = (benchCagrPct - taxInfo.total_tax_drag_pct) / 100;
       returnSource = "etf_benchmark";
     } else {
-      mu = (benchCagrPct + 0.5 - taxInfo.total_tax_drag_pct) / 100;
+      rawMu = (benchCagrPct + 0.5 - taxInfo.total_tax_drag_pct) / 100;
       returnSource = "unmodeled_default";
     }
     const retMap = buildWeeklyReturnMapByWeek(slot.ticker, slot.yf_symbol, historyCache);
@@ -37492,7 +38359,11 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
     return {
       key,
       slot,
-      mu,
+      rawMu,
+      mu: rawMu,
+      hasDossierView,
+      viewWarningsCount,
+      dispersionSpread,
       vol,
       returnSource,
       retMap,
@@ -37532,6 +38403,7 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
   }
   const avgCorr = pairwiseCount > 0 ? Math.max(0.1, Math.min(0.8, pairwiseSum / pairwiseCount)) : 0.45;
   const shrinkLambda = 0.25;
+  const shrunkCorr = Array.from({ length: n }, () => Array(n).fill(0));
   const cov = Array.from({ length: n }, () => Array(n).fill(0));
   for (let i = 0; i < n; i += 1) {
     for (let j = 0; j < n; j += 1) {
@@ -37541,6 +38413,7 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
       if (i !== j && !a.slot.is_cash && !b.slot.is_cash) {
         corrIJ = (1 - shrinkLambda) * corrIJ + shrinkLambda * avgCorr;
       }
+      shrunkCorr[i][j] = corrIJ;
       cov[i][j] = a.vol * b.vol * corrIJ;
     }
   }
@@ -37549,52 +38422,90 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
   const simStartVec = assets.map((a) => simMap.get(a.key)?.value_base ?? 0);
   const baseStartTotal = baseStartVec.reduce((acc, v) => acc + v, 0);
   const simStartTotal = simStartVec.reduce((acc, v) => acc + v, 0);
-  const benchEndBase = round(baseStartTotal * Math.pow(1 + benchCagrPct / 100, horizon), 2);
-  const baseYearSamples = Array.from({ length: horizon + 1 }, () => []);
-  const simYearSamples = Array.from({ length: horizon + 1 }, () => []);
-  const rng = mulberry32(20260601 ^ horizon * 31 ^ simulations * 17);
-  const zStd = new Float64Array(n);
-  const corrShock = new Float64Array(n);
-  const baseCur = new Float64Array(n);
-  const simCur = new Float64Array(n);
-  for (let p = 0; p < simulations; p += 1) {
-    let bSum0 = 0;
-    let sSum0 = 0;
-    for (let i = 0; i < n; i += 1) {
-      baseCur[i] = baseStartVec[i];
-      simCur[i] = simStartVec[i];
-      bSum0 += baseCur[i];
-      sSum0 += simCur[i];
+  const benchEndBase = round2(baseStartTotal * Math.pow(1 + benchCagrPct / 100, horizon), 2);
+  const eqTotal = Math.max(1, baseStartTotal);
+  const blResult = computeBlackLittermanPosterior(
+    assets.map((a, idx) => ({
+      ticker: a.slot.ticker,
+      is_cash: a.slot.is_cash,
+      market_weight: (baseStartVec[idx] ?? 0) / eqTotal,
+      raw_view_cagr: a.hasDossierView ? a.rawMu : null,
+      view_warnings_count: a.viewWarningsCount,
+      dispersion_spread: a.dispersionSpread
+    })),
+    cov,
+    {
+      rfPct,
+      benchmarkCagrPct: benchCagrPct,
+      brierScore: opts?.brierScore ?? null,
+      brierResolvedCount: opts?.brierResolvedCount ?? 0
     }
-    baseYearSamples[0].push(bSum0);
-    simYearSamples[0].push(sSum0);
-    for (let yr = 1; yr <= horizon; yr += 1) {
-      for (let i = 0; i < n; i += 1) {
-        zStd[i] = sampleStandardNormal(rng);
+  );
+  if (returnModel === "black_litterman") {
+    for (let i = 0; i < n; i += 1) {
+      const a = assets[i];
+      if (a.slot.is_cash) continue;
+      if (a.slot.ticker === benchTicker && !a.hasDossierView) {
+        a.mu = benchCagrPct / 100;
+        continue;
       }
-      const tScale = sampleStudentTScale(rng, 6);
-      let bSum = 0;
-      let sSum = 0;
-      for (let i = 0; i < n; i += 1) {
-        let dot = 0;
-        const rowL = L[i];
-        for (let k = 0; k <= i; k += 1) {
-          dot += rowL[k] * zStd[k];
-        }
-        const a = assets[i];
-        const shock = a.slot.is_cash ? dot : dot * tScale;
-        corrShock[i] = shock;
-        const drift = a.mu - 0.5 * a.vol * a.vol;
-        const growth = Math.exp(Math.max(-2.2, Math.min(1.6, drift + shock)));
-        baseCur[i] = baseCur[i] * growth;
-        simCur[i] = simCur[i] * growth;
-        bSum += baseCur[i];
-        sSum += simCur[i];
+      const blAsset = blResult.assets[i];
+      a.mu = blAsset.posterior_cagr_pct / 100;
+      if (a.hasDossierView) {
+        a.returnSource = "black_litterman";
       }
-      baseYearSamples[yr].push(bSum);
-      simYearSamples[yr].push(sSum);
     }
   }
+  const tickersList = assets.map((a) => a.slot.ticker);
+  const cashFlags = assets.map((a) => a.slot.is_cash);
+  const benchAssetIdx = assets.findIndex((a) => !a.slot.is_cash && a.slot.ticker === benchTicker);
+  const baseWeights = baseStartVec.map((v) => baseStartTotal > 0 ? v / baseStartTotal : 0);
+  const simWeights = simStartVec.map((v) => simStartTotal > 0 ? v / simStartTotal : 0);
+  const baseFactorRisk = computeFactorRiskDecomposition(
+    tickersList,
+    cashFlags,
+    baseWeights,
+    cov,
+    benchAssetIdx >= 0 ? benchAssetIdx : null
+  );
+  const simFactorRisk = computeFactorRiskDecomposition(
+    tickersList,
+    cashFlags,
+    simWeights,
+    cov,
+    benchAssetIdx >= 0 ? benchAssetIdx : null
+  );
+  const hrpActiveIndices = assets.map((a, idx) => ({ a, idx })).filter((x) => !x.a.slot.is_cash && (simStartVec[x.idx] ?? 0) > 0.01).map((x) => x.idx);
+  const hrpSubCov = hrpActiveIndices.map((r) => hrpActiveIndices.map((c) => cov[r][c]));
+  const hrpSubCorr = hrpActiveIndices.map((r) => hrpActiveIndices.map((c) => shrunkCorr[r][c]));
+  const hrpRes = computeHrpWeights(
+    hrpActiveIndices.map((idx) => ({
+      ticker: assets[idx].slot.ticker,
+      is_cash: false,
+      max_weight_pct: assets[idx].maxWeightPct
+    })),
+    hrpSubCov,
+    hrpSubCorr
+  );
+  const simRun = runCorrelatedWealthSimulation({
+    engineRequested: simEngineReq,
+    blockLengthWeeks: blockLenWeeks,
+    horizonYears: horizon,
+    simulations,
+    volMultiplier: volMult,
+    assets: assets.map((a) => ({
+      mu: a.mu,
+      vol: a.vol,
+      is_cash: a.slot.is_cash,
+      retMap: a.retMap
+    })),
+    cholL: L,
+    baseStartVec,
+    simStartVec,
+    seed: 20260701 ^ horizon * 31 ^ simulations * 17 ^ blockLenWeeks * 7
+  });
+  const baseYearSamples = simRun.base_year_samples;
+  const simYearSamples = simRun.sim_year_samples;
   const computeAnalyticalStats = (vec, total) => {
     const w = vec.map((v) => total > 0 ? v / total : 0);
     const sigmaW = Array(n).fill(0);
@@ -37610,37 +38521,46 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
       portVar += w[i] * sw;
     }
     const portVol = Math.sqrt(Math.max(1e-8, portVar));
-    const sharpe = portVol > 1e-6 ? round((portMu - rfPct / 100) / portVol, 2) : 0;
-    const mrcPct = assets.map((_, i) => portVar > 1e-9 ? round(w[i] * sigmaW[i] / portVar * 100, 1) : 0);
+    const sharpe = portVol > 1e-6 ? round2((portMu - rfPct / 100) / portVol, 2) : 0;
+    const mrcPct = assets.map((_, i) => portVar > 1e-9 ? round2(w[i] * sigmaW[i] / portVar * 100, 1) : 0);
     const corrWithPort = assets.map(
-      (a, i) => a.slot.is_cash || portVol <= 1e-6 || a.vol <= 1e-6 ? 0 : round(Math.max(-1, Math.min(1, sigmaW[i] / (a.vol * portVol))), 2)
+      (a, i) => a.slot.is_cash || portVol <= 1e-6 || a.vol <= 1e-6 ? 0 : round2(Math.max(-1, Math.min(1, sigmaW[i] / (a.vol * portVol))), 2)
     );
-    return { volPct: round(portVol * 100, 2), sharpe, mrcPct, corrWithPort };
+    return { volPct: round2(portVol * 100, 2), sharpe, mrcPct, corrWithPort };
   };
   const baseAnalytics = computeAnalyticalStats(baseStartVec, baseStartTotal);
   const simAnalytics = computeAnalyticalStats(simStartVec, simStartTotal);
-  const summarizePath = (yearSamples, startTotal, analytics, riskTax, endingCashBase) => {
+  const summarizePath = (yearSamples, pathMaxDds, startTotal, analytics, riskTax, endingCashBase, factorRisk) => {
     const trajectory = yearSamples.map((arr, yr) => {
       const sorted = [...arr].sort((a, b) => a - b);
       const mean = arr.reduce((s, v) => s + v, 0) / Math.max(1, arr.length);
       return {
         year: yr,
-        p10_base: round(quantile(sorted, 0.1), 0),
-        p25_base: round(quantile(sorted, 0.25), 0),
-        p50_base: round(quantile(sorted, 0.5), 0),
-        p75_base: round(quantile(sorted, 0.75), 0),
-        p90_base: round(quantile(sorted, 0.9), 0),
-        mean_base: round(mean, 0)
+        p10_base: round2(quantile(sorted, 0.1), 0),
+        p25_base: round2(quantile(sorted, 0.25), 0),
+        p50_base: round2(quantile(sorted, 0.5), 0),
+        p75_base: round2(quantile(sorted, 0.75), 0),
+        p90_base: round2(quantile(sorted, 0.9), 0),
+        mean_base: round2(mean, 0)
       };
     });
     const finalSamples = yearSamples[horizon] ?? [startTotal];
+    const sortedFinal = [...finalSamples].sort((a, b) => a - b);
+    const tailCount = Math.max(1, Math.floor(sortedFinal.length * 0.1));
+    let tailSum = 0;
+    for (let i = 0; i < tailCount; i += 1) tailSum += sortedFinal[i];
+    const cvar10Base = round2(tailSum / tailCount, 0);
+    const sortedDd = [...pathMaxDds].sort((a, b) => a - b);
+    const ddP95 = sortedDd.length > 0 ? round2(quantile(sortedDd, 0.05), 1) : 0;
+    const ddP50 = sortedDd.length > 0 ? round2(quantile(sortedDd, 0.5), 1) : 0;
     const finalPt = trajectory[horizon];
     const safeStart = Math.max(1, startTotal);
-    const cagrFrom = (endVal) => round((Math.pow(Math.max(0.01, endVal / safeStart), 1 / horizon) - 1) * 100, 2);
+    const cagrFrom = (endVal) => round2((Math.pow(Math.max(0.01, endVal / safeStart), 1 / horizon) - 1) * 100, 2);
     const beatCount = finalSamples.filter((v) => v >= benchEndBase).length;
     const lossCount = finalSamples.filter((v) => v < startTotal).length;
     return {
-      starting_wealth_base: round(startTotal, 2),
+      starting_wealth_base: round2(startTotal, 2),
+      ending_cvar_10_base: cvar10Base,
       ending_p10_base: finalPt.p10_base,
       ending_p50_base: finalPt.p50_base,
       ending_p90_base: finalPt.p90_base,
@@ -37648,32 +38568,39 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
       expected_cagr_p50_pct: cagrFrom(finalPt.p50_base),
       p10_cagr_pct: cagrFrom(finalPt.p10_base),
       p90_cagr_pct: cagrFrom(finalPt.p90_base),
+      sim_max_dd_p50_pct: ddP50,
+      sim_max_dd_p95_pct: ddP95,
       annual_vol_pct: analytics.volPct,
       expected_sharpe: analytics.sharpe,
-      prob_beat_benchmark_pct: round(beatCount / Math.max(1, finalSamples.length) * 100, 1),
-      prob_loss_pct: round(lossCount / Math.max(1, finalSamples.length) * 100, 1),
+      prob_beat_benchmark_pct: round2(beatCount / Math.max(1, finalSamples.length) * 100, 1),
+      prob_loss_pct: round2(lossCount / Math.max(1, finalSamples.length) * 100, 1),
       us_situs_portfolio_pct: riskTax.us_situs_portfolio_pct,
       estate_tax_base: riskTax.estate_tax_base,
       annual_wht_drag_base: riskTax.annual_wht_drag_base,
       cap_breaches_count: riskTax.cap_breaches_count,
       breached_cap_labels: riskTax.breached_cap_labels,
-      ending_cash_base: round(endingCashBase, 2),
+      ending_cash_base: round2(endingCashBase, 2),
+      factor_risk: factorRisk,
       trajectory
     };
   };
   const baseSummary = summarizePath(
     baseYearSamples,
+    simRun.base_path_max_dd_pct,
     baseStartTotal,
     baseAnalytics,
     baseRiskTax,
-    baselineMap.get("__CASH__")?.value_base ?? 0
+    baselineMap.get("__CASH__")?.value_base ?? 0,
+    baseFactorRisk
   );
   const simSummary = summarizePath(
     simYearSamples,
+    simRun.sim_path_max_dd_pct,
     simStartTotal,
     simAnalytics,
     simRiskTax,
-    simMap.get("__CASH__")?.value_base ?? 0
+    simMap.get("__CASH__")?.value_base ?? 0,
+    simFactorRisk
   );
   const simBreachSet = new Set(simRiskTax.breached_cap_labels);
   const curedCaps = baseRiskTax.breached_cap_labels.filter((l) => !simBreachSet.has(l));
@@ -37682,51 +38609,66 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
     const bVal = baseStartVec[idx];
     const sVal = simStartVec[idx];
     const corrP = simAnalytics.corrWithPort[idx];
-    const corrAdjHurdle = a.slot.is_cash ? rfPct : a.slot.ticker === benchTicker ? benchCagrPct : round(Math.max(benchCagrPct, baseHurdlePct + (corrP - 0.55) * 3), 2);
+    const corrAdjHurdle = a.slot.is_cash ? rfPct : a.slot.ticker === benchTicker ? benchCagrPct : round2(Math.max(benchCagrPct, baseHurdlePct + (corrP - 0.55) * 3), 2);
     const excessMu = a.mu - rfPct / 100;
     const varI = Math.max(0.01, a.vol * a.vol);
     const rawQuarterKellyPct = a.slot.is_cash || excessMu <= 0 ? 0 : 0.25 * (excessMu / varI) * (1 - 0.3 * Math.max(0, corrP - 0.5)) * 100;
-    const boundedKelly = round(Math.max(0, Math.min(a.maxWeightPct, rawQuarterKellyPct)), 1);
+    const boundedKelly = round2(Math.max(0, Math.min(a.maxWeightPct, rawQuarterKellyPct)), 1);
+    const blRow = blResult.assets[idx];
     return {
       ticker: a.slot.ticker,
       is_external: a.slot.is_external,
       is_cash: a.slot.is_cash,
-      before_value_base: round(bVal, 2),
-      after_value_base: round(sVal, 2),
-      before_weight_pct: baseStartTotal > 0 ? round(bVal / baseStartTotal * 100, 2) : 0,
-      after_weight_pct: simStartTotal > 0 ? round(sVal / simStartTotal * 100, 2) : 0,
-      expected_cagr_pct: round(a.mu * 100, 2),
-      annual_vol_pct: round(a.vol * 100, 1),
+      before_value_base: round2(bVal, 2),
+      after_value_base: round2(sVal, 2),
+      before_weight_pct: baseStartTotal > 0 ? round2(bVal / baseStartTotal * 100, 2) : 0,
+      after_weight_pct: simStartTotal > 0 ? round2(sVal / simStartTotal * 100, 2) : 0,
+      expected_cagr_pct: round2(a.mu * 100, 2),
+      prior_cagr_pct: blRow.prior_cagr_pct,
+      raw_view_cagr_pct: blRow.raw_view_cagr_pct,
+      bl_shrinkage_pct: blRow.shrinkage_pct,
+      annual_vol_pct: round2(a.vol * 100, 1),
       return_source: a.returnSource,
       marginal_risk_contrib_pct: simAnalytics.mrcPct[idx],
       corr_with_portfolio: corrP,
       corr_adjusted_hurdle_pct: corrAdjHurdle,
       quarter_kelly_weight_pct: boundedKelly,
+      hrp_weight_pct: a.slot.is_cash ? 0 : hrpRes.weights_by_ticker[a.slot.ticker] ?? 0,
       quality_grade: a.qualityGrade
     };
   }).sort((a, b) => b.after_value_base - a.after_value_base);
+  const engineLabel = simRun.engine_used === "block_bootstrap" ? `Politis-Romano Stationary Block Bootstrap (L=${blockLenWeeks}w across ${simRun.aligned_weeks} aligned weeks)` : `Correlated Student-t (df=6) weekly shocks${simEngineReq === "block_bootstrap" ? ` (fallback: ${simRun.aligned_weeks}w < 80w aligned)` : ""}`;
+  const retLabel = returnModel === "black_litterman" ? "Black-Litterman Brier-calibrated posterior" : "Raw 5Y dossier scenarios";
   return {
     horizon_years: horizon,
     base_currency: profile.base_currency,
     include_external_wealth: includeExt,
-    regime_vol_multiplier: round(volMult, 2),
+    regime_vol_multiplier: round2(volMult, 2),
+    return_model: returnModel,
+    simulation_engine_requested: simEngineReq,
+    simulation_engine_used: simRun.engine_used,
+    block_length_weeks: blockLenWeeks,
+    aligned_history_weeks: simRun.aligned_weeks,
     simulations,
     rf_pct: rfPct,
     benchmark_ticker: benchTicker,
     benchmark_cagr_pct: benchCagrPct,
     benchmark_ending_base: benchEndBase,
+    black_litterman: blResult,
     baseline: baseSummary,
     simulated: simSummary,
     deltas: {
-      p50_base: round(simSummary.ending_p50_base - baseSummary.ending_p50_base, 0),
-      p10_base: round(simSummary.ending_p10_base - baseSummary.ending_p10_base, 0),
-      p90_base: round(simSummary.ending_p90_base - baseSummary.ending_p90_base, 0),
-      cagr_p50_pct: round(simSummary.expected_cagr_p50_pct - baseSummary.expected_cagr_p50_pct, 2),
-      annual_vol_pct: round(simSummary.annual_vol_pct - baseSummary.annual_vol_pct, 2),
-      sharpe: round(simSummary.expected_sharpe - baseSummary.expected_sharpe, 2),
-      estate_tax_saved_base: round(baseSummary.estate_tax_base - simSummary.estate_tax_base, 2),
-      annual_wht_saved_base: round(baseSummary.annual_wht_drag_base - simSummary.annual_wht_drag_base, 2),
-      us_situs_delta_pct: round(simSummary.us_situs_portfolio_pct - baseSummary.us_situs_portfolio_pct, 2),
+      p50_base: round2(simSummary.ending_p50_base - baseSummary.ending_p50_base, 0),
+      p10_base: round2(simSummary.ending_p10_base - baseSummary.ending_p10_base, 0),
+      cvar_10_base: round2(simSummary.ending_cvar_10_base - baseSummary.ending_cvar_10_base, 0),
+      p90_base: round2(simSummary.ending_p90_base - baseSummary.ending_p90_base, 0),
+      cagr_p50_pct: round2(simSummary.expected_cagr_p50_pct - baseSummary.expected_cagr_p50_pct, 2),
+      annual_vol_pct: round2(simSummary.annual_vol_pct - baseSummary.annual_vol_pct, 2),
+      sharpe: round2(simSummary.expected_sharpe - baseSummary.expected_sharpe, 2),
+      effective_bets: round2(simFactorRisk.effective_bets - baseFactorRisk.effective_bets, 2),
+      estate_tax_saved_base: round2(baseSummary.estate_tax_base - simSummary.estate_tax_base, 2),
+      annual_wht_saved_base: round2(baseSummary.annual_wht_drag_base - simSummary.annual_wht_drag_base, 2),
+      us_situs_delta_pct: round2(simSummary.us_situs_portfolio_pct - baseSummary.us_situs_portfolio_pct, 2),
       cap_breaches_delta: simSummary.cap_breaches_count - baseSummary.cap_breaches_count,
       cured_caps: curedCaps,
       remaining_breached_caps: simRiskTax.breached_cap_labels
@@ -37734,13 +38676,13 @@ function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, et
     applied_actions: appliedLog,
     cash_shortfall_base: cashShortfallBase,
     positions: positionRows,
-    methodology_note: `Seeded ${simulations}-path correlated Student-t (df=6) simulation using Ledoit-Wolf shrunk covariance (\u03BB=0.25) blended with dossier 5Y after-tax scenarios, Rf=${rfPct}%, Vol\xD7${round(volMult, 2)}. Forecast bands reflect modeled assumptions & historical covariance, not guarantees.`
+    methodology_note: `Seeded ${simulations}-path ${engineLabel} using Ledoit-Wolf shrunk covariance (\u03BB=0.25), ${retLabel}, Rf=${rfPct}%, Vol\xD7${round2(volMult, 2)}. Forecast cones reflect modeled assumptions & historical covariance, not guarantees.`
   };
 }
 
 // src/server/market.ts
 var YF_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (compatible; InvestmentOS-Plugin/0.6.0)",
+  "User-Agent": "Mozilla/5.0 (compatible; InvestmentOS-Plugin/0.7.0)",
   Accept: "application/json"
 };
 var YAHOO_HISTORY_TTL_MS = 24 * 60 * 60 * 1e3;
@@ -37748,7 +38690,7 @@ var IBKR_HISTORY_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
 function round4(n) {
   return Math.round((n + Number.EPSILON) * 1e4) / 1e4;
 }
-function round2(n) {
+function round22(n) {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 function inferMarketState(meta3, nowSec) {
@@ -37877,8 +38819,8 @@ async function fetchYahooChartQuote(symbol2, timeoutMs = 7e3, fetchImpl = fetch)
       prevClose = meta3.previousClose * scale;
     }
     const anchor1mRaw = typeof meta3.chartPreviousClose === "number" && meta3.chartPreviousClose > 0 ? meta3.chartPreviousClose * scale : sparkline[0];
-    const change1d = prevClose && prevClose > 0 ? round2((price - prevClose) / prevClose * 100) : null;
-    const change1m = anchor1mRaw && anchor1mRaw > 0 ? round2((price - anchor1mRaw) / anchor1mRaw * 100) : null;
+    const change1d = prevClose && prevClose > 0 ? round22((price - prevClose) / prevClose * 100) : null;
+    const change1m = anchor1mRaw && anchor1mRaw > 0 ? round22((price - anchor1mRaw) / anchor1mRaw * 100) : null;
     const high52w = typeof meta3.fiftyTwoWeekHigh === "number" && Number.isFinite(meta3.fiftyTwoWeekHigh) && meta3.fiftyTwoWeekHigh > 0 ? round4(meta3.fiftyTwoWeekHigh * scale) : null;
     const low52w = typeof meta3.fiftyTwoWeekLow === "number" && Number.isFinite(meta3.fiftyTwoWeekLow) && meta3.fiftyTwoWeekLow > 0 ? round4(meta3.fiftyTwoWeekLow * scale) : null;
     return {
@@ -37962,13 +38904,13 @@ async function fetchMacroRegime(opts) {
   const dxyRaw = quotes.get("DX-Y.NYB")?.price ?? null;
   const normalizeYield = (val) => {
     if (val === null || !Number.isFinite(val)) return null;
-    return round2(val > 25 ? val / 10 : val);
+    return round22(val > 25 ? val / 10 : val);
   };
-  const vix = vixRaw !== null ? round2(vixRaw) : null;
+  const vix = vixRaw !== null ? round22(vixRaw) : null;
   const us10yPct = normalizeYield(tnxRaw);
   const us3mPct = normalizeYield(irxRaw);
   const hyCreditRatio = hygRaw !== null && iefRaw !== null && iefRaw > 0 ? round4(hygRaw / iefRaw) : null;
-  const dxy = dxyRaw !== null ? round2(dxyRaw) : null;
+  const dxy = dxyRaw !== null ? round22(dxyRaw) : null;
   const regimeLabel = classifyMacroRegime(vix, hyCreditRatio);
   const noteParts = [];
   if (us10yPct !== null && us3mPct !== null) {
@@ -38669,7 +39611,7 @@ function capturePitContextForTest(dataDir, profile, ticker, priceAtTest, existin
     }
     const navBase = portfolio.reported_nav_base ?? totalPosBase + portfolio.cash_base + portfolio.accruals_base;
     if (navBase > 0) {
-      portfolioWeightPct = round(symBase / navBase * 100, 2);
+      portfolioWeightPct = round2(symBase / navBase * 100, 2);
     }
   }
   let expectedAfterTaxCagr = null;
@@ -38701,7 +39643,7 @@ function capturePitContextForTest(dataDir, profile, ticker, priceAtTest, existin
     fundamentalsPeriod = null;
   }
   return {
-    benchmarkPrice: benchmarkPrice !== null && benchmarkPrice > 0 ? round(benchmarkPrice, 4) : null,
+    benchmarkPrice: benchmarkPrice !== null && benchmarkPrice > 0 ? round2(benchmarkPrice, 4) : null,
     pitSnapshot: {
       vix: macroRegime?.vix ?? marketCache?.vix ?? null,
       us10y_pct: macroRegime?.us10y_pct ?? null,
@@ -38798,17 +39740,17 @@ function mergePortfolioPositions(existing, profile, input2) {
         us_situs: row.us_situs ?? old?.us_situs ?? inferred.us_situs,
         currency: CurrencySchema.parse(row.currency ?? old?.currency ?? inferred.currency),
         qty: Number.isInteger(row.qty) ? row.qty : row.qty,
-        avg_cost: round(avgCost, 4),
-        ref_price: round(refPrice, 4)
+        avg_cost: round2(avgCost, 4),
+        ref_price: round2(refPrice, 4)
       });
     }
     current.positions = Array.from(workingMap.values()).sort((a, b) => a.ticker.localeCompare(b.ticker));
   }
-  if (input2.cash_base !== void 0) current.cash_base = round(input2.cash_base, 2);
-  if (input2.accruals_base !== void 0) current.accruals_base = round(input2.accruals_base, 2);
+  if (input2.cash_base !== void 0) current.cash_base = round2(input2.cash_base, 2);
+  if (input2.accruals_base !== void 0) current.accruals_base = round2(input2.accruals_base, 2);
   if (input2.fx_rates) {
     for (const [k, v] of Object.entries(input2.fx_rates)) {
-      current.fx_rates[CurrencySchema.parse(k)] = round(v, 6);
+      current.fx_rates[CurrencySchema.parse(k)] = round2(v, 6);
     }
   }
   current.fx_rates[baseCcy] = 1;
@@ -38933,7 +39875,7 @@ function buildSyntheticWeeklySeries(endPrice, annualDrift, annualVol, seedInit, 
   const points = [];
   for (let i = 0; i <= weeks; i += 1) {
     const date5 = new Date(startMs + i * 7 * 86400 * 1e3).toISOString().slice(0, 10);
-    points.push({ date: date5, close: round(rawLevels[i] * scale, 2) });
+    points.push({ date: date5, close: round2(rawLevels[i] * scale, 2) });
   }
   return points;
 }
@@ -40068,7 +41010,7 @@ async function buildDashboardPayload(opts) {
     }
     const vixQ = liveQuotes.get("^VIX");
     if (vixQ) {
-      vixVal = round(vixQ.price, 2);
+      vixVal = round2(vixQ.price, 2);
       if (vixQ.sparkline.length > 0) {
         vixSparkline = vixQ.sparkline;
       }
@@ -40079,9 +41021,9 @@ async function buildDashboardPayload(opts) {
     for (const [sym, q] of liveQuotes.entries()) {
       if (sym === "^VIX") continue;
       nextQuotesCache[sym] = {
-        price: round(q.price, 4),
-        regular_price: round(q.regular_price, 4),
-        extended_price: q.extended_price !== null ? round(q.extended_price, 4) : null,
+        price: round2(q.price, 4),
+        regular_price: round2(q.regular_price, 4),
+        extended_price: q.extended_price !== null ? round2(q.extended_price, 4) : null,
         market_state: q.market_state,
         quote_time: q.quote_time,
         fifty_two_week_high: q.fifty_two_week_high,
@@ -40165,32 +41107,32 @@ async function buildDashboardPayload(opts) {
       us_situs: p.us_situs,
       currency: tradingCcy,
       qty: p.qty,
-      avg_cost: round(p.avg_cost, 4),
-      price: round(priceTrading, 4),
-      regular_price: round(regularPrice, 4),
-      extended_price: extendedPrice !== null ? round(extendedPrice, 4) : null,
+      avg_cost: round2(p.avg_cost, 4),
+      price: round2(priceTrading, 4),
+      regular_price: round2(regularPrice, 4),
+      extended_price: extendedPrice !== null ? round2(extendedPrice, 4) : null,
       market_state: marketState,
       quote_time: quoteTime,
       stale: isStale,
       sparkline,
       change_1d_pct: change1d,
       change_1m_pct: change1m,
-      mv_trading: round(mvTrading, 2),
-      mv_usd: round(mvUsd, 2),
-      mv_base: round(mvBase, 2),
-      pnl_trading: round(pnlTrading, 2),
-      pnl_pct: round(pnlPct, 2),
+      mv_trading: round2(mvTrading, 2),
+      mv_usd: round2(mvUsd, 2),
+      mv_base: round2(mvBase, 2),
+      pnl_trading: round2(pnlTrading, 2),
+      pnl_pct: round2(pnlPct, 2),
       weight_nav_pct: 0
     };
   });
   const cashBase = portfolio.cash_base;
   const accrualsBase = portfolio.accruals_base;
-  const navBase = !opts.live && !useCachedLive && portfolio.reported_nav_base !== void 0 ? portfolio.reported_nav_base : round(totPosBase + cashBase + accrualsBase, 2);
+  const navBase = !opts.live && !useCachedLive && portfolio.reported_nav_base !== void 0 ? portfolio.reported_nav_base : round2(totPosBase + cashBase + accrualsBase, 2);
   const navUsd = fxUsdToBase > 0 ? navBase / fxUsdToBase : 0;
   const positionWeightMap = /* @__PURE__ */ new Map();
   const positionAssetTypeMap = /* @__PURE__ */ new Map();
   for (const pos of positionsOut) {
-    pos.weight_nav_pct = navBase > 0 ? round(pos.mv_base / navBase * 100, 2) : 0;
+    pos.weight_nav_pct = navBase > 0 ? round2(pos.mv_base / navBase * 100, 2) : 0;
     positionWeightMap.set(pos.ticker.toUpperCase(), pos.weight_nav_pct);
     positionAssetTypeMap.set(pos.ticker.toUpperCase(), pos.asset_type);
   }
@@ -40246,11 +41188,11 @@ async function buildDashboardPayload(opts) {
     const totalBase = totalUsd * fxUsdToBase;
     const row = {
       name: canon,
-      direct_usd: round(directUsd, 2),
-      via_etfs_usd: round(viaEtfsUsd, 2),
-      total_usd: round(totalUsd, 2),
-      total_base: round(totalBase, 2),
-      pct_nav: navBase > 0 ? round(totalBase / navBase * 100, 2) : 0
+      direct_usd: round2(directUsd, 2),
+      via_etfs_usd: round2(viaEtfsUsd, 2),
+      total_usd: round2(totalUsd, 2),
+      total_base: round2(totalBase, 2),
+      pct_nav: navBase > 0 ? round2(totalBase / navBase * 100, 2) : 0
     };
     ltRows.push(row);
     ltMap.set(canon, row);
@@ -40259,7 +41201,7 @@ async function buildDashboardPayload(opts) {
   const usSitusPortfolioUsd = positionsOut.filter((p) => p.us_situs).reduce((acc, p) => acc + p.mv_usd, 0);
   const usSitusEtfsUsd = positionsOut.filter((p) => p.us_situs && p.asset_type.toUpperCase().includes("ETF")).reduce((acc, p) => acc + p.mv_usd, 0);
   const usSitusStocksUsd = usSitusPortfolioUsd - usSitusEtfsUsd;
-  const usSitusPortfolioPct = navBase > 0 ? round(usSitusPortfolioUsd * fxUsdToBase / navBase * 100, 2) : 0;
+  const usSitusPortfolioPct = navBase > 0 ? round2(usSitusPortfolioUsd * fxUsdToBase / navBase * 100, 2) : 0;
   const evaluateBucketUsd = (rule) => {
     const seenCanon = /* @__PURE__ */ new Set();
     let usdSum = 0;
@@ -40294,12 +41236,12 @@ async function buildDashboardPayload(opts) {
       valPct = usSitusPortfolioPct;
     } else if (rule.kind === "bucket") {
       const bucketUsd = evaluateBucketUsd(rule);
-      valPct = navBase > 0 ? round(bucketUsd * fxUsdToBase / navBase * 100, 2) : 0;
+      valPct = navBase > 0 ? round2(bucketUsd * fxUsdToBase / navBase * 100, 2) : 0;
     }
     return {
       id: rule.id,
       label: rule.label,
-      value_pct: round(valPct, 2),
+      value_pct: round2(valPct, 2),
       cap_pct: rule.cap_pct,
       status: valPct <= rule.cap_pct ? "PASS" : "BREACH"
     };
@@ -40317,9 +41259,9 @@ async function buildDashboardPayload(opts) {
     if (resolvedExtPrice !== null && resolvedExtPrice > 0) {
       const extCcy = liveQ?.currency ?? cachedQ?.currency ?? "USD";
       const extFx = fxRates[extCcy] ?? fxUsdToBase;
-      extAmountBase = round(ext.qty * resolvedExtPrice * extFx, 2);
+      extAmountBase = round2(ext.qty * resolvedExtPrice * extFx, 2);
       extLiveMarked = true;
-      extPriceUsed = round(resolvedExtPrice, 4);
+      extPriceUsed = round2(resolvedExtPrice, 4);
     }
   }
   const reserveAmountBase = reserve.enabled ? reserve.amount_base : 0;
@@ -40328,7 +41270,7 @@ async function buildDashboardPayload(opts) {
   const extCanon = ext.ticker ? canonicalAssetName(ext.ticker) : null;
   const extPortfolioBase = extCanon ? ltMap.get(extCanon)?.total_base ?? 0 : 0;
   const extTotalBase = extAmountBase + extPortfolioBase;
-  const extPctWealth = totalLiquidWealthBase > 0 ? round(extTotalBase / totalLiquidWealthBase * 100, 2) : 0;
+  const extPctWealth = totalLiquidWealthBase > 0 ? round2(extTotalBase / totalLiquidWealthBase * 100, 2) : 0;
   let pairedExtraBase = 0;
   const seenPaired = new Set(extCanon ? [extCanon] : []);
   for (const pt of ext.paired_tickers ?? []) {
@@ -40338,7 +41280,7 @@ async function buildDashboardPayload(opts) {
     pairedExtraBase += ltMap.get(canon)?.total_base ?? 0;
   }
   const pairedTotalBase = extTotalBase + pairedExtraBase;
-  const pairedPctWealth = totalLiquidWealthBase > 0 ? round(pairedTotalBase / totalLiquidWealthBase * 100, 2) : 0;
+  const pairedPctWealth = totalLiquidWealthBase > 0 ? round2(pairedTotalBase / totalLiquidWealthBase * 100, 2) : 0;
   const pairedLabel = ext.paired_label ?? (ext.ticker && (ext.paired_tickers?.length ?? 0) > 0 ? `${ext.ticker}+${ext.paired_tickers.join("+")}` : `${ext.ticker ?? "External"} Cluster`);
   const primaryBucketRule = profile.risk_caps.find((r) => r.kind === "bucket") ?? null;
   const primaryBucketCapRow = primaryBucketRule ? riskCaps.find((r) => r.id === primaryBucketRule.id) : null;
@@ -40348,7 +41290,7 @@ async function buildDashboardPayload(opts) {
     ext.enabled && primaryBucketRule && (ext.sector_tags.includes(primaryBucketRule.id) || extCanon && (primaryBucketRule.tickers ?? []).some((t) => canonicalAssetName(t) === extCanon))
   );
   const primaryBucketTwBase = primaryBucketPortfolioBase + (extIncludedInBucket ? extAmountBase : 0);
-  const primaryBucketTwPct = totalLiquidWealthBase > 0 ? round(primaryBucketTwBase / totalLiquidWealthBase * 100, 2) : 0;
+  const primaryBucketTwPct = totalLiquidWealthBase > 0 ? round2(primaryBucketTwBase / totalLiquidWealthBase * 100, 2) : 0;
   const estateEnabled = profile.tax_profile.nra_us_estate_tax_enabled;
   const extUsSitusUsd = ext.enabled && ext.us_situs && fxUsdToBase > 0 ? extAmountBase / fxUsdToBase : 0;
   const totalUsSitusUsd = usSitusPortfolioUsd + extUsSitusUsd;
@@ -40399,8 +41341,8 @@ async function buildDashboardPayload(opts) {
       etfWeights: etfCfg
     }
   );
-  const deployableCashBase = round(Math.max(0, cashBase - reserveAmountBase), 2);
-  const availableFundingBase = round(deployableCashBase + rotationQueue.total_freed_base, 2);
+  const deployableCashBase = round2(Math.max(0, cashBase - reserveAmountBase), 2);
+  const availableFundingBase = round2(deployableCashBase + rotationQueue.total_freed_base, 2);
   const themesBySlug = new Map(themes.map((th) => [th.slug, th]));
   const themeSlugsByTicker = /* @__PURE__ */ new Map();
   for (const th of themes) {
@@ -40427,7 +41369,7 @@ async function buildDashboardPayload(opts) {
     const thesisCcy = String(fm.currency || "USD").toUpperCase();
     const refP = typeof fm.last_ref_price === "number" ? fm.last_ref_price : null;
     const cachedQ = cachedQuotesMap[yfSym];
-    const cachedPrice = cachedQ && Number.isFinite(cachedQ.price) ? round(cachedQ.price, 4) : null;
+    const cachedPrice = cachedQ && Number.isFinite(cachedQ.price) ? round2(cachedQ.price, 4) : null;
     let price = refP;
     let regularPrice = cachedQ?.regular_price ?? refP;
     let extendedPrice = cachedQ?.extended_price ?? null;
@@ -40495,7 +41437,7 @@ async function buildDashboardPayload(opts) {
       currentPricesMap.set(sym, price);
     }
     const ccyFxToBase = fxRates[ccy] ?? fxUsdToBase;
-    const priceBase = price !== null ? round(price * ccyFxToBase, 2) : null;
+    const priceBase = price !== null ? round2(price * ccyFxToBase, 2) : null;
     const maxWeight = fm.max_weight_pct !== void 0 && fm.max_weight_pct !== null ? fm.max_weight_pct : fm.max_ibkr_weight_pct ?? null;
     const parsedTier = DossierTierSchema.safeParse(fm.tier);
     const tier = parsedTier.success ? parsedTier.data : "active";
@@ -40593,7 +41535,7 @@ async function buildDashboardPayload(opts) {
     );
     const lastAuditedDate = typeof fm.last_audited_date === "string" ? fm.last_audited_date : typeof fm.last_tested_date === "string" ? fm.last_tested_date : null;
     const priceAtAudit = typeof fm.price_at_audit === "number" && Number.isFinite(fm.price_at_audit) ? fm.price_at_audit : typeof recentTests[0]?.price_at_test === "number" ? recentTests[0].price_at_test : refP;
-    const priceDriftPct = priceAtAudit && priceAtAudit > 0 && price !== null ? round((price - priceAtAudit) / priceAtAudit * 100, 2) : null;
+    const priceDriftPct = priceAtAudit && priceAtAudit > 0 && price !== null ? round2((price - priceAtAudit) / priceAtAudit * 100, 2) : null;
     const priceDriftAlert = priceDriftPct !== null && Math.abs(priceDriftPct) >= 15;
     const newerSecRaw = lastAuditedDate ? tickerFilings.find((f) => f.filingDate > lastAuditedDate) ?? null : null;
     const newerSecFiling = newerSecRaw ? { form: newerSecRaw.form, filingDate: newerSecRaw.filingDate, url: newerSecRaw.url } : null;
@@ -40625,8 +41567,8 @@ async function buildDashboardPayload(opts) {
     const needsRetest = priceDriftAlert || Boolean(newerSecFiling) || themeUpdatedAfterAudit;
     const provenance = {
       last_audited_date: lastAuditedDate,
-      price_at_audit: priceAtAudit !== null ? round(priceAtAudit, 4) : null,
-      live_price: price !== null ? round(price, 4) : null,
+      price_at_audit: priceAtAudit !== null ? round2(priceAtAudit, 4) : null,
+      live_price: price !== null ? round2(price, 4) : null,
       price_drift_pct: priceDriftPct,
       price_drift_alert: priceDriftAlert,
       newer_sec_filing: newerSecFiling,
@@ -40668,9 +41610,9 @@ async function buildDashboardPayload(opts) {
       reentry_trigger: typeof fm.reentry_trigger === "string" ? fm.reentry_trigger : null,
       reentry_price: reentryPrice,
       reentry_alert: dipTriage.reentry_alert,
-      price: price !== null ? round(price, 4) : null,
-      regular_price: regularPrice !== null ? round(regularPrice, 4) : null,
-      extended_price: extendedPrice !== null ? round(extendedPrice, 4) : null,
+      price: price !== null ? round2(price, 4) : null,
+      regular_price: regularPrice !== null ? round2(regularPrice, 4) : null,
+      extended_price: extendedPrice !== null ? round2(extendedPrice, 4) : null,
       market_state: marketState,
       quote_time: quoteTime,
       fifty_two_week_high: high52w,
@@ -40814,7 +41756,9 @@ async function buildDashboardPayload(opts) {
         defaultRfPct: macroRegime?.us3m_pct ?? 3.8,
         vix: vixVal,
         liveExternalBase: extLiveMarked ? extTotalBase - extPortfolioBase : null,
-        livePricesMap: currentPricesMap
+        livePricesMap: currentPricesMap,
+        brierScore: lab.scorecard.brier_calibration.overall_brier_score,
+        brierResolvedCount: lab.scorecard.brier_calibration.resolved_total
       }
     );
   } catch {
@@ -40828,7 +41772,7 @@ async function buildDashboardPayload(opts) {
     base_currency: profile.base_currency,
     mode: isDemo ? "demo_preview" : opts.live || useCachedLive ? "live_yahoo" : `snapshot:${portfolio.as_of}`,
     active_tab: activeTab,
-    usd_to_base_fx: round(fxUsdToBase, 5),
+    usd_to_base_fx: round2(fxUsdToBase, 5),
     fx_rates: fxRates,
     vix: vixVal,
     vix_sparkline: vixSparkline,
@@ -40839,46 +41783,46 @@ async function buildDashboardPayload(opts) {
     portfolio: {
       as_of: portfolio.as_of,
       source: portfolio.source,
-      nav_base: round(navBase, 2),
-      nav_usd: round(navUsd, 2),
-      positions_base: round(totPosBase, 2),
-      positions_usd: round(totPosUsd, 2),
-      cash_base: round(cashBase, 2),
-      cash_pct: navBase > 0 ? round(cashBase / navBase * 100, 2) : 0,
-      accruals_base: round(accrualsBase, 2),
-      total_unrealized_pnl_usd: round(totalPnlUsd, 2),
-      total_unrealized_pnl_pct: round(totalPnlPct, 2),
+      nav_base: round2(navBase, 2),
+      nav_usd: round2(navUsd, 2),
+      positions_base: round2(totPosBase, 2),
+      positions_usd: round2(totPosUsd, 2),
+      cash_base: round2(cashBase, 2),
+      cash_pct: navBase > 0 ? round2(cashBase / navBase * 100, 2) : 0,
+      accruals_base: round2(accrualsBase, 2),
+      total_unrealized_pnl_usd: round2(totalPnlUsd, 2),
+      total_unrealized_pnl_pct: round2(totalPnlPct, 2),
       positions: positionsOut
     },
     summary: {
-      total_liquid_wealth_base: round(totalLiquidWealthBase, 2),
-      net_investable_base: round(netInvestableBase, 2),
+      total_liquid_wealth_base: round2(totalLiquidWealthBase, 2),
+      net_investable_base: round2(netInvestableBase, 2),
       deployable_cash_base: deployableCashBase,
       available_funding_base: availableFundingBase,
-      reserve_shortfall_base: round(Math.max(0, reserveAmountBase - cashBase), 2),
-      ext_total_base: round(extTotalBase, 2),
+      reserve_shortfall_base: round2(Math.max(0, reserveAmountBase - cashBase), 2),
+      ext_total_base: round2(extTotalBase, 2),
       ext_pct_wealth: extPctWealth,
-      ext_portfolio_base: round(extPortfolioBase, 2),
+      ext_portfolio_base: round2(extPortfolioBase, 2),
       ext_live_marked: extLiveMarked,
       ext_price_used: extPriceUsed,
-      paired_exposure_base: round(pairedTotalBase, 2),
+      paired_exposure_base: round2(pairedTotalBase, 2),
       paired_exposure_pct_wealth: pairedPctWealth,
       paired_label: pairedLabel,
       primary_bucket_id: primaryBucketRule?.id ?? null,
       primary_bucket_label: primaryBucketRule?.label ?? null,
-      primary_bucket_portfolio_base: round(primaryBucketPortfolioBase, 2),
+      primary_bucket_portfolio_base: round2(primaryBucketPortfolioBase, 2),
       primary_bucket_portfolio_pct: primaryBucketCapRow?.value_pct ?? 0,
       primary_bucket_tw_pct: primaryBucketTwPct,
       ext_included_in_primary_bucket: extIncludedInBucket,
       us_situs_enabled: estateEnabled,
-      us_situs_portfolio_usd: round(usSitusPortfolioUsd, 2),
+      us_situs_portfolio_usd: round2(usSitusPortfolioUsd, 2),
       us_situs_portfolio_pct: usSitusPortfolioPct,
-      us_situs_stocks_usd: round(usSitusStocksUsd, 2),
-      portfolio_estate_tax_base: round(portfolioEstate.net_estate_tax_usd * fxUsdToBase, 2),
-      total_us_situs_usd: round(totalUsSitusUsd, 2),
-      total_estate_tax_base: round(totalEstate.net_estate_tax_usd * fxUsdToBase, 2),
+      us_situs_stocks_usd: round2(usSitusStocksUsd, 2),
+      portfolio_estate_tax_base: round2(portfolioEstate.net_estate_tax_usd * fxUsdToBase, 2),
+      total_us_situs_usd: round2(totalUsSitusUsd, 2),
+      total_estate_tax_base: round2(totalEstate.net_estate_tax_usd * fxUsdToBase, 2),
       estate_tax_marginal_pct: totalEstate.marginal_rate_pct,
-      ucits_swap_savings_base: round((totalEstate.net_estate_tax_usd - afterUcitsEstate.net_estate_tax_usd) * fxUsdToBase, 2)
+      ucits_swap_savings_base: round2((totalEstate.net_estate_tax_usd - afterUcitsEstate.net_estate_tax_usd) * fxUsdToBase, 2)
     },
     lookthrough: ltRows,
     risk_caps: riskCaps,
@@ -41053,7 +41997,10 @@ async function executePortfolioBacktest(opts) {
     effectiveProfile,
     historyCache,
     payload.fx_rates,
-    { defaultRfPct: payload.macro_regime?.us3m_pct ?? 4 }
+    {
+      defaultRfPct: payload.macro_regime?.us3m_pct ?? 4,
+      defaultTrialsTested: Math.max(1, payload.theses.length)
+    }
   );
   payload.lab.latest_backtest = backtest;
   return { backtest, payload };
@@ -41156,7 +42103,9 @@ async function executePortfolioForecast(opts) {
       defaultRfPct: payload.macro_regime?.us3m_pct ?? 3.8,
       vix: payload.vix,
       liveExternalBase: payload.summary.ext_live_marked ? payload.summary.ext_total_base - payload.summary.ext_portfolio_base : null,
-      livePricesMap
+      livePricesMap,
+      brierScore: payload.lab.scorecard.brier_calibration.overall_brier_score,
+      brierResolvedCount: payload.lab.scorecard.brier_calibration.resolved_total
     }
   );
   payload.forecast = forecast;
@@ -41203,7 +42152,7 @@ function buildSummaryText(payload) {
   if (payload.forecast) {
     const fc = payload.forecast;
     lines.push(
-      `- ${fc.horizon_years}Y Forward Forecast (Base P50): ${fc.baseline.ending_p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} -> ${fc.simulated.ending_p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy} (${fc.deltas.p50_base >= 0 ? "+" : ""}${fc.deltas.p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy} with recommended rotations; P10 downside ${fc.deltas.p10_base >= 0 ? "+" : ""}${fc.deltas.p10_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy})`
+      `- ${fc.horizon_years}Y Forward Forecast (${fc.return_model === "black_litterman" ? "BL" : "Raw"} | ${fc.simulation_engine_used === "block_bootstrap" ? "Bootstrap" : "Student-t"}): P50 ${fc.baseline.ending_p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} -> ${fc.simulated.ending_p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy} (${fc.deltas.p50_base >= 0 ? "+" : ""}${fc.deltas.p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy}; CVaR10 ${fc.deltas.cvar_10_base >= 0 ? "+" : ""}${fc.deltas.cvar_10_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy}; Effective Bets ${fc.baseline.factor_risk.effective_bets.toFixed(1)} -> ${fc.simulated.factor_risk.effective_bets.toFixed(1)})`
     );
   }
   lines.push(`- Risk Cap Breaches (${breaches.length}): ${breaches.length > 0 ? breaches.join(", ") : "None"}`);
@@ -41216,7 +42165,7 @@ function buildSummaryText(payload) {
 // src/server/insiders.ts
 var MS_PER_DAY = 24 * 60 * 60 * 1e3;
 var DEFAULT_MAX_XMLS_PER_TICKER = 25;
-function round22(n) {
+function round23(n) {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 function decodeXmlEntities(raw) {
@@ -41276,7 +42225,7 @@ function parseForm4Xml(xml, fallbackFilingDate = "") {
     if (shares <= 0) continue;
     const price = parseNumberTag(extractTagText(block, "transactionPricePerShare"));
     const safePrice = price !== null && price >= 0 ? price : null;
-    const valueUsd = safePrice !== null ? round22(shares * safePrice) : 0;
+    const valueUsd = safePrice !== null ? round23(shares * safePrice) : 0;
     let is10b51 = docAff10b5One;
     if (!is10b51) {
       const refIds = [...block.matchAll(/<footnoteId\b[^>]*\bid\s*=\s*["']([^"']+)["'][^>]*\/?>/gi)].map(
@@ -41298,8 +42247,8 @@ function parseForm4Xml(xml, fallbackFilingDate = "") {
       is_officer: isOfficer,
       code,
       transaction_date: txDate,
-      shares: round22(shares),
-      price: safePrice !== null ? round22(safePrice) : null,
+      shares: round23(shares),
+      price: safePrice !== null ? round23(safePrice) : null,
       value_usd: valueUsd,
       is_10b5_1: is10b51
     });
@@ -41338,9 +42287,9 @@ function computeWindow(rows, nowMs, days) {
     }
   }
   return {
-    disc_buy_usd: round22(discBuy),
-    disc_sell_usd: round22(discSell),
-    plan_sell_usd: round22(planSell),
+    disc_buy_usd: round23(discBuy),
+    disc_sell_usd: round23(discSell),
+    plan_sell_usd: round23(planSell),
     distinct_buyers: buyers.size,
     distinct_sellers: sellers.size
   };
@@ -42380,12 +43329,12 @@ function evaluatePortfolioRiskCapsQuick(dataDir, pluginRoot, quotesMap, fxRates)
     }
     const totUsd = directUsd + viaEtfsUsd;
     if (totUsd <= 0.01) continue;
-    const pct = round(totUsd * fxUsdToBase / navBase * 100, 2);
+    const pct = round2(totUsd * fxUsdToBase / navBase * 100, 2);
     ltUsdMap.set(canon, totUsd);
     ltPctMap.set(canon, pct);
     if (pct > maxSinglePct) maxSinglePct = pct;
   }
-  const usSitusPct = round(usSitusUsd * fxUsdToBase / navBase * 100, 2);
+  const usSitusPct = round2(usSitusUsd * fxUsdToBase / navBase * 100, 2);
   const evalBucketUsd = (rule) => {
     const seen = /* @__PURE__ */ new Set();
     let sum = 0;
@@ -42410,7 +43359,7 @@ function evaluatePortfolioRiskCapsQuick(dataDir, pluginRoot, quotesMap, fxRates)
     if (rule.kind === "single_name_max") valPct = maxSinglePct;
     else if (rule.kind === "ticker" && rule.ticker) valPct = ltPctMap.get(canonicalAssetName(rule.ticker)) ?? 0;
     else if (rule.kind === "us_situs") valPct = usSitusPct;
-    else if (rule.kind === "bucket") valPct = round(evalBucketUsd(rule) * fxUsdToBase / navBase * 100, 2);
+    else if (rule.kind === "bucket") valPct = round2(evalBucketUsd(rule) * fxUsdToBase / navBase * 100, 2);
     return {
       id: rule.id,
       label: rule.label,
@@ -42499,15 +43448,15 @@ async function runWatchdogSweep(dataDir, pluginRoot, opts) {
     }
     const vixQ = qMap.get("^VIX");
     if (vixQ) {
-      vixVal = round(vixQ.price, 2);
+      vixVal = round2(vixQ.price, 2);
       if (vixQ.sparkline.length > 0) vixSparkline = vixQ.sparkline;
     }
     for (const [sym, q] of qMap.entries()) {
       if (sym === "^VIX") continue;
       nextQuotesCache[sym] = {
-        price: round(q.price, 4),
-        regular_price: round(q.regular_price, 4),
-        extended_price: q.extended_price !== null ? round(q.extended_price, 4) : null,
+        price: round2(q.price, 4),
+        regular_price: round2(q.regular_price, 4),
+        extended_price: q.extended_price !== null ? round2(q.extended_price, 4) : null,
         market_state: q.market_state,
         quote_time: q.quote_time,
         fifty_two_week_high: q.fifty_two_week_high,
@@ -42671,7 +43620,7 @@ async function runWatchdogSweep(dataDir, pluginRoot, opts) {
     }
     const priceAtAudit = typeof fm.price_at_audit === "number" && fm.price_at_audit > 0 ? fm.price_at_audit : null;
     if (tier !== "passed" && priceAtAudit !== null && curPrice !== null) {
-      const driftPct = round((curPrice - priceAtAudit) / priceAtAudit * 100, 1);
+      const driftPct = round2((curPrice - priceAtAudit) / priceAtAudit * 100, 1);
       if (Math.abs(driftPct) >= 15) {
         const bucket = Math.floor(Math.abs(driftPct) / 15) * 15;
         enqueueAlert({
@@ -42752,7 +43701,7 @@ async function runWatchdogSweep(dataDir, pluginRoot, opts) {
 }
 
 // src/server/index.ts
-var APP_URI = "ui://investment-os/v6/dashboard.html";
+var APP_URI = "ui://investment-os/v7/dashboard.html";
 var APP_MIME = "text/html;profile=mcp-app";
 var currentDir = typeof __dirname !== "undefined" ? __dirname : import_node_path2.default.dirname(import_node_path2.default.resolve(process.argv[1] || process.cwd()));
 var inferredRoot = import_node_path2.default.basename(currentDir) === "dist" ? import_node_path2.default.resolve(currentDir, "..") : import_node_path2.default.resolve(currentDir, "..", "..");
@@ -43227,6 +44176,8 @@ var TOOLS = [
         rebalance_band_pct: { type: "number", description: "Relative drift rebalancing threshold % (default 25, floored at 2% absolute NAV drift)." },
         include_external_wealth: { type: "boolean", description: "Include configured external equity ticker in weights & cluster correlation (default true)." },
         rf_pct: { type: "number", description: "Annual risk-free rate % for Sharpe/Sortino and cash yield (defaults to cached 3M T-bill or 4.0%)." },
+        tx_cost_bps: { type: "number", description: "Transaction cost & FX slippage in basis points per dollar traded (0-100, default 10)." },
+        trials_tested: { type: "integer", description: "Number of candidate trials M for Bailey & L\xF3pez de Prado Deflated Sharpe Ratio (defaults to total dossier count)." },
         demo: { type: "boolean", description: "If true, simulate against Demo Preview portfolio and synthetic histories." }
       },
       required: ["candidate_ticker"]
@@ -43265,6 +44216,9 @@ var TOOLS = [
         regime_vol_multiplier: { type: "number", description: "Volatility stress multiplier (0.5-2.5, default 1.0; use 1.25 for High-Vol stress)." },
         simulations: { type: "integer", description: "Number of seeded Monte Carlo paths (200-5000, default 1500)." },
         rf_pct: { type: "number", description: "Annual risk-free rate % (defaults to cached 3M T-bill or 3.8%)." },
+        return_model: { type: "string", enum: ["black_litterman", "raw_dossier"], description: "Expected return engine: Brier-calibrated Black-Litterman posterior (default) or raw 5Y dossier scenarios." },
+        simulation_engine: { type: "string", enum: ["block_bootstrap", "student_t"], description: "Multivariate shock generator: Politis-Romano stationary block bootstrap (default, auto-falls back to Student-t if <80w aligned) or Student-t df=6." },
+        block_length_weeks: { type: "integer", description: "Mean geometric block length in weeks for Politis-Romano bootstrap (2-26, default 6)." },
         demo: { type: "boolean", description: "Simulate against synthetic Demo Mode portfolio." }
       }
     },
@@ -43526,6 +44480,8 @@ var TOOLS = [
         rebalance_band_pct: { type: "number" },
         include_external_wealth: { type: "boolean" },
         rf_pct: { type: "number" },
+        tx_cost_bps: { type: "number" },
+        trials_tested: { type: "integer" },
         demo: { type: "boolean" }
       },
       required: ["candidate_ticker"]
@@ -43535,7 +44491,7 @@ var TOOLS = [
   {
     name: "app_simulate_forecast",
     title: "App Simulate Forward Portfolio Forecast",
-    description: "Internal UI tool to run the correlated Monte Carlo forward portfolio forecast & what-if action simulator from the Forecast tab.",
+    description: "Internal UI tool to run the Black-Litterman + Block Bootstrap / Student-t forward portfolio forecast & what-if action simulator from the Forecast tab.",
     inputSchema: {
       type: "object",
       properties: {
@@ -43546,6 +44502,9 @@ var TOOLS = [
         regime_vol_multiplier: { type: "number" },
         simulations: { type: "integer" },
         rf_pct: { type: "number" },
+        return_model: { type: "string", enum: ["black_litterman", "raw_dossier"] },
+        simulation_engine: { type: "string", enum: ["block_bootstrap", "student_t"] },
+        block_length_weeks: { type: "integer" },
         demo: { type: "boolean" }
       }
     },
@@ -43617,10 +44576,10 @@ function mergeProfileUpdate(current, args) {
   return ProfileSchema.parse(next);
 }
 var server = new Server(
-  { name: "investment-os-dashboard", version: "0.6.0" },
+  { name: "investment-os-dashboard", version: "0.7.0" },
   {
     capabilities: { tools: {}, resources: {} },
-    instructions: "Quantamental Personal-CIO executive portfolio workstation, correlated Monte Carlo forward portfolio forecast & action simulator, 3-layer research graph, automated SEC/XBRL (Owner Earnings, ROIC, Accruals)/Form 4 signal harness, and local analytics server for Investment OS."
+    instructions: "Institutional Quantamental Personal-CIO workstation: Black-Litterman & Politis-Romano Block Bootstrap forward portfolio forecasting with CVaR, PCA Effective Bets & HRP sizing, 3-layer research graph, automated SEC/XBRL (Owner Earnings, ROIC, Accruals)/Form 4 signal harness, and Deflated Sharpe backtest lab for Investment OS."
   }
 );
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -43985,10 +44944,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         rawRequest: args
       });
       const text = [
-        `Deterministic Backtest: ${backtest.candidate_ticker} @ ${backtest.target_weight_pct}% (funded: ${backtest.funding_source}, band: max(2%, ${backtest.rebalance_band_pct}%), rf=${backtest.rf_pct}%)`,
+        `Deterministic Backtest: ${backtest.candidate_ticker} @ ${backtest.target_weight_pct}% (funded: ${backtest.funding_source}, band: max(2%, ${backtest.rebalance_band_pct}%), rf=${backtest.rf_pct}%, tx=${backtest.tx_cost_bps}bps, DSR M=${backtest.trials_tested})`,
         `- Window: ${backtest.overlap_start} to ${backtest.overlap_end} (${backtest.weeks_analyzed}w | External Wealth: ${backtest.include_external_wealth ? "Included" : "Excluded"})`,
-        `- Baseline: CAGR ${backtest.baseline.cagr_pct}% | Max DD ${backtest.baseline.max_drawdown_pct}% | Sharpe ${backtest.baseline.sharpe} \xB1 ${backtest.baseline.sharpe_se} | Rebalances: ${backtest.baseline.rebalance_count}`,
-        `- Simulated: CAGR ${backtest.simulated.cagr_pct}% (${backtest.deltas.cagr_pct >= 0 ? "+" : ""}${backtest.deltas.cagr_pct}%) | Max DD ${backtest.simulated.max_drawdown_pct}% | Sharpe ${backtest.simulated.sharpe} \xB1 ${backtest.simulated.sharpe_se} | Rebalances: ${backtest.simulated.rebalance_count}`,
+        `- Baseline: CAGR ${backtest.baseline.cagr_pct}% | Max DD ${backtest.baseline.max_drawdown_pct}% | Sharpe ${backtest.baseline.sharpe} \xB1 ${backtest.baseline.sharpe_se} | Wk CVaR95 ${backtest.baseline.cvar_95_weekly_pct}% | Rebalances: ${backtest.baseline.rebalance_count}`,
+        `- Simulated: CAGR ${backtest.simulated.cagr_pct}% (${backtest.deltas.cagr_pct >= 0 ? "+" : ""}${backtest.deltas.cagr_pct}%) | Max DD ${backtest.simulated.max_drawdown_pct}% | Sharpe ${backtest.simulated.sharpe} \xB1 ${backtest.simulated.sharpe_se} | DSR Prob ${backtest.simulated.deflated_sharpe_prob_pct}% (SR0=${backtest.sr0_annual_threshold}) | Wk CVaR95 ${backtest.simulated.cvar_95_weekly_pct}% | Turnover ${backtest.simulated.total_turnover_pct}% (${backtest.simulated.tx_cost_drag_bps} bps/yr drag)`,
         `- Benchmark (${backtest.benchmark_symbol}): CAGR ${backtest.benchmark.cagr_pct}% | Max DD ${backtest.benchmark.max_drawdown_pct}% | Sharpe ${backtest.benchmark.sharpe}`,
         `- Correlation vs Portfolio: ${backtest.candidate_corr_portfolio ?? "N/A"} | vs Primary Cluster: ${backtest.candidate_corr_cluster ?? "N/A"}`,
         `- Caveat: ${backtest.caveat}`
@@ -44007,13 +44966,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const ccy = forecast.base_currency;
       const fmtM = (n) => `${Math.round(n).toLocaleString("en-US")} ${ccy}`;
       const fmtDeltaM = (n) => `${n >= 0 ? "+" : ""}${Math.round(n).toLocaleString("en-US")} ${ccy}`;
+      const pc1Base = forecast.baseline.factor_risk.top_factors[0];
+      const pc1Sim = forecast.simulated.factor_risk.top_factors[0];
       const text = [
-        `Forward Portfolio Forecast (${forecast.horizon_years}Y | ${forecast.simulations} correlated Student-t paths | External Wealth: ${forecast.include_external_wealth ? "Included" : "Excluded"} | Vol\xD7${forecast.regime_vol_multiplier}):`,
+        `Forward Portfolio Forecast (${forecast.horizon_years}Y | ${forecast.return_model} | ${forecast.simulation_engine_used} | ${forecast.simulations} paths | External Wealth: ${forecast.include_external_wealth ? "Included" : "Excluded"} | Vol\xD7${forecast.regime_vol_multiplier}):`,
         `- Starting Wealth: ${fmtM(forecast.baseline.starting_wealth_base)} | Actions Applied: ${forecast.applied_actions.length}${forecast.cash_shortfall_base > 0 ? ` (Cash shortfall: ${fmtM(forecast.cash_shortfall_base)})` : ""}`,
-        `- Current Path (${forecast.horizon_years}Y): Bear P10 ${fmtM(forecast.baseline.ending_p10_base)} | Base P50 ${fmtM(forecast.baseline.ending_p50_base)} (${forecast.baseline.expected_cagr_p50_pct}% CAGR) | Bull P90 ${fmtM(forecast.baseline.ending_p90_base)} | Vol ${forecast.baseline.annual_vol_pct}% | Sharpe ${forecast.baseline.expected_sharpe}`,
-        `- Action Plan (${forecast.horizon_years}Y): Bear P10 ${fmtM(forecast.simulated.ending_p10_base)} (${fmtDeltaM(forecast.deltas.p10_base)}) | Base P50 ${fmtM(forecast.simulated.ending_p50_base)} (${fmtDeltaM(forecast.deltas.p50_base)}, ${forecast.simulated.expected_cagr_p50_pct}% CAGR) | Bull P90 ${fmtM(forecast.simulated.ending_p90_base)} | Vol ${forecast.simulated.annual_vol_pct}% | Sharpe ${forecast.simulated.expected_sharpe}`,
+        `- Current Path (${forecast.horizon_years}Y): CVaR10 ${fmtM(forecast.baseline.ending_cvar_10_base)} | Bear P10 ${fmtM(forecast.baseline.ending_p10_base)} | Base P50 ${fmtM(forecast.baseline.ending_p50_base)} (${forecast.baseline.expected_cagr_p50_pct}% CAGR) | Bull P90 ${fmtM(forecast.baseline.ending_p90_base)} | MaxDD P95 ${forecast.baseline.sim_max_dd_p95_pct}% | Vol ${forecast.baseline.annual_vol_pct}% | Sharpe ${forecast.baseline.expected_sharpe}`,
+        `- Action Plan (${forecast.horizon_years}Y): CVaR10 ${fmtM(forecast.simulated.ending_cvar_10_base)} (${fmtDeltaM(forecast.deltas.cvar_10_base)}) | Bear P10 ${fmtM(forecast.simulated.ending_p10_base)} (${fmtDeltaM(forecast.deltas.p10_base)}) | Base P50 ${fmtM(forecast.simulated.ending_p50_base)} (${fmtDeltaM(forecast.deltas.p50_base)}, ${forecast.simulated.expected_cagr_p50_pct}% CAGR) | Bull P90 ${fmtM(forecast.simulated.ending_p90_base)} | MaxDD P95 ${forecast.simulated.sim_max_dd_p95_pct}% | Vol ${forecast.simulated.annual_vol_pct}% | Sharpe ${forecast.simulated.expected_sharpe}`,
+        `- Latent Factor Risk (PCA): Effective Bets ${forecast.baseline.factor_risk.effective_bets} -> ${forecast.simulated.factor_risk.effective_bets} (${forecast.deltas.effective_bets >= 0 ? "+" : ""}${forecast.deltas.effective_bets}) | Beta ${forecast.baseline.factor_risk.market_beta ?? "n/a"} -> ${forecast.simulated.factor_risk.market_beta ?? "n/a"}${pc1Base && pc1Sim ? ` | PC1 ${pc1Base.variance_share_pct}% -> ${pc1Sim.variance_share_pct}% (${pc1Sim.top_tickers.join(", ")})` : ""}`,
         `- Tax & Risk Impact: Estate Tax Saved ${fmtM(forecast.deltas.estate_tax_saved_base)} | Annual WHT Saved ${fmtM(forecast.deltas.annual_wht_saved_base)}/yr | US-Situs ${forecast.baseline.us_situs_portfolio_pct}% -> ${forecast.simulated.us_situs_portfolio_pct}% | Cap Breaches ${forecast.baseline.cap_breaches_count} -> ${forecast.simulated.cap_breaches_count}${forecast.deltas.cured_caps.length > 0 ? ` (Cured: ${forecast.deltas.cured_caps.join(", ")})` : ""}`,
         `- Benchmark (${forecast.benchmark_ticker} @ ${forecast.benchmark_cagr_pct}%): ${fmtM(forecast.benchmark_ending_base)} | Prob Beat Bench: ${forecast.baseline.prob_beat_benchmark_pct}% -> ${forecast.simulated.prob_beat_benchmark_pct}%`,
+        `- Black-Litterman: ${forecast.black_litterman.note}`,
         `- Methodology: ${forecast.methodology_note}`
       ].join("\n");
       return {
