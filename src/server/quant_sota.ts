@@ -7,6 +7,8 @@
  * 4. López de Prado Hierarchical Risk Parity (HRP) clustering & recursive bisection.
  * 5. Politis-Romano Stationary Block Bootstrap multivariate path simulator & CVaR / Max-DD tails.
  * 6. Bailey & López de Prado Deflated Sharpe Ratio (DSR) for multiple-testing correction.
+ * 7. Analytical Ledoit-Wolf (2004) constant-correlation shrinkage, Politis-White (2004) /
+ *    Patton-Politis-White (2009) automatic block length, QLIKE/Pinball/Kupiec POF, and Spearman Rank IC.
  */
 
 export interface EigenPair {
@@ -1143,4 +1145,521 @@ export function computeDeflatedSharpeRatio(params: {
     skewness: moments.skewness,
     excess_kurtosis: moments.excess_kurtosis,
   };
+}
+
+// ─── 7. Ledoit-Wolf (2004), Politis-White L*, & Calibration Scoring ────────────
+
+export interface LedoitWolfResult {
+  cov: number[][];
+  corr: number[][];
+  lambda: number;
+  avg_corr: number;
+  sample_cov: number[][];
+  weeks_used: number;
+}
+
+function isStrictPositiveDefinite(matrix: number[][]): boolean {
+  const n = matrix.length;
+  const L: number[][] = Array.from({ length: n }, () => Array<number>(n).fill(0));
+  for (let i = 0; i < n; i += 1) {
+    for (let j = 0; j <= i; j += 1) {
+      let sum = 0;
+      for (let k = 0; k < j; k += 1) {
+        sum += L[i]![k]! * L[j]![k]!;
+      }
+      if (i === j) {
+        const diag = matrix[i]![i]! - sum;
+        if (!Number.isFinite(diag) || diag <= 1e-12) return false;
+        L[i]![i] = Math.sqrt(diag);
+      } else {
+        L[i]![j] = (matrix[i]![j]! - sum) / L[j]![j]!;
+      }
+    }
+  }
+  return true;
+}
+
+function projectToPsd(matrix: number[][]): number[][] {
+  const n = matrix.length;
+  if (n === 0) return [];
+  if (isStrictPositiveDefinite(matrix)) {
+    return matrix.map((row) => [...row]);
+  }
+  const eigenpairs = jacobiEigenSymmetric(matrix);
+  const minEig = Math.min(...eigenpairs.map((ep) => ep.eigenvalue));
+  const maxEig = Math.max(...eigenpairs.map((ep) => ep.eigenvalue));
+  if (minEig >= 0) {
+    return matrix.map((row) => [...row]);
+  }
+  const floorVal = maxEig > 1e-12 ? 1e-10 : 0;
+  const out: number[][] = Array.from({ length: n }, () => Array<number>(n).fill(0));
+  for (const ep of eigenpairs) {
+    const lam = Math.max(floorVal, ep.eigenvalue);
+    if (lam === 0) continue;
+    for (let i = 0; i < n; i += 1) {
+      const vi = ep.eigenvector[i]!;
+      for (let j = i; j < n; j += 1) {
+        out[i]![j]! += lam * vi * ep.eigenvector[j]!;
+      }
+    }
+  }
+  for (let i = 0; i < n; i += 1) {
+    for (let j = 0; j < i; j += 1) {
+      out[i]![j] = out[j]![i]!;
+    }
+  }
+  return out;
+}
+
+/**
+ * Exact Ledoit & Wolf (2004) "Honey, I Shrunk the Sample Covariance Matrix"
+ * constant-correlation shrinkage estimator on a T x N return matrix.
+ */
+export function computeLedoitWolfConstantCorr(returnMatrix: number[][]): LedoitWolfResult {
+  const T = returnMatrix.length;
+  const N = T > 0 ? (returnMatrix[0]?.length ?? 0) : 0;
+  if (N === 0) {
+    return { cov: [], corr: [], lambda: 1, avg_corr: 0, sample_cov: [], weeks_used: T };
+  }
+  if (T === 0) {
+    const fallbackCov = Array.from({ length: N }, (_, i) =>
+      Array.from({ length: N }, (_, j) => (i === j ? 1e-4 : 0)),
+    );
+    const fallbackCorr = Array.from({ length: N }, (_, i) =>
+      Array.from({ length: N }, (_, j) => (i === j ? 1 : 0)),
+    );
+    return {
+      cov: fallbackCov,
+      corr: fallbackCorr,
+      lambda: 1,
+      avg_corr: 0,
+      sample_cov: fallbackCov.map((r) => [...r]),
+      weeks_used: 0,
+    };
+  }
+
+  // Demean columns (sanitizing any non-finite inputs)
+  const means = new Float64Array(N);
+  for (let t = 0; t < T; t += 1) {
+    const row = returnMatrix[t]!;
+    for (let i = 0; i < N; i += 1) {
+      const v = row[i] ?? 0;
+      if (Number.isFinite(v)) means[i]! += v;
+    }
+  }
+  for (let i = 0; i < N; i += 1) means[i] = means[i]! / T;
+
+  const Y: Float64Array[] = Array.from({ length: T }, (_, t) => {
+    const src = returnMatrix[t]!;
+    const out = new Float64Array(N);
+    for (let i = 0; i < N; i += 1) {
+      const v = src[i] ?? 0;
+      out[i] = (Number.isFinite(v) ? v : 0) - means[i]!;
+    }
+    return out;
+  });
+
+  // 1/T sample covariance S
+  const S: number[][] = Array.from({ length: N }, () => Array<number>(N).fill(0));
+  for (let t = 0; t < T; t += 1) {
+    const row = Y[t]!;
+    for (let i = 0; i < N; i += 1) {
+      const yi = row[i]!;
+      for (let j = i; j < N; j += 1) {
+        S[i]![j]! += yi * row[j]!;
+      }
+    }
+  }
+  for (let i = 0; i < N; i += 1) {
+    for (let j = i; j < N; j += 1) {
+      const val = S[i]![j]! / T;
+      S[i]![j] = val;
+      S[j]![i] = val;
+    }
+  }
+
+  if (N === 1) {
+    const s00 = Math.max(0, S[0]![0]!);
+    return {
+      cov: [[Math.max(1e-12, s00)]],
+      corr: [[1]],
+      lambda: 0,
+      avg_corr: 0,
+      sample_cov: [[s00]],
+      weeks_used: T,
+    };
+  }
+
+  const rawStds = Array.from({ length: N }, (_, i) => Math.sqrt(Math.max(0, S[i]![i]!)));
+  const safeStds = Array.from({ length: N }, (_, i) => Math.sqrt(Math.max(1e-12, S[i]![i]!)));
+
+  let corrSum = 0;
+  let corrPairs = 0;
+  for (let i = 0; i < N; i += 1) {
+    for (let j = i + 1; j < N; j += 1) {
+      const rij = clamp(S[i]![j]! / (safeStds[i]! * safeStds[j]!), -1, 1);
+      corrSum += rij;
+      corrPairs += 1;
+    }
+  }
+  const avgCorr = clamp(corrPairs > 0 ? corrSum / corrPairs : 0, -0.9, 0.95);
+
+  const F: number[][] = Array.from({ length: N }, (_, i) =>
+    Array.from({ length: N }, (_, j) => (i === j ? S[i]![i]! : avgCorr * rawStds[i]! * rawStds[j]!)),
+  );
+
+  let lambda = 1;
+  if (T >= 5) {
+    const d2 = new Float64Array(N);
+    const piMat: number[][] = Array.from({ length: N }, () => Array<number>(N).fill(0));
+    const thetaMat: number[][] = Array.from({ length: N }, () => Array<number>(N).fill(0));
+    for (let t = 0; t < T; t += 1) {
+      const row = Y[t]!;
+      for (let i = 0; i < N; i += 1) {
+        d2[i] = row[i]! * row[i]! - S[i]![i]!;
+      }
+      for (let i = 0; i < N; i += 1) {
+        const yi = row[i]!;
+        const d2i = d2[i]!;
+        for (let j = 0; j < N; j += 1) {
+          const e = yi * row[j]! - S[i]![j]!;
+          piMat[i]![j]! += e * e;
+          thetaMat[i]![j]! += d2i * e;
+        }
+      }
+    }
+
+    let piHat = 0;
+    let piDiagSum = 0;
+    let rhoOffSum = 0;
+    let gammaHat = 0;
+
+    for (let i = 0; i < N; i += 1) {
+      piDiagSum += piMat[i]![i]! / T;
+      for (let j = 0; j < N; j += 1) {
+        piHat += piMat[i]![j]! / T;
+        const diff = F[i]![j]! - S[i]![j]!;
+        gammaHat += diff * diff;
+        if (i !== j) {
+          const thetaIIij = thetaMat[i]![j]! / T;
+          const thetaJJij = thetaMat[j]![i]! / T;
+          rhoOffSum +=
+            (avgCorr / 2) *
+            ((safeStds[j]! / safeStds[i]!) * thetaIIij + (safeStds[i]! / safeStds[j]!) * thetaJJij);
+        }
+      }
+    }
+
+    const rhoHat = piDiagSum + rhoOffSum;
+    if (gammaHat < 1e-12) {
+      lambda = 0;
+    } else {
+      lambda = clamp((piHat - rhoHat) / (gammaHat * T), 0, 1);
+    }
+  }
+
+  const rawCov: number[][] = Array.from({ length: N }, (_, i) =>
+    Array.from({ length: N }, (_, j) => (1 - lambda) * S[i]![j]! + lambda * F[i]![j]!),
+  );
+  for (let i = 0; i < N; i += 1) {
+    for (let j = i + 1; j < N; j += 1) {
+      const sym = 0.5 * (rawCov[i]![j]! + rawCov[j]![i]!);
+      rawCov[i]![j] = sym;
+      rawCov[j]![i] = sym;
+    }
+  }
+
+  const cov = projectToPsd(rawCov);
+  const corr: number[][] = Array.from({ length: N }, () => Array<number>(N).fill(0));
+  for (let i = 0; i < N; i += 1) {
+    corr[i]![i] = 1;
+    const di = Math.sqrt(Math.max(1e-12, cov[i]![i]!));
+    for (let j = i + 1; j < N; j += 1) {
+      const dj = Math.sqrt(Math.max(1e-12, cov[j]![j]!));
+      const c =
+        cov[i]![i]! > 0 && cov[j]![j]! > 0
+          ? clamp(cov[i]![j]! / (di * dj), -0.95, 0.98)
+          : 0;
+      corr[i]![j] = c;
+      corr[j]![i] = c;
+    }
+  }
+
+  return {
+    cov,
+    corr,
+    lambda: Number.isFinite(lambda) ? lambda : 1,
+    avg_corr: Number.isFinite(avgCorr) ? avgCorr : 0,
+    sample_cov: S,
+    weeks_used: T,
+  };
+}
+
+export interface PolitisWhiteResult {
+  block_length_weeks: number;
+  l_returns: number;
+  l_abs_vol: number;
+  bandwidth_m: number;
+  sample_size: number;
+}
+
+function estimateSinglePolitisWhiteL(vals: number[]): { lStar: number; bandwidthM: number } {
+  const T = vals.length;
+  if (T < 30) {
+    return { lStar: 6, bandwidthM: Math.max(1, Math.min(2, Math.floor(T / 4))) };
+  }
+  const mean = vals.reduce((s, v) => s + v, 0) / T;
+  const centered = new Float64Array(T);
+  for (let t = 0; t < T; t += 1) {
+    centered[t] = vals[t]! - mean;
+  }
+
+  const autoCov = (lag: number): number => {
+    if (lag < 0 || lag >= T) return 0;
+    let sum = 0;
+    const limit = T - lag;
+    for (let t = 0; t < limit; t += 1) {
+      sum += centered[t]! * centered[t + lag]!;
+    }
+    return sum / T;
+  };
+
+  const r0 = autoCov(0);
+  if (r0 <= 1e-14) {
+    return { lStar: 1, bandwidthM: 2 };
+  }
+
+  const log10T = Math.log10(T);
+  const kT = Math.max(5, Math.ceil(Math.sqrt(log10T)));
+  const threshold = 2 * Math.sqrt(log10T / T);
+  const mMax = Math.max(2, Math.min(Math.ceil(Math.sqrt(T)) + kT, Math.floor(T / 4)));
+  const maxCacheLag = Math.min(T - 1, Math.max(mMax + kT, mMax));
+  const rCache = new Float64Array(maxCacheLag + 1);
+  rCache[0] = r0;
+  for (let k = 1; k <= maxCacheLag; k += 1) {
+    rCache[k] = autoCov(k);
+  }
+
+  const maxSearchM = Math.max(1, Math.min(mMax, T - kT));
+  let mHat = mMax;
+  for (let m = 1; m <= maxSearchM; m += 1) {
+    let allBelow = true;
+    for (let k = 0; k < kT; k += 1) {
+      const lag = m + k;
+      if (lag >= T) {
+        allBelow = false;
+        break;
+      }
+      const rk = lag <= maxCacheLag ? rCache[lag]! : autoCov(lag);
+      if (Math.abs(rk / r0) >= threshold) {
+        allBelow = false;
+        break;
+      }
+    }
+    if (allBelow) {
+      mHat = m;
+      break;
+    }
+  }
+
+  const M = clamp(2 * Math.max(1, mHat), 2, mMax);
+  const flatTopTaper = (u: number): number => {
+    const au = Math.abs(u);
+    if (au <= 0.5) return 1;
+    if (au <= 1) return 2 * (1 - au);
+    return 0;
+  };
+
+  let g0Sum = r0;
+  let gSum = 0;
+  for (let k = 1; k <= M; k += 1) {
+    const w = flatTopTaper(k / M);
+    if (w === 0) continue;
+    const rk = k <= maxCacheLag ? rCache[k]! : autoCov(k);
+    g0Sum += 2 * w * rk;
+    gSum += 2 * w * k * rk;
+  }
+
+  const g0 = Math.max(1e-12, g0Sum);
+  const Dsb = 2 * g0 * g0;
+  const Lsb = Math.pow((2 * gSum * gSum) / Math.max(1e-12, Dsb), 1 / 3) * Math.pow(T, 1 / 3);
+  return {
+    lStar: Number.isFinite(Lsb) ? Lsb : 6,
+    bandwidthM: M,
+  };
+}
+
+/**
+ * Exact Politis & White (2004) / Patton-Politis-White (2009) automatic stationary-bootstrap
+ * optimal block length L*, taking max over raw returns and demeaned absolute returns (vol clustering).
+ */
+export function computePolitisWhiteBlockLength(
+  series: number[],
+  opts?: { minL?: number; maxL?: number },
+): PolitisWhiteResult {
+  const minL = opts?.minL ?? 3;
+  const maxL = Math.max(minL, opts?.maxL ?? 16);
+  const clean = series.filter((v) => Number.isFinite(v));
+  const T = clean.length;
+
+  if (T < 30) {
+    return {
+      block_length_weeks: Math.round(clamp(6, minL, maxL)),
+      l_returns: 6,
+      l_abs_vol: 6,
+      bandwidth_m: Math.max(1, Math.min(2, Math.floor(T / 4))),
+      sample_size: T,
+    };
+  }
+
+  const mean = clean.reduce((s, v) => s + v, 0) / T;
+  const absDemeaned = clean.map((v) => Math.abs(v - mean));
+
+  const retEst = estimateSinglePolitisWhiteL(clean);
+  const volEst = estimateSinglePolitisWhiteL(absDemeaned);
+  const rawMax = Math.max(retEst.lStar, volEst.lStar);
+
+  return {
+    block_length_weeks: Math.round(clamp(rawMax, minL, maxL)),
+    l_returns: retEst.lStar,
+    l_abs_vol: volEst.lStar,
+    bandwidth_m: Math.max(retEst.bandwidthM, volEst.bandwidthM),
+    sample_size: T,
+  };
+}
+
+/**
+ * Patton (2011) QLIKE quasi-likelihood variance forecast loss: ratio - ln(ratio) - 1.
+ */
+export function computeQlikeLoss(realizedVar: number, predictedVar: number): number {
+  const real = Number.isFinite(realizedVar) ? Math.max(1e-10, realizedVar) : 1e-10;
+  const pred = Number.isFinite(predictedVar) ? Math.max(1e-10, predictedVar) : 1e-10;
+  const ratio = real / pred;
+  return ratio - Math.log(ratio) - 1;
+}
+
+/**
+ * Quantile / Pinball loss for quantile q in (0, 1).
+ */
+export function computePinballLoss(actual: number, predictedQuantile: number, q: number): number {
+  if (!Number.isFinite(actual) || !Number.isFinite(predictedQuantile)) return 0;
+  const qClamped = clamp(q, 1e-6, 1 - 1e-6);
+  const err = actual - predictedQuantile;
+  return err >= 0 ? qClamped * err : (qClamped - 1) * err;
+}
+
+export interface KupiecPofResult {
+  breaches: number;
+  total_windows: number;
+  nominal_alpha: number;
+  observed_rate_pct: number;
+  lr_stat: number;
+  p_value: number;
+  calibrated: boolean;
+}
+
+/**
+ * Exact Kupiec (1995) Proportion-of-Failures (POF) Likelihood Ratio test with chi2(1) p-value.
+ */
+export function computeKupiecPofTest(breaches: number, totalWindows: number, alpha = 0.05): KupiecPofResult {
+  const N = Math.max(0, Math.round(totalWindows));
+  const p = clamp(alpha, 1e-6, 1 - 1e-6);
+  if (N === 0) {
+    return {
+      breaches: 0,
+      total_windows: 0,
+      nominal_alpha: p,
+      observed_rate_pct: 0,
+      lr_stat: 0,
+      p_value: 1,
+      calibrated: true,
+    };
+  }
+  const x = clamp(Math.round(breaches), 0, N);
+  const pHat = x / N;
+
+  const ll0 = x * Math.log(p) + (N - x) * Math.log(1 - p);
+  const ll1 =
+    (x > 0 ? x * Math.log(pHat) : 0) +
+    (x < N ? (N - x) * Math.log(1 - pHat) : 0);
+  const lrStat = Math.max(0, 2 * (ll1 - ll0));
+  const pValue = clamp(2 * (1 - normalCdf(Math.sqrt(Math.max(0, lrStat)))), 0, 1);
+
+  return {
+    breaches: x,
+    total_windows: N,
+    nominal_alpha: p,
+    observed_rate_pct: (x / N) * 100,
+    lr_stat: lrStat,
+    p_value: pValue,
+    calibrated: pValue >= 0.05,
+  };
+}
+
+export interface SpearmanResult {
+  rho: number;
+  t_stat: number | null;
+  n: number;
+}
+
+function averageRanks(values: number[]): number[] {
+  const n = values.length;
+  const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => values[a]! - values[b]!);
+  const ranks = Array<number>(n).fill(0);
+  let i = 0;
+  while (i < n) {
+    let j = i + 1;
+    const baseVal = values[order[i]!]!;
+    while (j < n && values[order[j]!]! === baseVal) {
+      j += 1;
+    }
+    // 1-based average rank across tied group [i, j)
+    const avgRank = 0.5 * (i + 1 + j);
+    for (let k = i; k < j; k += 1) {
+      ranks[order[k]!] = avgRank;
+    }
+    i = j;
+  }
+  return ranks;
+}
+
+/**
+ * Exact Spearman rank correlation using average ranks for ties.
+ */
+export function computeSpearmanRankCorrelation(xs: number[], ys: number[]): SpearmanResult | null {
+  if (xs.length !== ys.length) return null;
+  const cleanX: number[] = [];
+  const cleanY: number[] = [];
+  for (let i = 0; i < xs.length; i += 1) {
+    const xv = xs[i]!;
+    const yv = ys[i]!;
+    if (Number.isFinite(xv) && Number.isFinite(yv)) {
+      cleanX.push(xv);
+      cleanY.push(yv);
+    }
+  }
+  const n = cleanX.length;
+  if (n < 3) return null;
+
+  const rx = averageRanks(cleanX);
+  const ry = averageRanks(cleanY);
+  const meanRank = (n + 1) / 2;
+
+  let num = 0;
+  let dx2 = 0;
+  let dy2 = 0;
+  for (let i = 0; i < n; i += 1) {
+    const dx = rx[i]! - meanRank;
+    const dy = ry[i]! - meanRank;
+    num += dx * dy;
+    dx2 += dx * dx;
+    dy2 += dy * dy;
+  }
+  const denom = Math.sqrt(dx2 * dy2);
+  if (denom <= 1e-12) return null;
+
+  const rho = clamp(num / denom, -1, 1);
+  const tStat = Math.abs(rho) < 1 - 1e-12 ? rho * Math.sqrt((n - 2) / (1 - rho * rho)) : null;
+
+  return { rho, t_stat: tStat, n };
 }
