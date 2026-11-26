@@ -42,7 +42,7 @@ export interface TailEvalRow {
   kupiec_calibrated: boolean;
   mean_pinball_loss_pct: number;
   coverage_80_pct: number;
-  cvar95_shortfall_ratio: number;
+  cvar95_shortfall_ratio: number | null;
   is_winner: boolean;
 }
 
@@ -341,7 +341,7 @@ export function runQuantWalkForwardEvaluation(
   profile: UserProfile,
   historyCache: HistoryCacheState,
   fxRates: Record<string, number>,
-  opts?: { defaultRfPct?: number },
+  opts?: { defaultRfPct?: number; livePricesMap?: Map<string, number> },
 ): QuantWalkForwardEvalResult {
   const horizonWeeks = req.horizon_weeks === 26 ? 26 : 13;
   const txCostBps = Number.isFinite(req.tx_cost_bps) ? clamp(req.tx_cost_bps!, 0, 100) : 10;
@@ -356,8 +356,14 @@ export function runQuantWalkForwardEvaluation(
   for (const pos of portfolio.positions) {
     const ticker = pos.ticker.trim().toUpperCase();
     if (!ticker || ticker === "CASH") continue;
+    const yfLookup = (pos.yf_symbol || ticker).trim();
+    const livePx =
+      opts?.livePricesMap?.get(ticker) ??
+      opts?.livePricesMap?.get(yfLookup) ??
+      opts?.livePricesMap?.get(yfLookup.toUpperCase()) ??
+      pos.ref_price;
     const ccyFx = fxRates[pos.currency] ?? fxUsdToBase;
-    const mvBase = Math.max(0, pos.qty * pos.ref_price * ccyFx);
+    const mvBase = Math.max(0, pos.qty * livePx * ccyFx);
     if (mvBase <= 0) continue;
     const prev = assetAgg.get(ticker);
     assetAgg.set(ticker, {
@@ -599,7 +605,7 @@ export function runQuantWalkForwardEvaluation(
     StratKey,
     { label: string; equity: number; curW: number[]; weeklyRets: number[]; totalTurnover: number }
   > = {
-    current_weights: { label: "Current Portfolio Weights", equity: 1, curW: [...currentWeights], weeklyRets: [], totalTurnover: 0 },
+    current_weights: { label: "Current Weights (Hindsight Ref)", equity: 1, curW: [...currentWeights], weeklyRets: [], totalTurnover: 0 },
     hrp_lw: { label: "HRP (Ledoit-Wolf Cov/Corr, 35% Cap)", equity: 1, curW: Array<number>(N).fill(1 / N), weeklyRets: [], totalTurnover: 0 },
     inv_vol: { label: "Inverse Volatility", equity: 1, curW: Array<number>(N).fill(1 / N), weeklyRets: [], totalTurnover: 0 },
     equal_weight: { label: "Equal Weight (1/N)", equity: 1, curW: Array<number>(N).fill(1 / N), weeklyRets: [], totalTurnover: 0 },
@@ -643,6 +649,10 @@ export function runQuantWalkForwardEvaluation(
     lambdaSum += lw.lambda;
 
     const unbiasedScale = t / Math.max(1, t - 1);
+    const stdUnbiasedScale = Math.sqrt(unbiasedScale);
+    const lwCovUnbiased: number[][] = Array.from({ length: N }, (_, i) =>
+      Array.from({ length: N }, (_, j) => lw.cov[i]![j]! * unbiasedScale),
+    );
     const sampleCov: number[][] = Array.from({ length: N }, (_, i) =>
       Array.from({ length: N }, (_, j) => lw.sample_cov[i]![j]! * unbiasedScale),
     );
@@ -673,7 +683,7 @@ export function runQuantWalkForwardEvaluation(
     const covEvaluators: Array<[CovKey, number[][]]> = [
       ["sample_cov", sampleCov],
       ["fixed_025_shrink", fixed025Cov],
-      ["analytical_lw", lw.cov],
+      ["analytical_lw", lwCovUnbiased],
     ];
     for (const [key, mat] of covEvaluators) {
       const predWeeklyVar = portfolioVariance(currentWeights, mat);
@@ -702,7 +712,7 @@ export function runQuantWalkForwardEvaluation(
     for (let u = 0; u < t; u += 1) {
       const off = u * N;
       for (let i = 0; i < N; i += 1) {
-        centeredFlat[off + i] = retFlat[off + i]! - trainMeans[i]!;
+        centeredFlat[off + i] = (retFlat[off + i]! - trainMeans[i]!) * stdUnbiasedScale;
       }
     }
 
@@ -718,7 +728,7 @@ export function runQuantWalkForwardEvaluation(
       realizedDemeanedRet += curWArr[i]! * (Math.exp(cLog) - 1);
     }
 
-    const cholL = choleskyDecompose(lw.cov);
+    const cholL = choleskyDecompose(lwCovUnbiased);
     for (let i = 0; i < N; i += 1) {
       const rowL = cholL[i]!;
       const off = i * N;
@@ -826,7 +836,7 @@ export function runQuantWalkForwardEvaluation(
     // 3. Allocation Horse Race: weights fitted strictly on [0..t-1]
     const hrpRes = computeHrpWeights(
       assetsIncluded.map((ticker) => ({ ticker, is_cash: false, max_weight_pct: 35 })),
-      lw.cov,
+      lwCovUnbiased,
       lw.corr,
     );
     const hrpWeights = normalizeWeights(assetsIncluded.map((tkr) => hrpRes.weights_by_ticker[tkr] ?? 0));
@@ -908,12 +918,12 @@ export function runQuantWalkForwardEvaluation(
   const tailRowsRaw: TailEvalRow[] = engineKeys.map((engKey) => {
     const acc = tailStats[engKey];
     const kupiec = computeKupiecPofTest(acc.breaches, windowsEvaluated, 0.05);
-    let shortfallRatio = 0;
+    let shortfallRatio: number | null = null;
     if (acc.breachRealized.length > 0) {
       const avgReal = acc.breachRealized.reduce((s, v) => s + v, 0) / acc.breachRealized.length;
       const avgPred = acc.breachPredCvar.reduce((s, v) => s + v, 0) / acc.breachPredCvar.length;
       if (avgPred < -1e-6 && avgReal < 0) {
-        shortfallRatio = avgReal / avgPred;
+        shortfallRatio = round(avgReal / avgPred, 3);
       }
     }
     return {
@@ -926,7 +936,7 @@ export function runQuantWalkForwardEvaluation(
       kupiec_calibrated: kupiec.calibrated,
       mean_pinball_loss_pct: round((acc.pinballSum / Math.max(1, windowsEvaluated)) * 100, 3),
       coverage_80_pct: round((acc.covered80 / Math.max(1, windowsEvaluated)) * 100, 1),
-      cvar95_shortfall_ratio: round(shortfallRatio, 3),
+      cvar95_shortfall_ratio: shortfallRatio,
       is_winner: false,
     };
   });
@@ -992,14 +1002,21 @@ export function runQuantWalkForwardEvaluation(
   const volRatioOk = covWinner.realized_to_predicted_vol_ratio >= 0.5 && covWinner.realized_to_predicted_vol_ratio <= 2.0;
   const status: QuantWalkForwardEvalResult["status"] = anyCalibrated && volRatioOk ? "CALIBRATED" : "WARN";
 
-  const bestHorse = [...horseRaceRows].sort((a, b) => b.oos_sharpe - a.oos_sharpe)[0]!;
+  const causalRows = horseRaceRows.filter((r) => r.strategy !== "current_weights");
+  const bestCausal = [...causalRows].sort((a, b) => b.oos_sharpe - a.oos_sharpe)[0]!;
+  const currentRefRow = horseRaceRows.find((r) => r.strategy === "current_weights");
   const missingFxTickers = activePool.filter((c) => c.missingFx).map((c) => c.ticker);
 
   const findings: string[] = [
     `Evaluated ${windowsEvaluated} non-overlapping ${horizonWeeks}w expanding windows across ${T} aligned weeks (${assetsIncluded.length} assets, mean Ledoit-Wolf λ=${avgLambda}, mean Politis-White L*=${avgBlockLen}w).`,
     `Covariance winner: ${covWinner.label} (QLIKE=${covWinner.qlike_loss}, realized/predicted vol=${covWinner.realized_to_predicted_vol_ratio}x, RMSE=${covWinner.vol_rmse_pct}%).`,
     `Tail winner: ${tailWinner.label} (pinball=${tailWinner.mean_pinball_loss_pct}%, VaR95 breaches=${tailWinner.breaches}/${tailWinner.total_windows} [${tailWinner.var95_breach_rate_pct}%], Kupiec p=${tailWinner.kupiec_pof_pvalue}).`,
-    `OOS Sharpe leader: ${bestHorse.label} (Sharpe=${bestHorse.oos_sharpe}, CAGR=${bestHorse.oos_cagr_pct}%, MaxDD=${bestHorse.oos_max_dd_pct}%, turnover=${bestHorse.annual_turnover_pct}%/yr).`,
+    `Causal OOS leader: ${bestCausal.label} (Sharpe=${bestCausal.oos_sharpe}, CAGR=${bestCausal.oos_cagr_pct}%, MaxDD=${bestCausal.oos_max_dd_pct}%, turnover=${bestCausal.annual_turnover_pct}%/yr).`,
+    ...(currentRefRow
+      ? [
+          `Current Weights (hindsight ref using today's weights — subject to selection bias): Sharpe=${currentRefRow.oos_sharpe}, CAGR=${currentRefRow.oos_cagr_pct}%, MaxDD=${currentRefRow.oos_max_dd_pct}%, turnover=${currentRefRow.annual_turnover_pct}%/yr.`,
+        ]
+      : []),
   ];
   if (!anyCalibrated) {
     findings.push("Warning: All tail simulators rejected by Kupiec POF (p < 0.05) — regime instability or structural shift detected.");

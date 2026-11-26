@@ -1179,18 +1179,14 @@ function isStrictPositiveDefinite(matrix: number[][]): boolean {
   return true;
 }
 
-function projectToPsd(matrix: number[][]): number[][] {
+export function projectToPsd(matrix: number[][]): number[][] {
   const n = matrix.length;
   if (n === 0) return [];
   if (isStrictPositiveDefinite(matrix)) {
     return matrix.map((row) => [...row]);
   }
   const eigenpairs = jacobiEigenSymmetric(matrix);
-  const minEig = Math.min(...eigenpairs.map((ep) => ep.eigenvalue));
   const maxEig = Math.max(...eigenpairs.map((ep) => ep.eigenvalue));
-  if (minEig >= 0) {
-    return matrix.map((row) => [...row]);
-  }
   const floorVal = maxEig > 1e-12 ? 1e-10 : 0;
   const out: number[][] = Array.from({ length: n }, () => Array<number>(n).fill(0));
   for (const ep of eigenpairs) {

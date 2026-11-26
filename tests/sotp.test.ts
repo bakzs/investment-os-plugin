@@ -412,3 +412,55 @@ test("backward compatibility on legacy model.json without fundamental_model and 
     }),
   );
 });
+
+test("computeSotpValuation emits explicit inverted warning when Base < Bear or Base > Bull", () => {
+  const baseBelowBear = DossierModelSchema.parse({
+    horizon_years: 5,
+    fundamental_model: {
+      base_shares_m: 100,
+      segments: [
+        {
+          id: "core",
+          name: "Core",
+          kind: "cagr_margin",
+          current_rev_b: 10,
+          rev_cagr_pct: { bear: 15, base: 5, bull: 25 },
+          margin_pct: { bear: 20, base: 20, bull: 25 },
+          exit_multiple: { bear: 20, base: 15, bull: 25 },
+        },
+      ],
+    },
+  });
+  const sotpLow = computeSotpValuation(100, baseBelowBear);
+  assert.ok(sotpLow);
+  assert.ok(sotpLow.totals.base.target_price < sotpLow.totals.bear.target_price);
+  assert.ok(
+    sotpLow.sotp_warnings.some((w) => w.includes("inverted") && w.includes("Bear $") && w.includes("Base $") && w.includes("Bull $")),
+    `Expected inverted SOTP warning when Base < Bear, got: ${JSON.stringify(sotpLow.sotp_warnings)}`,
+  );
+
+  const baseAboveBull = DossierModelSchema.parse({
+    horizon_years: 5,
+    fundamental_model: {
+      base_shares_m: 100,
+      segments: [
+        {
+          id: "core",
+          name: "Core",
+          kind: "cagr_margin",
+          current_rev_b: 10,
+          rev_cagr_pct: { bear: 5, base: 30, bull: 20 },
+          margin_pct: { bear: 20, base: 30, bull: 25 },
+          exit_multiple: { bear: 15, base: 30, bull: 25 },
+        },
+      ],
+    },
+  });
+  const sotpHigh = computeSotpValuation(100, baseAboveBull);
+  assert.ok(sotpHigh);
+  assert.ok(sotpHigh.totals.base.target_price > sotpHigh.totals.bull.target_price);
+  assert.ok(
+    sotpHigh.sotp_warnings.some((w) => w.includes("inverted")),
+    `Expected inverted SOTP warning when Base > Bull, got: ${JSON.stringify(sotpHigh.sotp_warnings)}`,
+  );
+});

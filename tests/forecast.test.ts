@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { runPortfolioForecast, type ForecastThesisRef } from "../src/server/forecast.js";
 import { computeAfterTaxHurdle, computeCapitalRotationQueue, computeScenarioSummary } from "../src/server/quant.js";
+import { jacobiEigenSymmetric, projectToPsd } from "../src/server/quant_sota.js";
 import {
   DossierModelSchema,
   EtfWeightsConfigSchema,
@@ -280,4 +281,125 @@ test("runPortfolioForecast simulates tax swaps, mandatory exits, planned buys, c
   assert.equal(fallbackRes.lw_shrinkage_lambda, 0.25);
   assert.equal(fallbackRes.block_length_mode, "politis_white_auto");
   assert.equal(fallbackRes.simulation_engine_used, "student_t");
+});
+
+test("projectToPsd floors rank-deficient zero eigenvalues >= 1e-10 and forecast deduplicates canonical assets cleanly", () => {
+  // 1. projectToPsd must floor zero and negative eigenvalues to >= 1e-10 (strictly positive definite)
+  const singularPsd = [
+    [0.09, 0.09],
+    [0.09, 0.09],
+  ];
+  const psd1 = projectToPsd(singularPsd);
+  const eigs1 = jacobiEigenSymmetric(psd1);
+  assert.ok(
+    eigs1.every((ep) => ep.eigenvalue >= 1e-10 - 1e-13),
+    `Expected strictly positive eigenvalues >= 1e-10, got ${eigs1.map((e) => e.eigenvalue)}`,
+  );
+
+  const indefinite = [
+    [0.04, 0.06],
+    [0.06, 0.04],
+  ];
+  const psd2 = projectToPsd(indefinite);
+  const eigs2 = jacobiEigenSymmetric(psd2);
+  assert.ok(eigs2.every((ep) => ep.eigenvalue >= 1e-10 - 1e-13));
+
+  // 2. Duplicate canonical holdings (GOOG brokerage + EXT:GOOG external + MSFT + VWRA)
+  // must keep analytical_lw, merge canonical weights in LW/PW, and yield identical lambda/L* vs consolidated GOOG
+  const googPts = makeWeeklyPoints("2022-01-03", 180, 0.0025, 140, 1);
+  const msftPts = makeWeeklyPoints("2022-01-03", 180, 0.0021, 300, 3);
+  const vwraPts = makeWeeklyPoints("2022-01-03", 180, 0.0017, 100, 5);
+  const historyCache: HistoryCacheState = {
+    updated_at: "2026-11-26T00:00:00Z",
+    series: {
+      GOOG: { symbol: "GOOG", currency: "USD", source: "yahoo", updated_at: "2026-11-26T00:00:00Z", points: googPts },
+      MSFT: { symbol: "MSFT", currency: "USD", source: "yahoo", updated_at: "2026-11-26T00:00:00Z", points: msftPts },
+      "VWRA.L": { symbol: "VWRA.L", currency: "USD", source: "yahoo", updated_at: "2026-11-26T00:00:00Z", points: vwraPts },
+    },
+  };
+
+  const splitProfile = ProfileSchema.parse({
+    base_currency: "USD",
+    benchmark: { ticker: "VWRA", yf_symbol: "VWRA.L", label: "VWRA.L", expected_cagr_pct: 8 },
+    external_exposure: { enabled: true, label: "External GOOG", ticker: "GOOG", amount_base: 30000, us_situs: true },
+  });
+  const splitPortfolio = PortfolioSchema.parse({
+    as_of: "2026-11-26T00:00:00Z",
+    cash_base: 5000,
+    positions: [
+      { ticker: "GOOG", yf_symbol: "GOOG", currency: "USD", qty: 100, ref_price: 200 }, // $20k
+      { ticker: "MSFT", yf_symbol: "MSFT", currency: "USD", qty: 100, ref_price: 300 }, // $30k
+      { ticker: "VWRA", yf_symbol: "VWRA.L", currency: "USD", qty: 200, ref_price: 100 }, // $20k
+    ],
+  });
+
+  const mergedProfile = ProfileSchema.parse({
+    base_currency: "USD",
+    benchmark: { ticker: "VWRA", yf_symbol: "VWRA.L", label: "VWRA.L", expected_cagr_pct: 8 },
+    external_exposure: { enabled: false },
+  });
+  const mergedPortfolio = PortfolioSchema.parse({
+    as_of: "2026-11-26T00:00:00Z",
+    cash_base: 5000,
+    positions: [
+      { ticker: "GOOG", yf_symbol: "GOOG", currency: "USD", qty: 250, ref_price: 200 }, // $50k consolidated
+      { ticker: "MSFT", yf_symbol: "MSFT", currency: "USD", qty: 100, ref_price: 300 }, // $30k
+      { ticker: "VWRA", yf_symbol: "VWRA.L", currency: "USD", qty: 200, ref_price: 100 }, // $20k
+    ],
+  });
+
+  const emptyQueue = {
+    tax_swaps: [],
+    mandatory_exits: [],
+    cap_trims: [],
+    total_swap_base: 0,
+    total_freed_base: 0,
+    total_estate_tax_saved_base: 0,
+  };
+  const emptyEtf = EtfWeightsConfigSchema.parse({});
+  const req = ForecastRequestSchema.parse({ horizon_years: 5, simulations: 400, include_external_wealth: true });
+
+  const splitRes = runPortfolioForecast(req, splitPortfolio, splitProfile, [], emptyQueue, emptyEtf, historyCache, { USD: 1.0 });
+  const mergedRes = runPortfolioForecast(req, mergedPortfolio, mergedProfile, [], emptyQueue, emptyEtf, historyCache, { USD: 1.0 });
+
+  assert.equal(splitRes.lw_shrinkage_method, "analytical_lw");
+  assert.equal(splitRes.lw_shrinkage_lambda, mergedRes.lw_shrinkage_lambda);
+  assert.equal(splitRes.block_length_weeks, mergedRes.block_length_weeks);
+  assert.ok(Number.isFinite(splitRes.simulated.ending_p50_base) && splitRes.simulated.ending_p50_base > 0);
+  assert.ok(Number.isFinite(splitRes.simulated.annual_vol_pct) && splitRes.simulated.annual_vol_pct > 0);
+
+  // Also test GOOG + GOOGL + EXT:GOOG + MSFT + VWRA together (3 duplicate canonical slots alongside other risky assets)
+  const triPortfolio = PortfolioSchema.parse({
+    as_of: "2026-11-26T00:00:00Z",
+    cash_base: 5000,
+    positions: [
+      { ticker: "GOOG", yf_symbol: "GOOG", currency: "USD", qty: 50, ref_price: 200 },
+      { ticker: "GOOGL", yf_symbol: "GOOG", currency: "USD", qty: 50, ref_price: 200 },
+      { ticker: "MSFT", yf_symbol: "MSFT", currency: "USD", qty: 100, ref_price: 300 },
+      { ticker: "VWRA", yf_symbol: "VWRA.L", currency: "USD", qty: 200, ref_price: 100 },
+    ],
+  });
+  const triRes = runPortfolioForecast(req, triPortfolio, splitProfile, [], emptyQueue, emptyEtf, historyCache, { USD: 1.0 });
+  assert.equal(triRes.lw_shrinkage_method, "analytical_lw");
+  assert.equal(triRes.lw_shrinkage_lambda, mergedRes.lw_shrinkage_lambda);
+  assert.equal(triRes.block_length_weeks, mergedRes.block_length_weeks);
+  assert.ok(Number.isFinite(triRes.simulated.ending_p50_base) && triRes.simulated.ending_p50_base > 0);
+
+  // Single-canonical-only duplicate (GOOG + EXT:GOOG + GOOGL) must NOT run LW on duplicate columns
+  const singleCanonProfile = ProfileSchema.parse({
+    base_currency: "USD",
+    external_exposure: { enabled: true, label: "External GOOG", ticker: "GOOG", amount_base: 25000, us_situs: true },
+  });
+  const singleCanonPortfolio = PortfolioSchema.parse({
+    as_of: "2026-11-26T00:00:00Z",
+    cash_base: 5000,
+    positions: [
+      { ticker: "GOOG", yf_symbol: "GOOG", currency: "USD", qty: 100, ref_price: 200 },
+      { ticker: "GOOGL", yf_symbol: "GOOG", currency: "USD", qty: 50, ref_price: 200 },
+    ],
+  });
+  const singleCanonRes = runPortfolioForecast(req, singleCanonPortfolio, singleCanonProfile, [], emptyQueue, emptyEtf, historyCache, { USD: 1.0 });
+  assert.equal(singleCanonRes.lw_shrinkage_method, "fallback_fixed");
+  assert.ok(Number.isFinite(singleCanonRes.simulated.ending_p50_base));
+  assert.ok(Number.isFinite(singleCanonRes.simulated.expected_sharpe));
 });

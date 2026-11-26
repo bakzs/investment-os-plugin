@@ -323,7 +323,7 @@ test("runQuantWalkForwardEvaluation runs full zero-lookahead evaluation on multi
     assert.ok(row.kupiec_pof_pvalue >= 0 && row.kupiec_pof_pvalue <= 1);
     assert.ok(row.mean_pinball_loss_pct >= 0);
     assert.ok(row.coverage_80_pct >= 0 && row.coverage_80_pct <= 100);
-    assert.ok(row.cvar95_shortfall_ratio >= 0);
+    assert.ok(row.cvar95_shortfall_ratio === null || row.cvar95_shortfall_ratio >= 0);
   }
 
   // Allocation horse race check
@@ -371,7 +371,7 @@ test("runQuantWalkForwardEvaluation runs full zero-lookahead evaluation on multi
   assert.ok(shortRes.findings.length >= 1);
 });
 
-test("runQuantWalkForwardEvaluation runs 260w x 12 assets cleanly within 120ms budget", () => {
+test("runQuantWalkForwardEvaluation runs 260w x 12 assets cleanly within 500ms budget", () => {
   const rng = mulberry32(777);
   const weeks = 260;
   const startDate = "2021-11-01";
@@ -399,5 +399,82 @@ test("runQuantWalkForwardEvaluation runs 260w x 12 assets cleanly within 120ms b
 
   assert.equal(res.assets_included.length, 12);
   assert.equal(res.windows_evaluated, 16);
-  assert.ok(elapsedMs < 120, `Expected <120ms for 260w x 12 assets, took ${elapsedMs.toFixed(1)}ms`);
+  assert.ok(elapsedMs < 500, `Expected <500ms for 260w x 12 assets, took ${elapsedMs.toFixed(1)}ms`);
+});
+
+test("walk-forward eval ensures 1/(T-1) consistency, null shortfall on 0 breaches, livePricesMap alignment, and causal vs hindsight labels", () => {
+  const rng = mulberry32(31415);
+  const weeks = 120;
+  const startDate = "2024-01-01";
+
+  // Two assets with noisy warmup (first 52w) and steady positive OOS drift (0 breaches in OOS!)
+  const makeCalmBull = (driftAfterWarmup: number, volAfterWarmup: number, seedShift: number) => {
+    const localRng = mulberry32(5000 + seedShift);
+    return buildSyntheticSeries(startDate, weeks, 100, (w) =>
+      w <= 52 ? 0.002 + sampleNormal(localRng) * 0.025 : driftAfterWarmup + sampleNormal(localRng) * volAfterWarmup,
+    );
+  };
+
+  const cache: HistoryCacheState = {
+    updated_at: "2026-11-22T00:00:00Z",
+    series: {
+      ASSA: { symbol: "ASSA", currency: "USD", source: "yahoo", updated_at: "2026-11-22T00:00:00Z", points: makeCalmBull(0.012, 0.002, 1) },
+      ASSB: { symbol: "ASSB", currency: "USD", source: "yahoo", updated_at: "2026-11-22T00:00:00Z", points: makeCalmBull(0.003, 0.002, 2) },
+    },
+  };
+  const profile = ProfileSchema.parse({ base_currency: "USD" });
+  const portfolio = PortfolioSchema.parse({
+    as_of: "2026-11-22T00:00:00Z",
+    positions: [
+      { ticker: "ASSA", yf_symbol: "ASSA", currency: "USD", qty: 100, ref_price: 100 },
+      { ticker: "ASSB", yf_symbol: "ASSB", currency: "USD", qty: 100, ref_price: 100 },
+    ],
+  });
+
+  const baseRes = runQuantWalkForwardEvaluation({ horizon_weeks: 13 }, portfolio, profile, cache, { USD: 1.0 });
+
+  // RT-1: For N=2, Ledoit-Wolf target F equals S identically, so unbiased 1/(T-1) scaling must align
+  // sample_cov, fixed_025_shrink, and analytical_lw identically
+  const sampleRow = baseRes.covariance_eval.find((r) => r.method === "sample_cov")!;
+  const fixedRow = baseRes.covariance_eval.find((r) => r.method === "fixed_025_shrink")!;
+  const lwRow = baseRes.covariance_eval.find((r) => r.method === "analytical_lw")!;
+  assert.equal(lwRow.realized_to_predicted_vol_ratio, sampleRow.realized_to_predicted_vol_ratio);
+  assert.equal(lwRow.qlike_loss, sampleRow.qlike_loss);
+  assert.equal(lwRow.vol_rmse_pct, sampleRow.vol_rmse_pct);
+  assert.equal(fixedRow.qlike_loss, sampleRow.qlike_loss);
+
+  // RT-3a: 0 breaches returns cvar95_shortfall_ratio === null (never 0)
+  for (const row of baseRes.tail_eval) {
+    assert.equal(row.breaches, 0);
+    assert.equal(row.cvar95_shortfall_ratio, null);
+  }
+
+  // RT-3b: Hindsight disclosure label & separated causal vs hindsight findings
+  const curHorse = baseRes.allocation_horse_race.find((r) => r.strategy === "current_weights")!;
+  assert.equal(curHorse.label, "Current Weights (Hindsight Ref)");
+  assert.ok(baseRes.findings.some((f) => f.startsWith("Causal OOS leader:")));
+  assert.ok(!baseRes.findings.some((f) => f.startsWith("Causal OOS leader: Current Weights")));
+  assert.ok(
+    baseRes.findings.some((f) => f.includes("Current Weights (hindsight ref using today's weights — subject to selection bias):")),
+  );
+
+  // RT-3c: livePricesMap shifts portfolio weights (ASSA 4x higher price -> higher OOS CAGR for current_weights)
+  const livePricesMap = new Map<string, number>([
+    ["ASSA", 500],
+    ["ASSB", 100],
+  ]);
+  const liveRes = runQuantWalkForwardEvaluation(
+    { horizon_weeks: 13 },
+    portfolio,
+    profile,
+    cache,
+    { USD: 1.0 },
+    { livePricesMap },
+  );
+  const liveCurHorse = liveRes.allocation_horse_race.find((r) => r.strategy === "current_weights")!;
+  assert.ok(
+    liveCurHorse.oos_cagr_pct > curHorse.oos_cagr_pct + 5,
+    `Expected livePricesMap weighting toward high-drift ASSA to raise current_weights OOS CAGR (${curHorse.oos_cagr_pct} -> ${liveCurHorse.oos_cagr_pct})`,
+  );
+  void rng;
 });

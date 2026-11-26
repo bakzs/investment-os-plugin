@@ -713,6 +713,107 @@ test("computeForwardScorecard computes Spearman Rank IC and scenario band hit ra
   assert.equal(card.fundamental_accuracy.inside_band_rate_pct, 80);
 });
 
+test("computeForwardScorecard scales scenario band to horizon and damps short-horizon Rank IC explosion", () => {
+  const historyCache: HistoryCacheState = {
+    updated_at: "2026-11-27T00:00:00Z",
+    series: {
+      "daily:VWRA.L": {
+        symbol: "VWRA.L",
+        currency: "USD",
+        source: "yahoo",
+        updated_at: "2026-11-27T00:00:00Z",
+        points: [
+          { date: "2025-11-27", close: 100 },
+          { date: "2026-10-18", close: 108 },
+          { date: "2026-10-23", close: 108 },
+          { date: "2026-11-27", close: 110 },
+        ],
+      },
+    },
+  };
+
+  // Case 1: 35d +5% matured call against [-10%, +25%] annual CAGR band must land INSIDE (not explode ~12x to +66%)
+  const logs35 = [
+    ThesisTestRecordSchema.parse({
+      ticker: "SHORT35",
+      tested_at: "2026-10-23T00:00:00Z", // 35 days before 2026-11-27
+      verdict: "HIGH_CONVICTION",
+      summary: "35d call",
+      price_at_test: 100,
+      benchmark_price_at_test: 108,
+      pit_snapshot: { expected_after_tax_cagr_pct: 12.0 },
+    }),
+  ];
+  const card35 = computeForwardScorecard(
+    logs35,
+    new Map([
+      ["SHORT35", 105],
+      ["VWRA.L", 110],
+    ]),
+    historyCache,
+    "VWRA.L",
+    new Date("2026-11-27T00:00:00Z"),
+    undefined,
+    new Map([["SHORT35", { bearCagrPct: -10, bullCagrPct: 25 }]]),
+  );
+  assert.equal(card35.matured_count, 1);
+  assert.equal(card35.fundamental_accuracy.modeled_tests_matured, 1);
+  assert.equal(card35.fundamental_accuracy.inside_band_count, 1);
+  assert.equal(card35.fundamental_accuracy.inside_band_rate_pct, 100);
+
+  // Case 2: Mixed 40d & 365d maturities — Rank IC damps 40d calls with yearsForIc >= 0.5
+  // Without damping, 40d +5% explodes to +56% and +10% to +139%, inverting ranking against 365d +15%/+30%
+  const mixedLogs = [
+    ThesisTestRecordSchema.parse({
+      ticker: "S40_LO",
+      tested_at: "2026-10-18T00:00:00Z", // 40d -> damped +5% => +10.25%
+      verdict: "WATCH",
+      summary: "40d low",
+      price_at_test: 100,
+      pit_snapshot: { expected_after_tax_cagr_pct: 10.0 },
+    }),
+    ThesisTestRecordSchema.parse({
+      ticker: "Y365_MID",
+      tested_at: "2025-11-27T00:00:00Z", // 365d -> +15%
+      verdict: "HIGH_CONVICTION",
+      summary: "1Y mid",
+      price_at_test: 100,
+      pit_snapshot: { expected_after_tax_cagr_pct: 15.0 },
+    }),
+    ThesisTestRecordSchema.parse({
+      ticker: "S40_HI",
+      tested_at: "2026-10-18T00:00:00Z", // 40d -> damped +10% => +21.0%
+      verdict: "HIGH_CONVICTION",
+      summary: "40d high",
+      price_at_test: 100,
+      pit_snapshot: { expected_after_tax_cagr_pct: 20.0 },
+    }),
+    ThesisTestRecordSchema.parse({
+      ticker: "Y365_TOP",
+      tested_at: "2025-11-27T00:00:00Z", // 365d -> +30%
+      verdict: "HIGH_CONVICTION",
+      summary: "1Y top",
+      price_at_test: 100,
+      pit_snapshot: { expected_after_tax_cagr_pct: 25.0 },
+    }),
+  ];
+  const mixedCard = computeForwardScorecard(
+    mixedLogs,
+    new Map([
+      ["S40_LO", 105],
+      ["Y365_MID", 115],
+      ["S40_HI", 110],
+      ["Y365_TOP", 130],
+      ["VWRA.L", 110],
+    ]),
+    historyCache,
+    "VWRA.L",
+    new Date("2026-11-27T00:00:00Z"),
+  );
+  assert.equal(mixedCard.fundamental_accuracy.ic_sample_count, 4);
+  assert.equal(mixedCard.fundamental_accuracy.spearman_rank_ic, 1);
+});
+
 test("evaluateHypothesisRule evaluates XBRL, EDGAR, and Form 4 insider rules deterministically", () => {
   const fund = FundamentalsSchema.parse({
     ticker: "ACME",

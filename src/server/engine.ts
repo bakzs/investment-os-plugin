@@ -3846,6 +3846,26 @@ export async function executeQuantEvaluation(opts: {
       }
     : payload.profile;
 
+  const livePricesMap = new Map<string, number>();
+  for (const pos of payload.portfolio.positions) {
+    if (pos.price > 0) {
+      livePricesMap.set(pos.ticker.toUpperCase(), pos.price);
+      if (pos.yf_symbol) {
+        livePricesMap.set(pos.yf_symbol, pos.price);
+        livePricesMap.set(pos.yf_symbol.toUpperCase(), pos.price);
+      }
+    }
+  }
+  for (const t of payload.theses) {
+    if (t.price !== null && t.price > 0) {
+      livePricesMap.set(t.ticker.toUpperCase(), t.price);
+      if (t.yf_symbol) {
+        livePricesMap.set(t.yf_symbol, t.price);
+        livePricesMap.set(t.yf_symbol.toUpperCase(), t.price);
+      }
+    }
+  }
+
   const evaluation = runQuantWalkForwardEvaluation(
     req,
     portfolio,
@@ -3854,6 +3874,7 @@ export async function executeQuantEvaluation(opts: {
     payload.fx_rates,
     {
       defaultRfPct: payload.macro_regime?.us3m_pct ?? 4.0,
+      livePricesMap,
     },
   );
   payload.lab.latest_quant_eval = evaluation;

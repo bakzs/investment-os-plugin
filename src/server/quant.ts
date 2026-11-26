@@ -2083,21 +2083,25 @@ export function computeForwardScorecard(
 
     if (maturity === "MATURED" && stockRet !== null) {
       const ratio = Math.max(0.001, 1 + stockRet / 100);
-      const years = Math.max(30, daysElapsed) / 365.25;
-      const realizedAnnualCagrPct = (Math.pow(ratio, 1 / years) - 1) * 100;
+      const yearsForIc = Math.max(0.5, daysElapsed / 365.25);
+      const icRealizedAnn = (Math.pow(ratio, 1 / yearsForIc) - 1) * 100;
 
       const pitExpected = rec.pit_snapshot?.expected_after_tax_cagr_pct;
       if (typeof pitExpected === "number" && Number.isFinite(pitExpected)) {
         icExpected.push(pitExpected);
-        icRealized.push(realizedAnnualCagrPct);
+        icRealized.push(icRealizedAnn);
       }
 
       const bounds = scenarioBoundsByTicker?.get(rec.ticker.toUpperCase());
       if (bounds && Number.isFinite(bounds.bearCagrPct) && Number.isFinite(bounds.bullCagrPct)) {
         modeledTestsMatured += 1;
-        const lo = Math.min(bounds.bearCagrPct, bounds.bullCagrPct) - 2;
-        const hi = Math.max(bounds.bearCagrPct, bounds.bullCagrPct) + 2;
-        if (realizedAnnualCagrPct >= lo && realizedAnnualCagrPct <= hi) {
+        const y = Math.max(30, daysElapsed) / 365.25;
+        const loCagr = Math.min(bounds.bearCagrPct, bounds.bullCagrPct);
+        const hiCagr = Math.max(bounds.bearCagrPct, bounds.bullCagrPct);
+        const bearHorizPct = (Math.pow(Math.max(0.05, 1 + loCagr / 100), y) - 1) * 100;
+        const bullHorizPct = (Math.pow(Math.max(0.05, 1 + hiCagr / 100), y) - 1) * 100;
+        const tolPct = y < 0.75 ? 5 : 2;
+        if (stockRet >= bearHorizPct - tolPct && stockRet <= bullHorizPct + tolPct) {
           insideBandCount += 1;
         }
       }

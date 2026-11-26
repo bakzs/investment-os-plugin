@@ -14,6 +14,7 @@ import {
   computeHrpWeights,
   computeLedoitWolfConstantCorr,
   computePolitisWhiteBlockLength,
+  projectToPsd,
   runCorrelatedWealthSimulation,
   type BlackLittermanResult,
   type FactorRiskDecomposition,
@@ -843,9 +844,45 @@ export function runPortfolioForecast(
     return common;
   };
 
-  let lwPool = assets
-    .map((a, idx) => ({ idx, retMap: a.retMap, valueBase: baselineMap.get(a.key)?.value_base ?? 0 }))
-    .filter((x) => !assets[x.idx]!.slot.is_cash && x.retMap.size >= 52);
+  const baseStartVec = assets.map((a) => baselineMap.get(a.key)?.value_base ?? 0);
+  const simStartVec = assets.map((a) => simMap.get(a.key)?.value_base ?? 0);
+  const baseStartTotal = baseStartVec.reduce((acc, v) => acc + v, 0);
+  const simStartTotal = simStartVec.reduce((acc, v) => acc + v, 0);
+  const benchEndBase = round(baseStartTotal * Math.pow(1 + benchCagrPct / 100, horizon), 2);
+
+  const canonBaseMap = new Map<string, number>();
+  const canonSimMap = new Map<string, number>();
+  for (let idx = 0; idx < assets.length; idx += 1) {
+    const a = assets[idx]!;
+    if (a.slot.is_cash) continue;
+    const canon = canonicalAssetName(a.slot.ticker);
+    canonBaseMap.set(canon, (canonBaseMap.get(canon) ?? 0) + Math.max(0, baseStartVec[idx] ?? 0));
+    canonSimMap.set(canon, (canonSimMap.get(canon) ?? 0) + Math.max(0, simStartVec[idx] ?? 0));
+  }
+
+  const dedupPoolByCanonical = (minWeeks: number) => {
+    const byCanon = new Map<string, { canon: string; idx: number; retMap: Map<string, number>; valueBase: number }>();
+    for (let idx = 0; idx < assets.length; idx += 1) {
+      const a = assets[idx]!;
+      if (a.slot.is_cash || a.retMap.size < minWeeks) continue;
+      const canon = canonicalAssetName(a.slot.ticker);
+      const prev = byCanon.get(canon);
+      if (!prev) {
+        byCanon.set(canon, {
+          canon,
+          idx,
+          retMap: a.retMap,
+          valueBase: canonBaseMap.get(canon) ?? 0,
+        });
+      } else if (a.retMap.size > prev.retMap.size) {
+        prev.idx = idx;
+        prev.retMap = a.retMap;
+      }
+    }
+    return Array.from(byCanon.values());
+  };
+
+  let lwPool = dedupPoolByCanonical(52);
 
   let lwCommonWeeks = lwPool.length >= 2 ? computeCommonWeeks(lwPool.map((x) => x.retMap)) : [];
   while (lwPool.length > 2 && lwCommonWeeks.length < 52) {
@@ -878,7 +915,7 @@ export function runPortfolioForecast(
     const lwRes = computeLedoitWolfConstantCorr(returnMatrix);
     shrinkLambda = lwRes.lambda;
     lwShrinkageMethod = "analytical_lw";
-    const lwPosMap = new Map<number, number>(lwPool.map((item, k) => [item.idx, k]));
+    const lwPosMap = new Map<string, number>(lwPool.map((item, k) => [item.canon, k]));
     const targetAvg = Number.isFinite(lwRes.avg_corr) ? Math.max(0.1, Math.min(0.85, lwRes.avg_corr)) : avgCorr;
 
     for (let i = 0; i < n; i += 1) {
@@ -891,15 +928,18 @@ export function runPortfolioForecast(
         } else if (a.slot.is_cash || b.slot.is_cash) {
           corrIJ = 0;
         } else {
-          const li = lwPosMap.get(i);
-          const lj = lwPosMap.get(j);
-          if (li !== undefined && lj !== undefined) {
-            corrIJ = lwRes.corr[li]![lj]!;
+          const canonA = canonicalAssetName(a.slot.ticker);
+          const canonB = canonicalAssetName(b.slot.ticker);
+          if (canonA === canonB) {
+            corrIJ = 0.97;
           } else {
-            corrIJ = (1 - shrinkLambda) * corrIJ + shrinkLambda * targetAvg;
-          }
-          if (canonicalAssetName(a.slot.ticker) === canonicalAssetName(b.slot.ticker)) {
-            corrIJ = Math.max(0.96, corrIJ);
+            const li = lwPosMap.get(canonA);
+            const lj = lwPosMap.get(canonB);
+            if (li !== undefined && lj !== undefined) {
+              corrIJ = lwRes.corr[li]![lj]!;
+            } else {
+              corrIJ = (1 - shrinkLambda) * corrIJ + shrinkLambda * targetAvg;
+            }
           }
         }
         shrunkCorr[i]![j] = corrIJ;
@@ -913,9 +953,10 @@ export function runPortfolioForecast(
         const b = assets[j]!;
         let corrIJ = rawCorr[i]![j]!;
         if (i !== j && !a.slot.is_cash && !b.slot.is_cash) {
-          corrIJ = (1 - shrinkLambda) * corrIJ + shrinkLambda * avgCorr;
           if (canonicalAssetName(a.slot.ticker) === canonicalAssetName(b.slot.ticker)) {
-            corrIJ = Math.max(0.96, corrIJ);
+            corrIJ = 0.97;
+          } else {
+            corrIJ = (1 - shrinkLambda) * corrIJ + shrinkLambda * avgCorr;
           }
         }
         shrunkCorr[i]![j] = corrIJ;
@@ -924,13 +965,44 @@ export function runPortfolioForecast(
     }
   }
 
-  const L = choleskyDecompose(cov);
+  // Enforce strict positive-definiteness on the non-cash risky covariance submatrix
+  const riskyIndices: number[] = [];
+  for (let i = 0; i < n; i += 1) {
+    if (!assets[i]!.slot.is_cash) riskyIndices.push(i);
+  }
+  const mRisky = riskyIndices.length;
+  if (mRisky > 0) {
+    const riskyCovSub: number[][] = Array.from({ length: mRisky }, (_, r) =>
+      Array.from({ length: mRisky }, (_, c) => cov[riskyIndices[r]!]![riskyIndices[c]!]!),
+    );
+    const psdRiskyCov = projectToPsd(riskyCovSub);
+    for (let r = 0; r < mRisky; r += 1) {
+      const ri = riskyIndices[r]!;
+      const varR = Math.max(1e-10, psdRiskyCov[r]![r]!);
+      cov[ri]![ri] = varR;
+      assets[ri]!.vol = Math.sqrt(varR);
+      shrunkCorr[ri]![ri] = 1.0;
+      for (let c = r + 1; c < mRisky; c += 1) {
+        const rj = riskyIndices[c]!;
+        const symCov = 0.5 * (psdRiskyCov[r]![c]! + psdRiskyCov[c]![r]!);
+        cov[ri]![rj] = symCov;
+        cov[rj]![ri] = symCov;
+      }
+    }
+    for (let r = 0; r < mRisky; r += 1) {
+      const ri = riskyIndices[r]!;
+      const di = Math.sqrt(Math.max(1e-10, cov[ri]![ri]!));
+      for (let c = r + 1; c < mRisky; c += 1) {
+        const rj = riskyIndices[c]!;
+        const dj = Math.sqrt(Math.max(1e-10, cov[rj]![rj]!));
+        const cleanCorr = Math.max(-0.95, Math.min(0.98, cov[ri]![rj]! / (di * dj)));
+        shrunkCorr[ri]![rj] = cleanCorr;
+        shrunkCorr[rj]![ri] = cleanCorr;
+      }
+    }
+  }
 
-  const baseStartVec = assets.map((a) => baselineMap.get(a.key)?.value_base ?? 0);
-  const simStartVec = assets.map((a) => simMap.get(a.key)?.value_base ?? 0);
-  const baseStartTotal = baseStartVec.reduce((acc, v) => acc + v, 0);
-  const simStartTotal = simStartVec.reduce((acc, v) => acc + v, 0);
-  const benchEndBase = round(baseStartTotal * Math.pow(1 + benchCagrPct / 100, horizon), 2);
+  const L = choleskyDecompose(cov);
 
   // Automatic Patton-Politis-White (2009) block length L* when manual block_length_weeks is null/undefined
   let blockLenWeeks: number;
@@ -940,11 +1012,7 @@ export function runPortfolioForecast(
     blockLengthMode = "manual";
   } else {
     blockLengthMode = "politis_white_auto";
-    let pwPool = lwPool.length >= 2 && lwCommonWeeks.length >= 52
-      ? lwPool
-      : assets
-          .map((a, idx) => ({ idx, retMap: a.retMap, valueBase: baselineMap.get(a.key)?.value_base ?? 0 }))
-          .filter((x) => !assets[x.idx]!.slot.is_cash && x.retMap.size >= 30);
+    let pwPool = lwPool.length >= 2 && lwCommonWeeks.length >= 52 ? lwPool : dedupPoolByCanonical(30);
     let pwWeeks = lwPool.length >= 2 && lwCommonWeeks.length >= 52
       ? lwCommonWeeks
       : computeCommonWeeks(pwPool.map((x) => x.retMap));
@@ -955,10 +1023,10 @@ export function runPortfolioForecast(
     }
     const portSeries: number[] = [];
     if (pwPool.length > 0 && pwWeeks.length >= 30) {
-      let rawWeights = pwPool.map((x) => Math.max(0, baseStartVec[x.idx] ?? 0));
+      let rawWeights = pwPool.map((x) => canonBaseMap.get(x.canon) ?? 0);
       let wSum = rawWeights.reduce((s, v) => s + v, 0);
       if (wSum <= 1e-6) {
-        rawWeights = pwPool.map((x) => Math.max(0, simStartVec[x.idx] ?? 0));
+        rawWeights = pwPool.map((x) => canonSimMap.get(x.canon) ?? 0);
         wSum = rawWeights.reduce((s, v) => s + v, 0);
       }
       const normW =

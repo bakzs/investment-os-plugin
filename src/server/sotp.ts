@@ -175,9 +175,18 @@ function buildSotpWarnings(
   baseTotalEvRaw: number,
   baseEquityB: number,
   bullEquityB: number,
+  bearTargetPrice: number,
+  baseTargetPrice: number,
+  bullTargetPrice: number,
   fundamentals: DossierFundamentals | null | undefined,
 ): string[] {
   const warnings: string[] = [];
+
+  if (baseTargetPrice < bearTargetPrice - 0.01 || baseTargetPrice > bullTargetPrice + 0.01) {
+    warnings.push(
+      `SOTP scenarios are inverted (Bear $${round(bearTargetPrice, 2).toFixed(2)} / Base $${round(baseTargetPrice, 2).toFixed(2)} / Bull $${round(bullTargetPrice, 2).toFixed(2)}); verify segment assumptions.`,
+    );
+  }
 
   // 1. TTM revenue cross-check when all non-milestone segments project from current_rev_b
   const nonMilestone = fm.segments.filter((s) => s.kind !== "milestone_option");
@@ -390,6 +399,9 @@ export function computeSotpValuation(
     rawTotals.base.ev,
     rawTotals.base.equity,
     rawTotals.bull.equity,
+    rawTotals.bear.targetPrice,
+    rawTotals.base.targetPrice,
+    rawTotals.bull.targetPrice,
     fundamentals,
   );
 
