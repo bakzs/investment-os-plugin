@@ -475,12 +475,27 @@ export const CompanyConnectionSchema = z.object({
 
 export type CompanyConnection = z.infer<typeof CompanyConnectionSchema>;
 
+export const ConsensusEstimateSchema = z.object({
+  as_of: z.string().trim().max(64).optional(),
+  ntm_rev_b: z.number().finite().positive().nullable().optional(),
+  ntm_rev_growth_pct: z.number().finite().min(-100).max(500).nullable().optional(),
+  ntm_eps: z.number().finite().nullable().optional(),
+  fy1_eps_est: z.number().finite().nullable().optional(),
+  fy2_eps_est: z.number().finite().nullable().optional(),
+  eps_revision_90d_pct: z.number().finite().min(-200).max(500).nullable().optional(),
+  target_price_mean: NonNegativeNumber.nullable().optional(),
+  analyst_count: z.number().int().min(0).max(200).nullable().optional(),
+});
+
+export type ConsensusEstimate = z.infer<typeof ConsensusEstimateSchema>;
+
 export const DossierIntelSchema = z.object({
   updated_at: z.string().trim().min(1).max(64),
   provider: z.string().trim().min(1).max(64).default("ibkr"),
   contract_id: z.union([z.number().int(), z.string().trim().min(1).max(40)]).nullable().optional(),
   earnings_insight: EarningsInsightSchema.nullable().optional(),
   options_intel: OptionsIntelSchema.nullable().optional(),
+  consensus: ConsensusEstimateSchema.nullable().optional(),
   themes: z.array(z.string().trim().min(1).max(120)).max(20).default([]),
   connections: z.array(CompanyConnectionSchema).max(20).default([]),
 });
@@ -600,7 +615,14 @@ export const FundamentalsPeriodSchema = z.object({
   cogs_m: z.number().finite().nullable().optional(),
   cash_and_st_inv_m: z.number().finite().nullable().optional(),
   total_debt_m: z.number().finite().nullable().optional(),
+  total_assets_m: z.number().finite().nullable().optional(),
+  stockholders_equity_m: z.number().finite().nullable().optional(),
   net_cash_b: z.number().finite().nullable().optional(),
+  owner_earnings_m: z.number().finite().nullable().optional(),
+  owner_earnings_margin_pct: z.number().finite().nullable().optional(),
+  invested_capital_m: z.number().finite().nullable().optional(),
+  roic_pct: z.number().finite().nullable().optional(),
+  accruals_ratio_pct: z.number().finite().nullable().optional(),
   gross_margin_pct: z.number().finite().nullable().optional(),
   operating_margin_pct: z.number().finite().nullable().optional(),
   fcf_margin_pct: z.number().finite().nullable().optional(),
@@ -619,11 +641,18 @@ export const FundamentalsRatiosSchema = z.object({
   dio_days: z.number().finite().nullable().optional(),
   ocf_to_ni_pct: z.number().finite().nullable().optional(),
   fcf_margin_pct: z.number().finite().nullable().optional(),
+  owner_earnings_margin_pct: z.number().finite().nullable().optional(),
   sbc_pct_rev: z.number().finite().nullable().optional(),
+  roic_pct: z.number().finite().nullable().optional(),
+  incremental_roic_pct: z.number().finite().nullable().optional(),
+  accruals_ratio_pct: z.number().finite().nullable().optional(),
+  quality_grade: z.enum(["A", "B", "C", "D"]).nullable().optional(),
+  quality_flags: z.array(z.string().trim().max(160)).max(12).optional(),
   net_cash_b: z.number().finite().nullable().optional(),
   diluted_shares_yoy_pct: z.number().finite().nullable().optional(),
   ttm_eps: z.number().finite().nullable().optional(),
   ttm_fcf_per_share: z.number().finite().nullable().optional(),
+  ttm_owner_earnings_per_share: z.number().finite().nullable().optional(),
   ttm_rev_per_share: z.number().finite().nullable().optional(),
 });
 
@@ -829,6 +858,50 @@ export const BacktestRequestSchema = z.object({
 });
 
 export type BacktestRequest = z.infer<typeof BacktestRequestSchema>;
+
+export const ForecastActionSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("tax_swap"),
+    ticker: TickerSchema,
+    target_ticker: TickerSchema.optional(),
+    pct: z.number().finite().min(1).max(100).default(100),
+  }),
+  z.object({
+    type: z.literal("sell"),
+    ticker: TickerSchema,
+    pct: z.number().finite().min(1).max(100).optional(),
+    amount_base: NonNegativeNumber.optional(),
+  }),
+  z.object({
+    type: z.literal("buy"),
+    ticker: TickerSchema,
+    amount_base: z.number().finite().positive(),
+    yf_symbol: z.string().trim().min(1).max(24).optional(),
+    currency: CurrencySchema.optional(),
+    us_situs: z.boolean().optional(),
+  }),
+  z.object({
+    type: z.literal("park_cash_in_benchmark"),
+    pct: z.number().finite().min(1).max(100).default(100),
+    keep_reserve: z.boolean().default(true),
+  }),
+]);
+
+export type ForecastAction = z.infer<typeof ForecastActionSchema>;
+
+export const ForecastRequestSchema = z.object({
+  horizon_years: z.number().int().min(1).max(10).default(5),
+  include_external_wealth: z.boolean().default(true),
+  apply_recommended_rotations: z.boolean().default(false),
+  actions: z.array(ForecastActionSchema).max(40).default([]),
+  regime_vol_multiplier: z.number().finite().min(0.5).max(2.5).default(1.0),
+  simulations: z.number().int().min(200).max(5000).default(1500),
+  rf_pct: z.number().finite().min(0).max(20).optional(),
+  demo: z.boolean().optional(),
+});
+
+export type ForecastRequest = z.infer<typeof ForecastRequestSchema>;
+export type ForecastRequestInput = z.input<typeof ForecastRequestSchema>;
 
 export const EtfMetadataSchema = z
   .object({

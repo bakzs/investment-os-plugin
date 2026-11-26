@@ -1,0 +1,207 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { runPortfolioForecast, type ForecastThesisRef } from "../src/server/forecast.js";
+import { computeAfterTaxHurdle, computeCapitalRotationQueue, computeScenarioSummary } from "../src/server/quant.js";
+import {
+  DossierModelSchema,
+  EtfWeightsConfigSchema,
+  ForecastRequestSchema,
+  PortfolioSchema,
+  ProfileSchema,
+  type HistoryCacheState,
+  type HistoryPoint,
+} from "../src/server/schema.js";
+
+function makeWeeklyPoints(startDate: string, weeks: number, drift: number, startPx: number, phase = 0): HistoryPoint[] {
+  const startMs = Date.parse(`${startDate}T00:00:00Z`);
+  const pts: HistoryPoint[] = [];
+  let px = startPx;
+  for (let i = 0; i <= weeks; i += 1) {
+    const dt = new Date(startMs + i * 7 * 86400 * 1000).toISOString().slice(0, 10);
+    if (i > 0) {
+      const wave = Math.sin((i + phase) * 0.65) * 0.018 + Math.cos((i + phase * 2) * 0.31) * 0.012;
+      px = Math.max(1, px * (1 + drift + wave));
+    }
+    pts.push({ date: dt, close: Math.round(px * 10000) / 10000 });
+  }
+  return pts;
+}
+
+test("runPortfolioForecast simulates tax swaps, mandatory exits, planned buys, cash shortfalls, fat-tail bands, and risk sizing deterministically", () => {
+  const profile = ProfileSchema.parse({
+    base_currency: "USD",
+    tax_profile: {
+      country_code: "SG",
+      nra_us_estate_tax_enabled: true,
+      us_dividend_wht_pct: 30,
+      ucits_dividend_wht_pct: 15,
+    },
+    benchmark: {
+      ticker: "VWRA",
+      yf_symbol: "VWRA.L",
+      label: "VWRA.L Core Global",
+      expected_cagr_pct: 8.0,
+      alpha_buffer_pct: 2.5,
+      estate_tax_drag_mode: "hedge",
+      estate_tax_hedge_bps: 35,
+    },
+    risk_caps: [
+      { id: "us-situs", label: "US-Situs Cap", kind: "us_situs", cap_pct: 60 },
+      { id: "single-max", label: "Single Name Max", kind: "single_name_max", cap_pct: 20 },
+    ],
+  });
+
+  const portfolio = PortfolioSchema.parse({
+    as_of: "2026-11-26T00:00:00Z",
+    cash_base: 10000,
+    accruals_base: 0,
+    fx_rates: { USD: 1.0 },
+    positions: [
+      { ticker: "QQQ", yf_symbol: "QQQ", asset_type: "US ETF", domicile: "US", us_situs: true, currency: "USD", qty: 100, avg_cost: 400, ref_price: 500 }, // $50k US ETF
+      { ticker: "VWRA", yf_symbol: "VWRA.L", asset_type: "UCITS ETF", domicile: "Ireland", us_situs: false, currency: "USD", qty: 100, avg_cost: 150, ref_price: 180 }, // $18k UCITS
+      { ticker: "HYPE", yf_symbol: "HYPE", asset_type: "US Equity", domicile: "US", us_situs: true, currency: "USD", qty: 200, avg_cost: 60, ref_price: 50 }, // $10k held EXIT
+      { ticker: "MSFT", yf_symbol: "MSFT", asset_type: "US Equity", domicile: "US", us_situs: true, currency: "USD", qty: 24, avg_cost: 400, ref_price: 500 }, // $12k active
+    ],
+  });
+  // Total starting wealth = 50k + 18k + 10k + 12k + 10k cash = $100,000; US-situs = 72% (> 60% cap!)
+
+  const etfWeights = EtfWeightsConfigSchema.parse({
+    as_of: "2026-11-26",
+    etf_weights: {
+      VWRA: { MSFT: 0.04, AAPL: 0.04 },
+      QQQ: { MSFT: 0.08, AAPL: 0.08 },
+    },
+  });
+
+  const taxMsft = computeAfterTaxHurdle(profile, true, 0.7, 34);
+  const msftModel = DossierModelSchema.parse({
+    horizon_years: 5,
+    dividend_yield_pct: 0.7,
+    scenarios: {
+      bear: { probability: 0.25, target_price_5y: 450, summary: "Bear" },
+      base: { probability: 0.5, target_price_5y: 850, summary: "Base" },
+      bull: { probability: 0.25, target_price_5y: 1100, summary: "Bull" },
+    },
+  });
+  const msftScen = computeScenarioSummary(500, msftModel, taxMsft);
+
+  const theses: ForecastThesisRef[] = [
+    {
+      ticker: "MSFT",
+      yf_symbol: "MSFT",
+      currency: "USD",
+      us_situs: true,
+      price: 500,
+      max_weight_pct: 15,
+      scenario_summary: msftScen,
+      model: msftModel,
+      quality_grade: "A",
+    },
+    {
+      ticker: "ACME",
+      yf_symbol: "ACME",
+      currency: "USD",
+      us_situs: true,
+      price: 100,
+      max_weight_pct: 12,
+      scenario_summary: computeScenarioSummary(
+        100,
+        DossierModelSchema.parse({
+          horizon_years: 5,
+          dividend_yield_pct: 0,
+          scenarios: {
+            bear: { probability: 0.25, target_price_5y: 80, summary: "Bear" },
+            base: { probability: 0.5, target_price_5y: 210, summary: "Base" },
+            bull: { probability: 0.25, target_price_5y: 280, summary: "Bull" },
+          },
+        }),
+        computeAfterTaxHurdle(profile, true, 0, 34),
+      ),
+      quality_grade: "A",
+    },
+  ];
+
+  const riskCaps = [
+    { id: "us-situs", label: "US-Situs Cap", value_pct: 72, cap_pct: 60, status: "BREACH" as const },
+    { id: "single-max", label: "Single Name Max", value_pct: 16.7, cap_pct: 20, status: "PASS" as const },
+  ];
+  const lookthrough = [
+    { name: "MSFT", total_usd: 16720, total_base: 16720, pct_nav: 16.72 },
+    { name: "HYPE", total_usd: 10000, total_base: 10000, pct_nav: 10 },
+  ];
+  const queue = computeCapitalRotationQueue(
+    portfolio,
+    lookthrough,
+    riskCaps,
+    [{ ticker: "HYPE", tier: "passed", verdict: "EXIT", max_weight_pct: 0, kill_switch_triggered: true }],
+    profile,
+    1.0,
+  );
+
+  const historyCache: HistoryCacheState = {
+    updated_at: "2026-11-26T00:00:00Z",
+    series: {
+      "VWRA.L": { symbol: "VWRA.L", currency: "USD", source: "yahoo", updated_at: "2026-11-26T00:00:00Z", points: makeWeeklyPoints("2022-01-03", 180, 0.0018, 100, 0) },
+      QQQ: { symbol: "QQQ", currency: "USD", source: "yahoo", updated_at: "2026-11-26T00:00:00Z", points: makeWeeklyPoints("2022-01-03", 180, 0.0024, 350, 1) },
+      MSFT: { symbol: "MSFT", currency: "USD", source: "yahoo", updated_at: "2026-11-26T00:00:00Z", points: makeWeeklyPoints("2022-01-03", 180, 0.0026, 300, 2) },
+      HYPE: { symbol: "HYPE", currency: "USD", source: "yahoo", updated_at: "2026-11-26T00:00:00Z", points: makeWeeklyPoints("2022-01-03", 180, -0.0005, 80, 3) },
+      ACME: { symbol: "ACME", currency: "USD", source: "yahoo", updated_at: "2026-11-26T00:00:00Z", points: makeWeeklyPoints("2022-01-03", 180, 0.0031, 60, 4) },
+    },
+  };
+
+  const req = ForecastRequestSchema.parse({
+    horizon_years: 5,
+    simulations: 600,
+    apply_recommended_rotations: true,
+    actions: [
+      { type: "buy", ticker: "ACME", amount_base: 12000 },
+      { type: "park_cash_in_benchmark" },
+    ],
+    rf_pct: 3.8,
+  });
+
+  const res1 = runPortfolioForecast(req, portfolio, profile, theses, queue, etfWeights, historyCache, { USD: 1.0 });
+  const res2 = runPortfolioForecast(req, portfolio, profile, theses, queue, etfWeights, historyCache, { USD: 1.0 });
+
+  // 1. Seeded deterministic repeatability
+  assert.deepEqual(res1, res2);
+
+  // 2. Starting wealth conserved ($100,000) & percentile ordering holds
+  assert.equal(res1.baseline.starting_wealth_base, 100000);
+  assert.equal(res1.simulated.starting_wealth_base, 100000);
+  assert.ok(res1.baseline.ending_p10_base < res1.baseline.ending_p50_base);
+  assert.ok(res1.baseline.ending_p50_base < res1.baseline.ending_p90_base);
+  assert.ok(res1.simulated.ending_p10_base < res1.simulated.ending_p50_base);
+  assert.ok(res1.simulated.ending_p50_base < res1.simulated.ending_p90_base);
+  assert.equal(res1.simulated.trajectory.length, 6); // Year 0..5
+
+  // 3. QQQ -> VWRA tax swap + HYPE exit cured US-Situs cap & reduced NRA estate tax to $0 (US-situs drops from $72k to $24k <= $60k threshold!)
+  assert.ok(res1.deltas.cured_caps.includes("US-Situs Cap"));
+  assert.ok(res1.deltas.estate_tax_saved_base > 0);
+  assert.equal(res1.simulated.estate_tax_base, 0);
+  assert.ok(res1.deltas.us_situs_delta_pct < -40);
+  assert.equal(res1.cash_shortfall_base, 0);
+  assert.equal(res1.simulated.ending_cash_base, 0); // park_cash_in_benchmark deployed residual $8k into VWRA
+
+  // 4. Risk sizing metrics: Marginal Risk Contributions sum to ~100% and ACME receives positive Quarter-Kelly sizing
+  const totalMrc = res1.positions.reduce((s, p) => s + p.marginal_risk_contrib_pct, 0);
+  assert.ok(totalMrc > 98 && totalMrc < 102, `Expected total MRC ~100%, got ${totalMrc}`);
+  const acmeRow = res1.positions.find((p) => p.ticker === "ACME");
+  assert.ok(acmeRow);
+  assert.equal(acmeRow.after_value_base, 12000);
+  assert.equal(acmeRow.quality_grade, "A");
+  assert.ok(acmeRow.quarter_kelly_weight_pct > 0 && acmeRow.quarter_kelly_weight_pct <= 12);
+  assert.ok(acmeRow.corr_adjusted_hurdle_pct >= 8.0);
+
+  // 5. Cash shortfall capping when user enters a buy exceeding cash + freed proceeds
+  const overBuyReq = ForecastRequestSchema.parse({
+    horizon_years: 3,
+    simulations: 400,
+    apply_recommended_rotations: false,
+    actions: [{ type: "buy", ticker: "ACME", amount_base: 25000 }], // only $10k cash available
+  });
+  const overBuyRes = runPortfolioForecast(overBuyReq, portfolio, profile, theses, queue, etfWeights, historyCache, { USD: 1.0 });
+  assert.equal(overBuyRes.cash_shortfall_base, 15000);
+  assert.equal(overBuyRes.positions.find((p) => p.ticker === "ACME")?.after_value_base, 10000);
+  assert.equal(overBuyRes.simulated.ending_cash_base, 0);
+});

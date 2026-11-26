@@ -3,6 +3,27 @@
 All notable changes to **Investment OS** are documented in this file.
 Versions stay aligned across `plugin.json`, `package.json`, and `src/server/index.ts`.
 
+## [0.6.0] - 2026-11-26
+
+### Added
+- **Portfolio Forward Forecast & Interactive Action Simulator (`src/server/forecast.ts`, `simulate_portfolio_forecast`, `app_simulate_forecast`):**
+  - Seeded 1,500-path correlated Student-t (`df=6`) Monte Carlo wealth engine using Ledoit-Wolf shrunk historical covariance (`λ=0.25`) blended with 5Y after-tax dossier models (`P10`/`P25`/`P50`/`P75`/`P90` wealth cone vs. benchmark).
+  - Interactive **Forecast** tab allowing users to toggle UCITS tax swaps, mandatory exits, cap trims, custom planned buys, benchmark cash deployment, horizon (`1Y`–`10Y`), and volatility regime multiplier (`0.8x`–`1.5x`) with instant Before vs. After comparisons for median wealth, estate tax saved, annual WHT saved, cured risk caps, Marginal Risk Contribution %, Correlation-Adjusted Hurdles, and Quarter-Kelly sizing.
+- **SOTA Quantamental Quality & Expectations Signals (`src/server/{xbrl,quant,schema}.ts`):**
+  - SEC XBRL extraction of Total Assets and Stockholders' Equity to compute **Owner Earnings (`FCF − SBC`)**, **Owner Earnings Margin**, **Invested Capital**, **ROIC**, **Incremental ROIC**, **Sloan Accruals Ratio**, **TTM Owner Earnings / Share**, and deterministic **Composite Quality Grade (`A`–`D`)** with diagnostic `quality_flags[]`.
+  - Reverse DCF **Street Consensus Snapshot & Expectations Gap** (`consensus_rev_growth_pct`, `expectations_gap_vs_consensus_pct`), Owner-Earnings SBC divergence warning (`>= 8pp`), and mechanical `owner_earnings_margin_pct` hypothesis rules.
+- **Executive Cockpit & 3-Tier Human-vs-Agent Signal Hygiene (`src/server/{edgar,watchdog}.ts`, `src/ui/{styles.css,main.ts}`):**
+  - Re-architected **Overview** into a calm, spacious executive cockpit showing only Top-5 urgent signals, a single consolidated Macro Regime strip, a 5Y Projected Wealth pill, concise Priority Rotations, and breached-only Risk Caps (passing caps collapsed by default).
+  - Upgraded SEC EDGAR filing alerts to 3 tiers (`high`: `NT 10-Q/K`, `8-K:1.03/2.06/3.01/4.01/4.02`; `medium`: `8-K:1.02/3.02`; `info`: routine `8-K:5.02` officer/board comp notices kept in backend metadata and collapsed inside **SEC & Alerts**).
+  - Watchdog suppresses `info` filings, stale SEC alerts (`>90d` high / `>45d` medium), and audit drift on `passed` dossiers.
+- **4-Sub-Tab Institutional Stock Research Drawer & 3-Lens Deep Dive:**
+  - Redesigned `#stock-inspector` into `Summary`, `Deep Memo`, `Valuation & Quality`, and `Signals & Audit` tabs with spacious prose typography, `Side Agent` vs. `This Chat` dispatch toggle, and a primary **Deep Research** CTA running the 3-Lens Institutional Deep Dive protocol.
+
+### Changed
+- Bumped MCP App resource URI (`APP_URI`) to `ui://investment-os/v6/dashboard.html`, Server version to `0.6.0`, and outbound Yahoo/SEC User-Agent strings to `0.6.0`.
+- Refined UI theme palette (Slate + Indigo primary + Emerald/Amber/Rose semantic indicators) with generous spacing and cleaner hierarchy across all 6 tabs (`Overview`, `Forecast`, `Holdings`, `Research`, `SEC & Alerts`, `Lab`).
+- Refreshed `README.md` to accurately document `v0.6.0` capabilities, tool surface, and 60-second installation.
+
 ## [0.5.0] - 2026-11-26
 
 ### Added

@@ -2,6 +2,11 @@ import yaml from "js-yaml";
 import { z } from "zod";
 import { evaluateSecGates, extractSecRedFlags, type SecRedFlag } from "./edgar.js";
 import {
+  runPortfolioForecast,
+  type ForecastThesisRef,
+  type PortfolioForecastResult,
+} from "./forecast.js";
+import {
   ensureHistorySeries,
   fetchFxRatesToBase,
   fetchMacroRegime,
@@ -41,6 +46,7 @@ import {
   DossierModelSchema,
   DossierTierSchema,
   DossierUpsertSchema,
+  ForecastRequestSchema,
   HypothesisSchema,
   IntelHistoryEntrySchema,
   IntelIngestSchema,
@@ -61,6 +67,7 @@ import {
   type DossierModel,
   type DossierTier,
   type EtfWeightsConfig,
+  type ForecastRequest,
   type FundamentalsRatios,
   type HistoryCacheState,
   type HistoryPoint,
@@ -1384,6 +1391,17 @@ function buildDemoState(): DemoStateBundle {
         iv_skew_pct: 1.7,
         note: "Sample post-earnings ATM straddle pricing ±6.0% implied move.",
       },
+      consensus: {
+        as_of: "2026-11-23",
+        ntm_rev_b: 304.5,
+        ntm_rev_growth_pct: 13.5,
+        ntm_eps: 14.1,
+        fy1_eps_est: 13.8,
+        fy2_eps_est: 15.9,
+        eps_revision_90d_pct: 2.8,
+        target_price_mean: 545.0,
+        analyst_count: 54,
+      },
       themes: ["Enterprise Cloud Infrastructure", "AI Productivity Software", "Hyperscale Data Centers"],
       connections: [
         { ticker: "AMZN", name: "Amazon Web Services", relation: "competitor" },
@@ -1452,11 +1470,18 @@ function buildDemoState(): DemoStateBundle {
         dio_days: null,
         ocf_to_ni_pct: 131.54,
         fcf_margin_pct: 24.45,
+        owner_earnings_margin_pct: 20.51,
         sbc_pct_rev: 3.94,
+        roic_pct: 28.4,
+        incremental_roic_pct: 24.1,
+        accruals_ratio_pct: -5.4,
+        quality_grade: "A",
+        quality_flags: [],
         net_cash_b: 32.0,
         diluted_shares_yoy_pct: -0.53,
         ttm_eps: 13.2,
         ttm_fcf_per_share: 9.5,
+        ttm_owner_earnings_per_share: 8.02,
         ttm_rev_per_share: 37.11,
       },
     },
@@ -1481,11 +1506,18 @@ function buildDemoState(): DemoStateBundle {
         dio_days: 10.2,
         ocf_to_ni_pct: 112.41,
         fcf_margin_pct: 27.35,
+        owner_earnings_margin_pct: 24.41,
         sbc_pct_rev: 2.94,
+        roic_pct: 49.2,
+        incremental_roic_pct: 42.5,
+        accruals_ratio_pct: -3.1,
+        quality_grade: "A",
+        quality_flags: [],
         net_cash_b: 48.0,
         diluted_shares_yoy_pct: -1.95,
         ttm_eps: 7.4,
         ttm_fcf_per_share: 7.35,
+        ttm_owner_earnings_per_share: 6.57,
         ttm_rev_per_share: 27.15,
       },
     },
@@ -2081,6 +2113,7 @@ export interface DashboardPayload {
   theses: DashboardThesisRow[];
   catalysts: CatalystRecord[];
   edgar: EdgarCacheState;
+  forecast: PortfolioForecastResult | null;
   lab: DashboardLabSection;
 }
 
@@ -2199,6 +2232,7 @@ export async function buildDashboardPayload(opts: {
       theses: [],
       catalysts,
       edgar: edgarRaw,
+      forecast: null,
       lab: {
         benchmark_summary: benchHurdle,
         active_count: 0,
@@ -2897,7 +2931,9 @@ export async function buildDashboardPayload(opts: {
       },
     );
     const scenarioSummary = computeScenarioSummary(price, model, taxInfo, { isEtf, fundamentals });
-    const reverseDcf = computeReverseDcf(price, model, taxInfo);
+    const reverseDcf = computeReverseDcf(price, model, taxInfo, {
+      consensusRevGrowthPct: intel?.consensus?.ntm_rev_growth_pct ?? null,
+    });
     const tickerSeries = lookupHistorySeries(historyCache, yfSym, sym);
     const valuationBands = computeValuationBands(tickerSeries, fundamentals, price);
 
@@ -3162,6 +3198,55 @@ export async function buildDashboardPayload(opts: {
   const totalPnlUsd = totPosUsd - totCostUsd;
   const totalPnlPct = totCostUsd > 0 ? (totalPnlUsd / totCostUsd) * 100 : 0;
 
+  let defaultForecast: PortfolioForecastResult | null = null;
+  try {
+    const forecastThesisRefs: ForecastThesisRef[] = thesesOut.map((t) => {
+      const m = isDemo ? (demoState?.dossierModels[t.ticker] ?? null) : loadDossierModel(opts.dataDir, t.ticker);
+      return {
+        ticker: t.ticker,
+        yf_symbol: t.yf_symbol,
+        currency: t.currency,
+        us_situs: t.us_situs,
+        price: t.price,
+        max_weight_pct: t.max_weight_pct,
+        is_etf:
+          etfTickersSet.has(t.ticker) ||
+          (positionAssetTypeMap.get(t.ticker) ?? "").toUpperCase().includes("ETF") ||
+          t.ticker === profile.benchmark.ticker.toUpperCase(),
+        accumulating: m?.accumulating ?? ((positionAssetTypeMap.get(t.ticker) ?? "").toUpperCase().includes("UCITS") || t.ticker === "VWRA"),
+        scenario_summary: t.scenario_summary,
+        model: m,
+        quality_grade: t.fundamentals_summary?.latest_ratios.quality_grade ?? null,
+      };
+    });
+    const defaultForecastReq = ForecastRequestSchema.parse({
+      horizon_years: 5,
+      include_external_wealth: profile.external_exposure.enabled,
+      apply_recommended_rotations: true,
+      actions: [],
+      regime_vol_multiplier: 1.0,
+      simulations: 800,
+    });
+    defaultForecast = runPortfolioForecast(
+      defaultForecastReq,
+      portfolio,
+      effectiveProfileForRotation,
+      forecastThesisRefs,
+      rotationQueue,
+      etfCfg,
+      historyCache,
+      fxRates,
+      {
+        defaultRfPct: macroRegime?.us3m_pct ?? 3.8,
+        vix: vixVal,
+        liveExternalBase: extLiveMarked ? extTotalBase - extPortfolioBase : null,
+        livePricesMap: currentPricesMap,
+      },
+    );
+  } catch {
+    defaultForecast = null;
+  }
+
   return {
     initialized: true,
     is_demo: isDemo,
@@ -3231,6 +3316,7 @@ export async function buildDashboardPayload(opts: {
     theses: thesesOut,
     catalysts,
     edgar: edgarState,
+    forecast: defaultForecast,
     lab,
   };
 }
@@ -3434,6 +3520,131 @@ export async function executePortfolioBacktest(opts: {
   return { backtest, payload };
 }
 
+export async function executePortfolioForecast(opts: {
+  dataDir: string;
+  pluginRoot: string;
+  rawRequest: unknown;
+}): Promise<{ forecast: PortfolioForecastResult; payload: DashboardPayload }> {
+  const req: ForecastRequest = ForecastRequestSchema.parse(opts.rawRequest);
+  const isDemo = Boolean(req.demo);
+  const payload = await buildDashboardPayload({
+    dataDir: opts.dataDir,
+    pluginRoot: opts.pluginRoot,
+    live: false,
+    useCache: !isDemo,
+    activeTab: "forecast",
+    demo: isDemo,
+  });
+
+  if (!payload.initialized) {
+    throw new Error("Portfolio is not initialized yet. Save positions via update_portfolio_positions or use Demo Mode.");
+  }
+
+  const demoState = isDemo ? buildDemoState() : null;
+  const portfolio = demoState ? demoState.portfolio : loadPortfolio(opts.dataDir);
+  if (!portfolio) {
+    throw new Error("Portfolio file not found.");
+  }
+
+  const etfCfg: EtfWeightsConfig = loadEtfWeights(opts.dataDir, opts.pluginRoot);
+  const etfSet = new Set(Object.keys(etfCfg.etf_weights ?? {}).map((k) => k.toUpperCase()));
+  const posAssetMap = new Map(portfolio.positions.map((p) => [p.ticker.toUpperCase(), p.asset_type]));
+
+  let historyCache: HistoryCacheState;
+  if (isDemo) {
+    historyCache = demoState!.historyCache;
+  } else {
+    const benchSym = payload.profile.benchmark.yf_symbol || payload.profile.benchmark.ticker;
+    const symbolsToEnsure: string[] = [benchSym];
+    const fxCurrencies = new Set<string>();
+    for (const p of portfolio.positions) {
+      symbolsToEnsure.push(p.yf_symbol || p.ticker);
+      if (p.currency && p.currency !== "USD") fxCurrencies.add(p.currency);
+    }
+    for (const act of req.actions) {
+      if (act.type === "buy") {
+        const th = payload.theses.find((t) => t.ticker === act.ticker);
+        symbolsToEnsure.push(act.yf_symbol || th?.yf_symbol || act.ticker);
+        if (act.currency && act.currency !== "USD") fxCurrencies.add(act.currency);
+      } else if (act.type === "tax_swap" && act.target_ticker) {
+        const th = payload.theses.find((t) => t.ticker === act.target_ticker);
+        symbolsToEnsure.push(th?.yf_symbol || act.target_ticker);
+      }
+    }
+    if (req.include_external_wealth && payload.profile.external_exposure.enabled && payload.profile.external_exposure.ticker) {
+      symbolsToEnsure.push(payload.profile.external_exposure.ticker);
+    }
+    historyCache = await ensureHistorySeries(opts.dataDir, symbolsToEnsure, {
+      fxCurrencies: Array.from(fxCurrencies),
+      dailyBenchmarkSymbol: benchSym,
+    });
+  }
+
+  const effectiveProfile: UserProfile = payload.summary.ext_live_marked
+    ? {
+        ...payload.profile,
+        external_exposure: {
+          ...payload.profile.external_exposure,
+          amount_base: payload.summary.ext_total_base - payload.summary.ext_portfolio_base,
+        },
+      }
+    : payload.profile;
+
+  const livePricesMap = new Map<string, number>();
+  for (const pos of payload.portfolio.positions) {
+    livePricesMap.set(pos.ticker, pos.price);
+    if (pos.yf_symbol) livePricesMap.set(pos.yf_symbol, pos.price);
+  }
+  for (const t of payload.theses) {
+    if (t.price !== null) {
+      livePricesMap.set(t.ticker, t.price);
+      if (t.yf_symbol) livePricesMap.set(t.yf_symbol, t.price);
+    }
+  }
+
+  const thesisRefs: ForecastThesisRef[] = payload.theses.map((t) => {
+    const model = isDemo ? (demoState?.dossierModels[t.ticker] ?? null) : loadDossierModel(opts.dataDir, t.ticker);
+    return {
+      ticker: t.ticker,
+      yf_symbol: t.yf_symbol,
+      currency: t.currency,
+      us_situs: t.us_situs,
+      price: t.price,
+      max_weight_pct: t.max_weight_pct,
+      is_etf:
+        etfSet.has(t.ticker) ||
+        (posAssetMap.get(t.ticker) ?? "").toUpperCase().includes("ETF") ||
+        t.ticker === payload.profile.benchmark.ticker.toUpperCase(),
+      accumulating:
+        model?.accumulating ?? ((posAssetMap.get(t.ticker) ?? "").toUpperCase().includes("UCITS") || t.ticker === "VWRA"),
+      scenario_summary: t.scenario_summary,
+      model,
+      quality_grade: t.fundamentals_summary?.latest_ratios.quality_grade ?? null,
+    };
+  });
+
+  const forecast = runPortfolioForecast(
+    req,
+    portfolio,
+    effectiveProfile,
+    thesisRefs,
+    payload.rotation_queue,
+    etfCfg,
+    historyCache,
+    payload.fx_rates,
+    {
+      defaultRfPct: payload.macro_regime?.us3m_pct ?? 3.8,
+      vix: payload.vix,
+      liveExternalBase: payload.summary.ext_live_marked
+        ? payload.summary.ext_total_base - payload.summary.ext_portfolio_base
+        : null,
+      livePricesMap,
+    },
+  );
+  payload.forecast = forecast;
+  return { forecast, payload };
+}
+
 export function buildSummaryText(payload: DashboardPayload): string {
   if (!payload.initialized) {
     return `Investment OS (${payload.generated_at}, Base: ${payload.base_currency}): No portfolio saved yet. Prompt the user to onboard via update_profile and update_portfolio_positions, or let them click Preview Sample Portfolio in the sidecar.`;
@@ -3472,6 +3683,12 @@ export function buildSummaryText(payload: DashboardPayload): string {
   lines.push(
     `- Research Graph: Active ${payload.lab.active_count}/${payload.lab.active_cap} · Bench ${payload.lab.bench_count} · Passed ${payload.lab.passed_count} · Themes ${payload.themes.length} · Unack Alerts ${unackAlerts} · Needs Re-Test ${payload.lab.needs_retest_count}`,
   );
+  if (payload.forecast) {
+    const fc = payload.forecast;
+    lines.push(
+      `- ${fc.horizon_years}Y Forward Forecast (Base P50): ${fc.baseline.ending_p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} -> ${fc.simulated.ending_p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy} (${fc.deltas.p50_base >= 0 ? "+" : ""}${fc.deltas.p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy} with recommended rotations; P10 downside ${fc.deltas.p10_base >= 0 ? "+" : ""}${fc.deltas.p10_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy})`,
+    );
+  }
   lines.push(`- Risk Cap Breaches (${breaches.length}): ${breaches.length > 0 ? breaches.join(", ") : "None"}`);
   if (payload.stale_tickers.length > 0) {
     lines.push(`- Stale / Fallback Quotes: ${payload.stale_tickers.join(", ")}`);

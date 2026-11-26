@@ -10,7 +10,7 @@ import {
 } from "./storage.js";
 import { normalizeTicker, type CatalystRecord, type UserProfile } from "./schema.js";
 
-export const DEFAULT_SEC_USER_AGENT = "InvestmentOS-Plugin/0.5.0 (contact@investment-os.local)";
+export const DEFAULT_SEC_USER_AGENT = "InvestmentOS-Plugin/0.6.0 (contact@investment-os.local)";
 export const SEC_PACING_MS = 150;
 
 export const PERIODIC_FORMS = new Set(["10-K", "10-Q", "20-F", "10-K/A", "10-Q/A", "20-F/A"]);
@@ -64,18 +64,21 @@ export interface SecRedFlag {
   filingDate: string;
   accession: string;
   code: string;
-  severity: "high" | "medium";
+  severity: "high" | "medium" | "info";
   label: string;
   items?: string;
   url: string;
 }
 
-const EIGHT_K_RED_FLAG_ITEMS: Record<string, { severity: "high" | "medium"; label: string }> = {
+const EIGHT_K_RED_FLAG_ITEMS: Record<string, { severity: "high" | "medium" | "info"; label: string }> = {
+  "1.03": { severity: "high", label: "Bankruptcy or Receivership Filing (Item 1.03)" },
+  "2.06": { severity: "high", label: "Material Impairment Charges (Item 2.06)" },
+  "3.01": { severity: "high", label: "Notice of Delisting or Listing Non-Compliance (Item 3.01)" },
   "4.01": { severity: "high", label: "Change in Registrant's Certifying Accountant (Item 4.01)" },
   "4.02": { severity: "high", label: "Non-Reliance on Prior Financial Statements / Restatement (Item 4.02)" },
   "1.02": { severity: "medium", label: "Termination of a Material Definitive Agreement (Item 1.02)" },
   "3.02": { severity: "medium", label: "Unregistered Sales of Equity Securities / Dilution (Item 3.02)" },
-  "5.02": { severity: "medium", label: "Departure or Appointment of Directors / Principal Officers (Item 5.02)" },
+  "5.02": { severity: "info", label: "Director / Officer Appointment, Departure, or Comp Update (Item 5.02)" },
 };
 
 export function resolveSecUserAgent(profile: UserProfile, env: NodeJS.ProcessEnv = process.env): string {
@@ -313,10 +316,11 @@ export function extractSecRedFlags(filingsByTicker: Record<string, EdgarFilingRo
     }
   }
 
+  const sevRank = (s: SecRedFlag["severity"]): number => (s === "high" ? 0 : s === "medium" ? 1 : 2);
   return flags.sort((a, b) => {
     const dateCmp = b.filingDate.localeCompare(a.filingDate);
     if (dateCmp !== 0) return dateCmp;
-    if (a.severity !== b.severity) return a.severity === "high" ? -1 : 1;
+    if (a.severity !== b.severity) return sevRank(a.severity) - sevRank(b.severity);
     return a.ticker.localeCompare(b.ticker);
   });
 }

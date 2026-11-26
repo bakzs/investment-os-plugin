@@ -179,12 +179,19 @@ test("computeScenarioSummary adds dividend yield to gross CAGR, separates expect
       bull: { probability: 0.3, target_price_5y: 1800, summary: "Huge bull" },
     },
   });
-  const gigoScen = computeScenarioSummary(100, gigoModel, taxInfo);
+  const gigoScen = computeScenarioSummary(100, gigoModel, taxInfo, {
+    fundamentals: FundamentalsSchema.parse({
+      ticker: "GIGO",
+      updated_at: "2026-11-26T00:00:00Z",
+      latest_ratios: { fcf_margin_pct: 32.0, owner_earnings_margin_pct: 21.0 },
+    }),
+  });
   assert.ok(gigoScen);
   assert.ok(gigoScen.valuation_warnings.some((w) => w.includes("Bear case")));
   assert.ok(gigoScen.valuation_warnings.some((w) => w.includes(">65%")));
   assert.ok(gigoScen.valuation_warnings.some((w) => w.includes("15%")));
   assert.ok(gigoScen.valuation_warnings.some((w) => w.includes("$5T")));
+  assert.ok(gigoScen.valuation_warnings.some((w) => w.includes("Owner Earnings")));
 });
 
 test("computeReverseDcf computes EV/dilution 3-part attribution bridge and computeValuationBands outputs 5Y P/E, P/FCF, P/S", () => {
@@ -211,12 +218,14 @@ test("computeReverseDcf computes EV/dilution 3-part attribution bridge and compu
     },
   });
 
-  const rdcf = computeReverseDcf(100, model, taxInfo);
+  const rdcf = computeReverseDcf(100, model, taxInfo, { consensusRevGrowthPct: 9.0 });
   assert.ok(rdcf);
   assert.equal(rdcf.current_multiple, 22.5);
   assert.equal(rdcf.net_cash_b, 10);
   assert.equal(rdcf.annual_dilution_pct, 2);
   assert.equal(rdcf.implied_current_margin_pct, 20);
+  assert.equal(rdcf.consensus_rev_growth_pct, 9.0);
+  assert.ok(typeof rdcf.expectations_gap_vs_consensus_pct === "number");
   assert.ok(rdcf.multiple_expansion_cagr_pct > 2.0); // 22.5x -> 25x
   assert.ok(rdcf.margin_expansion_cagr_pct !== null && rdcf.margin_expansion_cagr_pct > 4.0); // 20% -> 25%
   assert.ok(rdcf.constant_mult_margin_rev_cagr_pct > 12.0); // includes dilution + EV leverage
@@ -591,9 +600,9 @@ test("evaluateHypothesisRule evaluates XBRL, EDGAR, and Form 4 insider rules det
     ticker: "ACME",
     updated_at: "2026-11-25T00:00:00Z",
     quarterly: [
-      { period_end: "2026-09-30", fiscal_period: "Q3", gross_margin_pct: 64.5, dso_days: 72.0, ocf_to_ni_pct: 66.9 },
+      { period_end: "2026-09-30", fiscal_period: "Q3", gross_margin_pct: 64.5, dso_days: 72.0, ocf_to_ni_pct: 66.9, owner_earnings_margin_pct: 19.5 },
     ],
-    latest_ratios: { gross_margin_pct: 64.5, dso_days: 72.0, ocf_to_ni_pct: 66.9 },
+    latest_ratios: { gross_margin_pct: 64.5, dso_days: 72.0, ocf_to_ni_pct: 66.9, owner_earnings_margin_pct: 19.5 },
   });
   const xbrlBreach = evaluateHypothesisRule(
     { source: "xbrl", metric: "dso_days", op: "<=", threshold: 65, period: "latest_q" },
@@ -601,6 +610,13 @@ test("evaluateHypothesisRule evaluates XBRL, EDGAR, and Form 4 insider rules det
   );
   assert.equal(xbrlBreach.observed, 72);
   assert.equal(xbrlBreach.passed, false);
+
+  const oePass = evaluateHypothesisRule(
+    { source: "xbrl", metric: "owner_earnings_margin_pct", op: ">=", threshold: 18, period: "latest_q" },
+    fund,
+  );
+  assert.equal(oePass.observed, 19.5);
+  assert.equal(oePass.passed, true);
 
   const edgarPass = evaluateHypothesisRule(
     { source: "edgar", metric: "filing_10q_on_time", op: "==", threshold: 1, period: "latest_q" },

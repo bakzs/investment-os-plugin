@@ -33777,12 +33777,24 @@ var CompanyConnectionSchema = external_exports.object({
   name: external_exports.string().trim().min(1).max(120),
   relation: external_exports.string().trim().min(1).max(64).default("peer")
 });
+var ConsensusEstimateSchema = external_exports.object({
+  as_of: external_exports.string().trim().max(64).optional(),
+  ntm_rev_b: external_exports.number().finite().positive().nullable().optional(),
+  ntm_rev_growth_pct: external_exports.number().finite().min(-100).max(500).nullable().optional(),
+  ntm_eps: external_exports.number().finite().nullable().optional(),
+  fy1_eps_est: external_exports.number().finite().nullable().optional(),
+  fy2_eps_est: external_exports.number().finite().nullable().optional(),
+  eps_revision_90d_pct: external_exports.number().finite().min(-200).max(500).nullable().optional(),
+  target_price_mean: NonNegativeNumber.nullable().optional(),
+  analyst_count: external_exports.number().int().min(0).max(200).nullable().optional()
+});
 var DossierIntelSchema = external_exports.object({
   updated_at: external_exports.string().trim().min(1).max(64),
   provider: external_exports.string().trim().min(1).max(64).default("ibkr"),
   contract_id: external_exports.union([external_exports.number().int(), external_exports.string().trim().min(1).max(40)]).nullable().optional(),
   earnings_insight: EarningsInsightSchema.nullable().optional(),
   options_intel: OptionsIntelSchema.nullable().optional(),
+  consensus: ConsensusEstimateSchema.nullable().optional(),
   themes: external_exports.array(external_exports.string().trim().min(1).max(120)).max(20).default([]),
   connections: external_exports.array(CompanyConnectionSchema).max(20).default([])
 });
@@ -33870,7 +33882,14 @@ var FundamentalsPeriodSchema = external_exports.object({
   cogs_m: external_exports.number().finite().nullable().optional(),
   cash_and_st_inv_m: external_exports.number().finite().nullable().optional(),
   total_debt_m: external_exports.number().finite().nullable().optional(),
+  total_assets_m: external_exports.number().finite().nullable().optional(),
+  stockholders_equity_m: external_exports.number().finite().nullable().optional(),
   net_cash_b: external_exports.number().finite().nullable().optional(),
+  owner_earnings_m: external_exports.number().finite().nullable().optional(),
+  owner_earnings_margin_pct: external_exports.number().finite().nullable().optional(),
+  invested_capital_m: external_exports.number().finite().nullable().optional(),
+  roic_pct: external_exports.number().finite().nullable().optional(),
+  accruals_ratio_pct: external_exports.number().finite().nullable().optional(),
   gross_margin_pct: external_exports.number().finite().nullable().optional(),
   operating_margin_pct: external_exports.number().finite().nullable().optional(),
   fcf_margin_pct: external_exports.number().finite().nullable().optional(),
@@ -33886,11 +33905,18 @@ var FundamentalsRatiosSchema = external_exports.object({
   dio_days: external_exports.number().finite().nullable().optional(),
   ocf_to_ni_pct: external_exports.number().finite().nullable().optional(),
   fcf_margin_pct: external_exports.number().finite().nullable().optional(),
+  owner_earnings_margin_pct: external_exports.number().finite().nullable().optional(),
   sbc_pct_rev: external_exports.number().finite().nullable().optional(),
+  roic_pct: external_exports.number().finite().nullable().optional(),
+  incremental_roic_pct: external_exports.number().finite().nullable().optional(),
+  accruals_ratio_pct: external_exports.number().finite().nullable().optional(),
+  quality_grade: external_exports.enum(["A", "B", "C", "D"]).nullable().optional(),
+  quality_flags: external_exports.array(external_exports.string().trim().max(160)).max(12).optional(),
   net_cash_b: external_exports.number().finite().nullable().optional(),
   diluted_shares_yoy_pct: external_exports.number().finite().nullable().optional(),
   ttm_eps: external_exports.number().finite().nullable().optional(),
   ttm_fcf_per_share: external_exports.number().finite().nullable().optional(),
+  ttm_owner_earnings_per_share: external_exports.number().finite().nullable().optional(),
   ttm_rev_per_share: external_exports.number().finite().nullable().optional()
 });
 var FundamentalsSchema = external_exports.object({
@@ -34032,6 +34058,43 @@ var BacktestRequestSchema = external_exports.object({
   ),
   rebalance_band_pct: external_exports.number().finite().min(5).max(100).default(25),
   include_external_wealth: external_exports.boolean().default(true),
+  rf_pct: external_exports.number().finite().min(0).max(20).optional(),
+  demo: external_exports.boolean().optional()
+});
+var ForecastActionSchema = external_exports.discriminatedUnion("type", [
+  external_exports.object({
+    type: external_exports.literal("tax_swap"),
+    ticker: TickerSchema,
+    target_ticker: TickerSchema.optional(),
+    pct: external_exports.number().finite().min(1).max(100).default(100)
+  }),
+  external_exports.object({
+    type: external_exports.literal("sell"),
+    ticker: TickerSchema,
+    pct: external_exports.number().finite().min(1).max(100).optional(),
+    amount_base: NonNegativeNumber.optional()
+  }),
+  external_exports.object({
+    type: external_exports.literal("buy"),
+    ticker: TickerSchema,
+    amount_base: external_exports.number().finite().positive(),
+    yf_symbol: external_exports.string().trim().min(1).max(24).optional(),
+    currency: CurrencySchema.optional(),
+    us_situs: external_exports.boolean().optional()
+  }),
+  external_exports.object({
+    type: external_exports.literal("park_cash_in_benchmark"),
+    pct: external_exports.number().finite().min(1).max(100).default(100),
+    keep_reserve: external_exports.boolean().default(true)
+  })
+]);
+var ForecastRequestSchema = external_exports.object({
+  horizon_years: external_exports.number().int().min(1).max(10).default(5),
+  include_external_wealth: external_exports.boolean().default(true),
+  apply_recommended_rotations: external_exports.boolean().default(false),
+  actions: external_exports.array(ForecastActionSchema).max(40).default([]),
+  regime_vol_multiplier: external_exports.number().finite().min(0.5).max(2.5).default(1),
+  simulations: external_exports.number().int().min(200).max(5e3).default(1500),
   rf_pct: external_exports.number().finite().min(0).max(20).optional(),
   demo: external_exports.boolean().optional()
 });
@@ -34594,7 +34657,7 @@ function loadThesisTestLog(dataDir, ticker, limit = 25) {
 }
 
 // src/server/edgar.ts
-var DEFAULT_SEC_USER_AGENT = "InvestmentOS-Plugin/0.5.0 (contact@investment-os.local)";
+var DEFAULT_SEC_USER_AGENT = "InvestmentOS-Plugin/0.6.0 (contact@investment-os.local)";
 var SEC_PACING_MS = 150;
 var PERIODIC_FORMS = /* @__PURE__ */ new Set(["10-K", "10-Q", "20-F", "10-K/A", "10-Q/A", "20-F/A"]);
 var EVENT_FORMS = /* @__PURE__ */ new Set([
@@ -34616,11 +34679,14 @@ var EVENT_FORMS = /* @__PURE__ */ new Set([
 var IMPORTANT_FORMS = /* @__PURE__ */ new Set([...PERIODIC_FORMS, ...EVENT_FORMS]);
 var TICKERS_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1e3;
 var EIGHT_K_RED_FLAG_ITEMS = {
+  "1.03": { severity: "high", label: "Bankruptcy or Receivership Filing (Item 1.03)" },
+  "2.06": { severity: "high", label: "Material Impairment Charges (Item 2.06)" },
+  "3.01": { severity: "high", label: "Notice of Delisting or Listing Non-Compliance (Item 3.01)" },
   "4.01": { severity: "high", label: "Change in Registrant's Certifying Accountant (Item 4.01)" },
   "4.02": { severity: "high", label: "Non-Reliance on Prior Financial Statements / Restatement (Item 4.02)" },
   "1.02": { severity: "medium", label: "Termination of a Material Definitive Agreement (Item 1.02)" },
   "3.02": { severity: "medium", label: "Unregistered Sales of Equity Securities / Dilution (Item 3.02)" },
-  "5.02": { severity: "medium", label: "Departure or Appointment of Directors / Principal Officers (Item 5.02)" }
+  "5.02": { severity: "info", label: "Director / Officer Appointment, Departure, or Comp Update (Item 5.02)" }
 };
 function resolveSecUserAgent(profile, env = process.env) {
   const fromEnv = env.SEC_USER_AGENT?.trim();
@@ -34806,10 +34872,11 @@ function extractSecRedFlags(filingsByTicker) {
       }
     }
   }
+  const sevRank = (s) => s === "high" ? 0 : s === "medium" ? 1 : 2;
   return flags.sort((a, b) => {
     const dateCmp = b.filingDate.localeCompare(a.filingDate);
     if (dateCmp !== 0) return dateCmp;
-    if (a.severity !== b.severity) return a.severity === "high" ? -1 : 1;
+    if (a.severity !== b.severity) return sevRank(a.severity) - sevRank(b.severity);
     return a.ticker.localeCompare(b.ticker);
   });
 }
@@ -34840,384 +34907,6 @@ async function pollEdgarFilings(dataDir, profile, tickers, catalysts, nowIso, fe
   };
   saveEdgarCache(dataDir, cache);
   return { cache, skippedTickers, redFlags: extractSecRedFlags(filingsByTicker) };
-}
-
-// src/server/market.ts
-var YF_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (compatible; InvestmentOS-Plugin/0.5.0)",
-  Accept: "application/json"
-};
-var YAHOO_HISTORY_TTL_MS = 24 * 60 * 60 * 1e3;
-var IBKR_HISTORY_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
-function round4(n) {
-  return Math.round((n + Number.EPSILON) * 1e4) / 1e4;
-}
-function round2(n) {
-  return Math.round((n + Number.EPSILON) * 100) / 100;
-}
-function inferMarketState(meta3, nowSec) {
-  const explicit = meta3.marketState?.trim().toUpperCase();
-  if (explicit) return explicit;
-  const tp = meta3.currentTradingPeriod;
-  if (tp?.regular?.start && tp?.regular?.end && nowSec >= tp.regular.start && nowSec <= tp.regular.end) {
-    return "REGULAR";
-  }
-  if (tp?.pre?.start && tp?.pre?.end && nowSec >= tp.pre.start && nowSec <= tp.pre.end) {
-    return "PRE";
-  }
-  if (tp?.post?.start && tp?.post?.end && nowSec >= tp.post.start && nowSec <= tp.post.end) {
-    return "POST";
-  }
-  return "CLOSED";
-}
-async function fetchIntradayExtendedQuote(symbol2, scale, timeoutMs, fetchImpl) {
-  const url2 = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol2)}?interval=1m&range=1d&includePrePost=true`;
-  try {
-    const resp = await fetchImpl(url2, {
-      headers: YF_HEADERS,
-      signal: AbortSignal.timeout(Math.min(timeoutMs, 3500))
-    });
-    if (!resp.ok) return { extendedPrice: null, quoteTime: null };
-    const data = await resp.json();
-    const result = data?.chart?.result?.[0];
-    const meta3 = result?.meta;
-    if (!meta3) return { extendedPrice: null, quoteTime: null };
-    if (typeof meta3.postMarketPrice === "number" && Number.isFinite(meta3.postMarketPrice) && meta3.postMarketPrice > 0) {
-      return {
-        extendedPrice: round4(meta3.postMarketPrice * scale),
-        quoteTime: typeof meta3.postMarketTime === "number" && Number.isFinite(meta3.postMarketTime) ? new Date(meta3.postMarketTime * 1e3).toISOString() : null
-      };
-    }
-    if (typeof meta3.preMarketPrice === "number" && Number.isFinite(meta3.preMarketPrice) && meta3.preMarketPrice > 0) {
-      return {
-        extendedPrice: round4(meta3.preMarketPrice * scale),
-        quoteTime: typeof meta3.preMarketTime === "number" && Number.isFinite(meta3.preMarketTime) ? new Date(meta3.preMarketTime * 1e3).toISOString() : null
-      };
-    }
-    const timestamps = result?.timestamp ?? [];
-    const closes = result?.indicators?.quote?.[0]?.close ?? [];
-    const regStart = meta3.currentTradingPeriod?.regular?.start;
-    const regEnd = meta3.currentTradingPeriod?.regular?.end;
-    for (let i = timestamps.length - 1; i >= 0; i -= 1) {
-      const ts = timestamps[i];
-      const px = closes[i];
-      if (typeof ts !== "number" || typeof px !== "number" || !Number.isFinite(px) || px <= 0) continue;
-      const isExtended = typeof regEnd === "number" && ts > regEnd || typeof regStart === "number" && ts < regStart;
-      if (isExtended) {
-        return {
-          extendedPrice: round4(px * scale),
-          quoteTime: new Date(ts * 1e3).toISOString()
-        };
-      }
-      break;
-    }
-    return { extendedPrice: null, quoteTime: null };
-  } catch {
-    return { extendedPrice: null, quoteTime: null };
-  }
-}
-async function fetchYahooChartQuote(symbol2, timeoutMs = 7e3, fetchImpl = fetch) {
-  const url2 = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol2)}?interval=1d&range=1mo&includePrePost=true`;
-  try {
-    const resp = await fetchImpl(url2, {
-      headers: YF_HEADERS,
-      signal: AbortSignal.timeout(timeoutMs)
-    });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    const result = data?.chart?.result?.[0];
-    const meta3 = result?.meta;
-    if (!meta3) return null;
-    let price = meta3.regularMarketPrice ?? meta3.previousClose ?? meta3.chartPreviousClose;
-    if (typeof price !== "number" || !Number.isFinite(price) || price <= 0) {
-      return null;
-    }
-    let scale = 1;
-    let currency = (meta3.currency ?? "USD").trim();
-    if (currency === "GBp" || currency === "GBX") {
-      scale = 0.01;
-      price = round4(price * scale);
-      currency = "GBP";
-    } else {
-      currency = currency.toUpperCase();
-    }
-    if (!/^[A-Z]{3}$/.test(currency)) {
-      currency = "USD";
-    }
-    const nowSec = Math.floor(Date.now() / 1e3);
-    const marketState = inferMarketState(meta3, nowSec);
-    let extendedPrice = null;
-    let quoteTimeSec = meta3.regularMarketTime;
-    if ((marketState === "POST" || marketState === "POSTPOST" || marketState === "CLOSED") && typeof meta3.postMarketPrice === "number" && Number.isFinite(meta3.postMarketPrice) && meta3.postMarketPrice > 0) {
-      extendedPrice = round4(meta3.postMarketPrice * scale);
-      quoteTimeSec = meta3.postMarketTime ?? quoteTimeSec;
-    } else if ((marketState === "PRE" || marketState === "PREPRE") && typeof meta3.preMarketPrice === "number" && Number.isFinite(meta3.preMarketPrice) && meta3.preMarketPrice > 0) {
-      extendedPrice = round4(meta3.preMarketPrice * scale);
-      quoteTimeSec = meta3.preMarketTime ?? quoteTimeSec;
-    } else if (typeof meta3.postMarketPrice === "number" && Number.isFinite(meta3.postMarketPrice) && meta3.postMarketPrice > 0) {
-      extendedPrice = round4(meta3.postMarketPrice * scale);
-      quoteTimeSec = meta3.postMarketTime ?? quoteTimeSec;
-    } else if (typeof meta3.preMarketPrice === "number" && Number.isFinite(meta3.preMarketPrice) && meta3.preMarketPrice > 0) {
-      extendedPrice = round4(meta3.preMarketPrice * scale);
-      quoteTimeSec = meta3.preMarketTime ?? quoteTimeSec;
-    }
-    let quoteTime = typeof quoteTimeSec === "number" && Number.isFinite(quoteTimeSec) && quoteTimeSec > 0 ? new Date(quoteTimeSec * 1e3).toISOString() : null;
-    const isEquityLike = !symbol2.startsWith("^") && !symbol2.endsWith("=X");
-    if (extendedPrice === null && isEquityLike && (marketState === "PRE" || marketState === "POST")) {
-      const intraday = await fetchIntradayExtendedQuote(symbol2, scale, timeoutMs, fetchImpl);
-      if (intraday.extendedPrice !== null) {
-        extendedPrice = intraday.extendedPrice;
-        if (intraday.quoteTime) quoteTime = intraday.quoteTime;
-      }
-    }
-    const rawCloses = result?.indicators?.quote?.[0]?.close ?? [];
-    const sparkline = rawCloses.filter((v) => typeof v === "number" && Number.isFinite(v) && v > 0).map((v) => round4(v * scale)).slice(-22);
-    let prevClose = null;
-    if (sparkline.length >= 2) {
-      const lastPt = sparkline[sparkline.length - 1];
-      const sameAsLast = Math.abs(price - lastPt) / price < 5e-4;
-      prevClose = sameAsLast ? sparkline[sparkline.length - 2] : lastPt;
-    } else if (typeof meta3.previousClose === "number" && meta3.previousClose > 0) {
-      prevClose = meta3.previousClose * scale;
-    }
-    const anchor1mRaw = typeof meta3.chartPreviousClose === "number" && meta3.chartPreviousClose > 0 ? meta3.chartPreviousClose * scale : sparkline[0];
-    const change1d = prevClose && prevClose > 0 ? round2((price - prevClose) / prevClose * 100) : null;
-    const change1m = anchor1mRaw && anchor1mRaw > 0 ? round2((price - anchor1mRaw) / anchor1mRaw * 100) : null;
-    const high52w = typeof meta3.fiftyTwoWeekHigh === "number" && Number.isFinite(meta3.fiftyTwoWeekHigh) && meta3.fiftyTwoWeekHigh > 0 ? round4(meta3.fiftyTwoWeekHigh * scale) : null;
-    const low52w = typeof meta3.fiftyTwoWeekLow === "number" && Number.isFinite(meta3.fiftyTwoWeekLow) && meta3.fiftyTwoWeekLow > 0 ? round4(meta3.fiftyTwoWeekLow * scale) : null;
-    return {
-      symbol: symbol2,
-      price,
-      regular_price: price,
-      extended_price: extendedPrice,
-      market_state: marketState,
-      marketState,
-      quote_time: quoteTime,
-      fifty_two_week_high: high52w,
-      fifty_two_week_low: low52w,
-      currency,
-      sparkline,
-      change_1d_pct: change1d,
-      change_1m_pct: change1m
-    };
-  } catch {
-    return null;
-  }
-}
-async function fetchQuotesBatch(symbols, concurrency = 4, fetchImpl = fetch) {
-  const unique = Array.from(new Set(symbols.map((s) => s.trim()).filter(Boolean)));
-  const out = /* @__PURE__ */ new Map();
-  let idx = 0;
-  async function worker() {
-    while (idx < unique.length) {
-      const current = unique[idx];
-      idx += 1;
-      if (!current) continue;
-      const res = await fetchYahooChartQuote(current, 7e3, fetchImpl);
-      if (res) {
-        out.set(current, res);
-      }
-    }
-  }
-  const workers = Array.from({ length: Math.min(concurrency, Math.max(1, unique.length)) }, () => worker());
-  await Promise.all(workers);
-  return out;
-}
-async function fetchFxRatesToBase(currencies, baseCurrency, fallbackRates, fetchImpl = fetch) {
-  const base = baseCurrency.toUpperCase();
-  const out = { ...fallbackRates, [base]: 1 };
-  const needed = Array.from(new Set(currencies.map((c) => c.toUpperCase()).filter((c) => c !== base)));
-  for (const ccy of needed) {
-    const directSym = ccy === "USD" ? `${base}=X` : `${ccy}${base}=X`;
-    const direct = await fetchYahooChartQuote(directSym, 7e3, fetchImpl);
-    if (direct && direct.price > 0) {
-      out[ccy] = direct.price;
-      continue;
-    }
-    const inverseSym = `${base}${ccy}=X`;
-    const inverse = await fetchYahooChartQuote(inverseSym, 7e3, fetchImpl);
-    if (inverse && inverse.price > 0) {
-      out[ccy] = 1 / inverse.price;
-    }
-  }
-  return out;
-}
-function classifyMacroRegime(vix, hyCreditRatio) {
-  if (vix !== null && (vix >= 35 || vix >= 28 && hyCreditRatio !== null && hyCreditRatio < 0.78)) {
-    return "STRESS";
-  }
-  if (vix !== null && vix >= 28) {
-    return "HIGH_VOL";
-  }
-  if (vix !== null && vix >= 20) {
-    return "ELEVATED";
-  }
-  return "CALM";
-}
-async function fetchMacroRegime(opts) {
-  const fetchImpl = opts?.fetchImpl ?? fetch;
-  const nowIso = opts?.nowIso ?? (/* @__PURE__ */ new Date()).toISOString();
-  const quotes = await fetchQuotesBatch(["^VIX", "^TNX", "^IRX", "HYG", "IEF", "DX-Y.NYB"], 6, fetchImpl);
-  const vixRaw = quotes.get("^VIX")?.price ?? null;
-  const tnxRaw = quotes.get("^TNX")?.price ?? null;
-  const irxRaw = quotes.get("^IRX")?.price ?? null;
-  const hygRaw = quotes.get("HYG")?.price ?? null;
-  const iefRaw = quotes.get("IEF")?.price ?? null;
-  const dxyRaw = quotes.get("DX-Y.NYB")?.price ?? null;
-  const normalizeYield = (val) => {
-    if (val === null || !Number.isFinite(val)) return null;
-    return round2(val > 25 ? val / 10 : val);
-  };
-  const vix = vixRaw !== null ? round2(vixRaw) : null;
-  const us10yPct = normalizeYield(tnxRaw);
-  const us3mPct = normalizeYield(irxRaw);
-  const hyCreditRatio = hygRaw !== null && iefRaw !== null && iefRaw > 0 ? round4(hygRaw / iefRaw) : null;
-  const dxy = dxyRaw !== null ? round2(dxyRaw) : null;
-  const regimeLabel = classifyMacroRegime(vix, hyCreditRatio);
-  const noteParts = [];
-  if (us10yPct !== null && us3mPct !== null) {
-    const slopeBps = Math.round((us10yPct - us3mPct) * 100);
-    noteParts.push(`10Y-3M slope ${slopeBps >= 0 ? "+" : ""}${slopeBps} bps`);
-  }
-  if (vix !== null && vix >= 28) {
-    noteParts.push("High volatility regime \u2014 stage tranches 2-3 weeks apart");
-  }
-  return MacroRegimeSchema.parse({
-    updated_at: nowIso,
-    vix,
-    us10y_pct: us10yPct,
-    us3m_pct: us3mPct,
-    hy_credit_ratio: hyCreditRatio,
-    dxy,
-    regime_label: regimeLabel,
-    notes: noteParts.length > 0 ? noteParts.join("; ") : null
-  });
-}
-async function fetchYahooHistory(symbol2, range = "5y", interval = "1wk", timeoutMs = 9e3, fetchImpl = fetch) {
-  const url2 = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol2)}?interval=${encodeURIComponent(interval)}&range=${encodeURIComponent(range)}`;
-  try {
-    const resp = await fetchImpl(url2, {
-      headers: YF_HEADERS,
-      signal: AbortSignal.timeout(timeoutMs)
-    });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    const result = data?.chart?.result?.[0];
-    if (!result) return null;
-    const timestamps = result.timestamp ?? [];
-    const adjCloses = result.indicators?.adjclose?.[0]?.adjclose ?? [];
-    const rawCloses = result.indicators?.quote?.[0]?.close ?? [];
-    if (timestamps.length === 0) return null;
-    let scale = 1;
-    let currency = (result.meta?.currency ?? "USD").trim();
-    if (currency === "GBp" || currency === "GBX") {
-      scale = 0.01;
-      currency = "GBP";
-    } else {
-      currency = currency.toUpperCase();
-    }
-    if (!/^[A-Z]{3}$/.test(currency)) {
-      currency = "USD";
-    }
-    const byDate = /* @__PURE__ */ new Map();
-    for (let i = 0; i < timestamps.length; i += 1) {
-      const ts = timestamps[i];
-      if (typeof ts !== "number" || !Number.isFinite(ts)) continue;
-      const adj = adjCloses[i];
-      const raw = rawCloses[i];
-      const val = typeof adj === "number" && Number.isFinite(adj) && adj > 0 ? adj : typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : null;
-      if (val === null) continue;
-      const dateStr = new Date(ts * 1e3).toISOString().slice(0, 10);
-      byDate.set(dateStr, round4(val * scale));
-    }
-    const points = Array.from(byDate.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date5, close]) => ({ date: date5, close }));
-    if (points.length < 2) return null;
-    return { symbol: symbol2, currency, points };
-  } catch {
-    return null;
-  }
-}
-async function fetchYahooDailyBenchmark(symbol2, range = "1y", timeoutMs = 9e3, fetchImpl = fetch) {
-  return fetchYahooHistory(symbol2, range, "1d", timeoutMs, fetchImpl);
-}
-function fxHistorySymbolToUsd(currency) {
-  const ccy = currency.trim().toUpperCase();
-  if (!/^[A-Z]{3}$/.test(ccy) || ccy === "USD") return null;
-  return `${ccy}USD=X`;
-}
-async function ensureHistorySeries(dataDir, symbols, opts) {
-  const nowMs = opts?.nowMs ?? Date.now();
-  const concurrency = opts?.concurrency ?? 4;
-  const fetchImpl = opts?.fetchImpl ?? fetch;
-  const cache = loadHistoryCache(dataDir);
-  const fxSymbols = (opts?.fxCurrencies ?? []).map((c) => fxHistorySymbolToUsd(c)).filter((s) => Boolean(s));
-  const unique = Array.from(new Set([...symbols, ...fxSymbols].map((s) => s.trim()).filter(Boolean)));
-  const toFetch = [];
-  for (const sym of unique) {
-    const existing = cache.series[sym];
-    if (existing && existing.points.length >= 10) {
-      const updatedMs = Date.parse(existing.updated_at);
-      const ageMs = Number.isFinite(updatedMs) ? nowMs - updatedMs : Number.POSITIVE_INFINITY;
-      if (existing.source === "manual") continue;
-      if (existing.source === "ibkr" && ageMs < IBKR_HISTORY_TTL_MS) {
-        continue;
-      }
-      if (existing.source === "yahoo" && ageMs < YAHOO_HISTORY_TTL_MS) {
-        continue;
-      }
-    }
-    toFetch.push(sym);
-  }
-  let dirty = false;
-  const nowIso = new Date(nowMs).toISOString();
-  if (toFetch.length > 0) {
-    let idx = 0;
-    async function worker() {
-      while (idx < toFetch.length) {
-        const sym = toFetch[idx];
-        idx += 1;
-        if (!sym) continue;
-        const fetched = await fetchYahooHistory(sym, "5y", "1wk", 9e3, fetchImpl);
-        if (fetched && fetched.points.length >= 2) {
-          cache.series[sym] = {
-            symbol: sym,
-            currency: fetched.currency,
-            source: "yahoo",
-            updated_at: nowIso,
-            points: fetched.points
-          };
-          dirty = true;
-        }
-      }
-    }
-    const workers = Array.from({ length: Math.min(concurrency, toFetch.length) }, () => worker());
-    await Promise.all(workers);
-  }
-  if (opts?.dailyBenchmarkSymbol?.trim()) {
-    const benchSym = opts.dailyBenchmarkSymbol.trim();
-    const dailyKey = `daily:${benchSym}`;
-    const existingDaily = cache.series[dailyKey];
-    const updatedMs = existingDaily ? Date.parse(existingDaily.updated_at) : Number.NaN;
-    const ageMs = Number.isFinite(updatedMs) ? nowMs - updatedMs : Number.POSITIVE_INFINITY;
-    if (!existingDaily || existingDaily.points.length < 10 || ageMs >= YAHOO_HISTORY_TTL_MS) {
-      const fetchedDaily = await fetchYahooDailyBenchmark(benchSym, "1y", 9e3, fetchImpl);
-      if (fetchedDaily && fetchedDaily.points.length >= 2) {
-        cache.series[dailyKey] = {
-          symbol: benchSym,
-          currency: fetchedDaily.currency,
-          source: "yahoo",
-          updated_at: nowIso,
-          points: fetchedDaily.points
-        };
-        dirty = true;
-      }
-    }
-  }
-  if (dirty) {
-    cache.updated_at = nowIso;
-    return saveHistoryCache(dataDir, cache);
-  }
-  return cache;
 }
 
 // src/server/quant.ts
@@ -35481,6 +35170,13 @@ function computeScenarioSummary(price, model, taxInfo, opts) {
       }
     }
   }
+  const fcfMarginXbrl = opts?.fundamentals?.latest_ratios.fcf_margin_pct;
+  const oeMarginXbrl = opts?.fundamentals?.latest_ratios.owner_earnings_margin_pct;
+  if (isSingleStock && typeof fcfMarginXbrl === "number" && typeof oeMarginXbrl === "number" && fcfMarginXbrl - oeMarginXbrl >= 8) {
+    valuationWarnings.push(
+      `Headline FCF margin (${round(fcfMarginXbrl, 1)}%) exceeds SBC-adjusted Owner Earnings (${round(oeMarginXbrl, 1)}%) by ${round(fcfMarginXbrl - oeMarginXbrl, 1)}pp; verify dilution drag.`
+    );
+  }
   return {
     horizon_years: horizon,
     price_used: round(price, 4),
@@ -35497,7 +35193,7 @@ function computeScenarioSummary(price, model, taxInfo, opts) {
     valuation_warnings: valuationWarnings
   };
 }
-function computeReverseDcf(price, model, taxInfo) {
+function computeReverseDcf(price, model, taxInfo, opts) {
   if (price === null || !Number.isFinite(price) || price <= 0 || !model?.reverse_dcf) {
     return null;
   }
@@ -35552,6 +35248,8 @@ function computeReverseDcf(price, model, taxInfo) {
       }
     }
   }
+  const consensusRevGrowth = opts?.consensusRevGrowthPct !== null && opts?.consensusRevGrowthPct !== void 0 && Number.isFinite(opts.consensusRevGrowthPct) ? round(opts.consensusRevGrowthPct, 2) : null;
+  const expectationsGapVsConsensus = consensusRevGrowth !== null && impliedRevCagrPct !== null ? round(consensusRevGrowth - impliedRevCagrPct, 2) : null;
   return {
     basis: rd.basis,
     horizon_years: horizon,
@@ -35576,6 +35274,8 @@ function computeReverseDcf(price, model, taxInfo) {
     implied_revenue_cagr_pct: impliedRevCagrPct,
     base_revenue_cagr_pct: rd.base_revenue_cagr_pct ?? null,
     revenue_cagr_gap_pct: revCagrGapPct,
+    consensus_rev_growth_pct: consensusRevGrowth,
+    expectations_gap_vs_consensus_pct: expectationsGapVsConsensus,
     target_margin_pct: rd.target_margin_pct ?? null,
     metric_basis_note: rd.metric_basis_note ?? null,
     linked_hypothesis_ids: rd.linked_hypothesis_ids ?? [],
@@ -35733,7 +35433,10 @@ function evaluateHypothesisRule(rule, fundamentals, edgarRows, insiders, marketE
         if (metric === "gross_margin_pct" && ttmRev && ttmRev > 0 && ttmGp !== null) observed = round(ttmGp / ttmRev * 100, 2);
         else if (metric === "operating_margin_pct" && ttmRev && ttmRev > 0 && ttmOp !== null) observed = round(ttmOp / ttmRev * 100, 2);
         else if (metric === "fcf_margin_pct" && ttmRev && ttmRev > 0 && ttmFcf !== null) observed = round(ttmFcf / ttmRev * 100, 2);
-        else if (metric === "ocf_to_ni_pct" && ttmNi && ttmNi > 0 && ttmOcf !== null) observed = round(ttmOcf / ttmNi * 100, 2);
+        else if (metric === "owner_earnings_margin_pct" && ttmRev && ttmRev > 0 && ttmFcf !== null) {
+          const oe = ttmSbc !== null ? ttmFcf - ttmSbc : ttmFcf;
+          observed = round(oe / ttmRev * 100, 2);
+        } else if (metric === "ocf_to_ni_pct" && ttmNi && ttmNi > 0 && ttmOcf !== null) observed = round(ttmOcf / ttmNi * 100, 2);
         else if (metric === "sbc_pct_rev" && ttmRev && ttmRev > 0 && ttmSbc !== null) observed = round(ttmSbc / ttmRev * 100, 2);
         else if (metric === "revenue_b" && ttmRev !== null) observed = round(ttmRev / 1e3, 3);
         else {
@@ -37270,6 +36973,1149 @@ function runDeterministicBacktest(req, portfolio, lookthrough, profile, historyC
   };
 }
 
+// src/server/forecast.ts
+function mulberry32(seedInit) {
+  let a = seedInit >>> 0;
+  return () => {
+    a |= 0;
+    a = a + 1831565813 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function boxMullerPair(rng) {
+  const u1 = Math.max(1e-12, rng());
+  const u2 = rng();
+  const r = Math.sqrt(-2 * Math.log(u1));
+  const theta = 2 * Math.PI * u2;
+  return [r * Math.cos(theta), r * Math.sin(theta)];
+}
+function sampleStandardNormal(rng) {
+  return boxMullerPair(rng)[0];
+}
+function sampleStudentTScale(rng, df = 6) {
+  let chi2 = 0;
+  for (let i = 0; i < df; i += 2) {
+    const [z1, z2] = boxMullerPair(rng);
+    chi2 += z1 * z1;
+    if (i + 1 < df) chi2 += z2 * z2;
+  }
+  const safeChi2 = Math.max(0.25, chi2);
+  return Math.sqrt((df - 2) / safeChi2);
+}
+function quantile(sorted, p) {
+  if (sorted.length === 0) return 0;
+  if (sorted.length === 1) return sorted[0];
+  const idx = (sorted.length - 1) * p;
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  const frac = idx - lo;
+  return sorted[lo] * (1 - frac) + sorted[hi] * frac;
+}
+function choleskyDecompose(matrix) {
+  const n = matrix.length;
+  const L = Array.from({ length: n }, () => Array(n).fill(0));
+  for (let i = 0; i < n; i += 1) {
+    for (let j = 0; j <= i; j += 1) {
+      let sum = 0;
+      for (let k = 0; k < j; k += 1) {
+        sum += L[i][k] * L[j][k];
+      }
+      if (i === j) {
+        const diag = matrix[i][i] - sum;
+        L[i][j] = Math.sqrt(Math.max(1e-8, diag));
+      } else {
+        const denom = L[j][j];
+        L[i][j] = denom > 1e-9 ? (matrix[i][j] - sum) / denom : 0;
+      }
+    }
+  }
+  return L;
+}
+function buildWeeklyReturnMapByWeek(ticker, yfSymbol, historyCache) {
+  const ser = lookupHistorySeries(historyCache, yfSymbol, ticker);
+  const out = /* @__PURE__ */ new Map();
+  if (!ser || ser.points.length < 15) return out;
+  const pts = ser.points.slice(-260);
+  const toWeek = (dateStr) => {
+    const d = /* @__PURE__ */ new Date(`${dateStr}T00:00:00Z`);
+    if (Number.isNaN(d.getTime())) return dateStr;
+    const day = d.getUTCDay();
+    d.setUTCDate(d.getUTCDate() + (day === 0 ? 1 : 1 - day));
+    return d.toISOString().slice(0, 10);
+  };
+  let prevClose = null;
+  for (const pt of pts) {
+    if (pt.close > 0 && prevClose !== null && prevClose > 0) {
+      const r = Math.log(pt.close / prevClose);
+      if (Number.isFinite(r) && Math.abs(r) < 1.2) {
+        out.set(toWeek(pt.date), r);
+      }
+    }
+    if (pt.close > 0) prevClose = pt.close;
+  }
+  return out;
+}
+function computeSampleVolAndCorr(mapA, mapB) {
+  const xs = [];
+  const ys = [];
+  for (const [wk, valA] of mapA.entries()) {
+    const valB = mapB.get(wk);
+    if (valB !== void 0) {
+      xs.push(valA);
+      ys.push(valB);
+    }
+  }
+  if (xs.length < 20) return { corr: null, overlap: xs.length };
+  const n = xs.length;
+  const meanX = xs.reduce((a, b) => a + b, 0) / n;
+  const meanY = ys.reduce((a, b) => a + b, 0) / n;
+  let num = 0;
+  let dx2 = 0;
+  let dy2 = 0;
+  for (let i = 0; i < n; i += 1) {
+    const dx = xs[i] - meanX;
+    const dy = ys[i] - meanY;
+    num += dx * dy;
+    dx2 += dx * dx;
+    dy2 += dy * dy;
+  }
+  const den = Math.sqrt(dx2 * dy2);
+  if (den <= 1e-12) return { corr: null, overlap: n };
+  return { corr: Math.max(-0.9, Math.min(0.96, num / den)), overlap: n };
+}
+function computeAnnualizedVol(retMap) {
+  const vals = Array.from(retMap.values());
+  if (vals.length < 20) return null;
+  const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+  const variance = vals.reduce((acc, v) => acc + (v - mean) ** 2, 0) / (vals.length - 1);
+  const ann = Math.sqrt(Math.max(0, variance) * 52);
+  return Number.isFinite(ann) && ann > 0.02 ? Math.min(1.1, ann) : null;
+}
+function evaluateRiskAndTaxForHoldings(slots, profile, etfWeightsCfg, fxUsdToBase) {
+  const safeFx = fxUsdToBase > 0 ? fxUsdToBase : 1;
+  const brokerageSlots = slots.filter((s) => !s.is_external);
+  const navBase = brokerageSlots.reduce((acc, s) => acc + Math.max(0, s.value_base), 0);
+  const etfWeights = etfWeightsCfg.etf_weights ?? {};
+  const etfMeta = etfWeightsCfg.etf_metadata ?? {};
+  const etfSet = new Set(Object.keys(etfWeights).map((k) => k.toUpperCase()));
+  const posUsdMap = /* @__PURE__ */ new Map();
+  let usSitusPortfolioUsd = 0;
+  let extUsSitusUsd = 0;
+  let annualWhtDragBase = 0;
+  for (const s of slots) {
+    if (s.value_base <= 0.01) continue;
+    const usdVal = s.value_base / safeFx;
+    if (s.is_external) {
+      if (s.us_situs) extUsSitusUsd += usdVal;
+      continue;
+    }
+    if (s.is_cash) continue;
+    posUsdMap.set(s.ticker, (posUsdMap.get(s.ticker) ?? 0) + usdVal);
+    if (s.us_situs) usSitusPortfolioUsd += usdVal;
+    if (!s.accumulating && s.dividend_yield_pct > 0) {
+      const whtRate = s.us_situs ? profile.tax_profile.us_dividend_wht_pct : profile.tax_profile.ucits_dividend_wht_pct;
+      annualWhtDragBase += s.value_base * (s.dividend_yield_pct / 100) * (whtRate / 100);
+    }
+  }
+  const canonicalMembers = /* @__PURE__ */ new Map();
+  const register = (sym) => {
+    const canon = canonicalAssetName(sym);
+    if (!canonicalMembers.has(canon)) {
+      canonicalMembers.set(canon, new Set(memberTickersForCanonical(canon)));
+    }
+  };
+  for (const sym of posUsdMap.keys()) {
+    if (!etfSet.has(sym)) register(sym);
+  }
+  for (const [etfSym, weights] of Object.entries(etfWeights)) {
+    if ((posUsdMap.get(etfSym) ?? 0) <= 0) continue;
+    for (const [c, w] of Object.entries(weights)) {
+      if (typeof w === "number" && w > 0) register(c);
+    }
+  }
+  const ltUsdMap = /* @__PURE__ */ new Map();
+  const ltPctMap = /* @__PURE__ */ new Map();
+  let maxSinglePct = 0;
+  for (const [canon, members2] of canonicalMembers.entries()) {
+    let directUsd = 0;
+    for (const m of members2) directUsd += posUsdMap.get(m) ?? 0;
+    let viaEtfsUsd = 0;
+    for (const [etfSym, weights] of Object.entries(etfWeights)) {
+      const etfMv = posUsdMap.get(etfSym) ?? 0;
+      if (etfMv <= 0) continue;
+      let share = 0;
+      for (const m of members2) {
+        const w = weights[m];
+        if (typeof w === "number") share += w;
+      }
+      viaEtfsUsd += etfMv * share;
+    }
+    const totUsd = directUsd + viaEtfsUsd;
+    if (totUsd <= 0.01) continue;
+    const pct = navBase > 0 ? round(totUsd * safeFx / navBase * 100, 2) : 0;
+    ltUsdMap.set(canon, totUsd);
+    ltPctMap.set(canon, pct);
+    if (pct > maxSinglePct) maxSinglePct = pct;
+  }
+  const usSitusPortfolioPct = navBase > 0 ? round(usSitusPortfolioUsd * safeFx / navBase * 100, 2) : 0;
+  const evalBucketUsd = (rule) => {
+    const seen = /* @__PURE__ */ new Set();
+    let sum = 0;
+    for (const rawT of rule.tickers ?? []) {
+      const canon = canonicalAssetName(rawT);
+      if (seen.has(canon)) continue;
+      seen.add(canon);
+      sum += ltUsdMap.get(canon) ?? 0;
+    }
+    if (rule.include_etf_residual_key) {
+      for (const etfSym of Object.keys(etfWeights)) {
+        const etfMv = posUsdMap.get(etfSym) ?? 0;
+        if (etfMv <= 0) continue;
+        const res = etfMeta[etfSym]?.[rule.include_etf_residual_key];
+        if (typeof res === "number") sum += etfMv * res;
+      }
+    }
+    return sum;
+  };
+  const breached = [];
+  for (const rule of profile.risk_caps) {
+    let valPct = 0;
+    if (rule.kind === "single_name_max") valPct = maxSinglePct;
+    else if (rule.kind === "ticker" && rule.ticker) valPct = ltPctMap.get(canonicalAssetName(rule.ticker)) ?? 0;
+    else if (rule.kind === "us_situs") valPct = usSitusPortfolioPct;
+    else if (rule.kind === "bucket") valPct = navBase > 0 ? round(evalBucketUsd(rule) * safeFx / navBase * 100, 2) : 0;
+    if (valPct > rule.cap_pct + 0.05) {
+      breached.push(rule.label);
+    }
+  }
+  const estateEnabled = profile.tax_profile.nra_us_estate_tax_enabled;
+  const estateTaxBase = estateEnabled ? round(computeUsEstateTaxNra(usSitusPortfolioUsd + extUsSitusUsd).net_estate_tax_usd * safeFx, 2) : 0;
+  return {
+    us_situs_portfolio_pct: usSitusPortfolioPct,
+    estate_tax_base: estateTaxBase,
+    annual_wht_drag_base: round(annualWhtDragBase, 2),
+    cap_breaches_count: breached.length,
+    breached_cap_labels: breached
+  };
+}
+function runPortfolioForecast(req, portfolio, profile, theses, rotationQueue, etfWeights, historyCache, fxRates, opts) {
+  const horizon = Math.max(1, Math.min(10, req.horizon_years || 5));
+  const simulations = Math.max(200, Math.min(5e3, req.simulations || 1500));
+  const volMult = Math.max(0.5, Math.min(2.5, req.regime_vol_multiplier || 1));
+  const rfPct = round(req.rf_pct ?? opts?.defaultRfPct ?? 3.8, 2);
+  const fxUsdToBase = fxRates.USD && fxRates.USD > 0 ? fxRates.USD : 1;
+  const benchTicker = profile.benchmark.ticker.toUpperCase();
+  const benchYf = profile.benchmark.yf_symbol || benchTicker;
+  const benchCagrPct = profile.benchmark.expected_cagr_pct ?? 8;
+  const etfSet = new Set(Object.keys(etfWeights.etf_weights ?? {}).map((k) => k.toUpperCase()));
+  const thesisByTicker = new Map(theses.map((t) => [t.ticker.toUpperCase(), t]));
+  const baselineMap = /* @__PURE__ */ new Map();
+  for (const p of portfolio.positions) {
+    const sym = p.ticker.toUpperCase();
+    const livePx = opts?.livePricesMap?.get(sym) ?? opts?.livePricesMap?.get(p.yf_symbol || sym) ?? p.ref_price;
+    const ccyFx = fxRates[p.currency] ?? fxUsdToBase;
+    const mvBase = Math.max(0, p.qty * livePx * ccyFx);
+    if (mvBase <= 0.01) continue;
+    const th = thesisByTicker.get(sym);
+    const isEtf = Boolean(th?.is_etf || etfSet.has(sym) || p.asset_type.toUpperCase().includes("ETF") || sym === benchTicker);
+    const accumulating = Boolean(th?.accumulating ?? (p.asset_type.toUpperCase().includes("UCITS") || sym === "VWRA"));
+    const divYield = th?.model?.dividend_yield_pct ?? (isEtf && !accumulating ? 1.3 : 0);
+    const prev = baselineMap.get(sym);
+    baselineMap.set(sym, {
+      key: sym,
+      ticker: sym,
+      yf_symbol: p.yf_symbol || th?.yf_symbol || sym,
+      us_situs: p.us_situs,
+      is_etf: isEtf,
+      accumulating,
+      is_external: false,
+      is_cash: false,
+      value_base: round((prev?.value_base ?? 0) + mvBase, 2),
+      dividend_yield_pct: divYield
+    });
+  }
+  const cashStart = Math.max(0, round(portfolio.cash_base + portfolio.accruals_base, 2));
+  baselineMap.set("__CASH__", {
+    key: "__CASH__",
+    ticker: "CASH",
+    yf_symbol: "CASH",
+    us_situs: false,
+    is_etf: false,
+    accumulating: true,
+    is_external: false,
+    is_cash: true,
+    value_base: cashStart,
+    dividend_yield_pct: 0
+  });
+  const ext = profile.external_exposure;
+  const includeExt = Boolean(req.include_external_wealth && ext.enabled);
+  const extAmountBase = opts?.liveExternalBase !== null && opts?.liveExternalBase !== void 0 && Number.isFinite(opts.liveExternalBase) ? Math.max(0, opts.liveExternalBase) : Math.max(0, ext.amount_base);
+  if (includeExt && extAmountBase > 0.01) {
+    const extTicker = (ext.ticker || "EXTERNAL").toUpperCase();
+    const extTh = thesisByTicker.get(extTicker);
+    baselineMap.set(`EXT:${extTicker}`, {
+      key: `EXT:${extTicker}`,
+      ticker: extTicker,
+      yf_symbol: extTh?.yf_symbol || extTicker,
+      us_situs: ext.us_situs,
+      is_etf: false,
+      accumulating: false,
+      is_external: true,
+      is_cash: false,
+      value_base: round(extAmountBase, 2),
+      dividend_yield_pct: extTh?.model?.dividend_yield_pct ?? 0
+    });
+  }
+  const effectiveActions = [];
+  if (req.apply_recommended_rotations) {
+    const explicitSwapTickers = new Set(
+      req.actions.filter((a) => a.type === "tax_swap").map((a) => a.ticker.toUpperCase())
+    );
+    const explicitSellTickers = new Set(
+      req.actions.filter((a) => a.type === "sell").map((a) => a.ticker.toUpperCase())
+    );
+    for (const sw of rotationQueue.tax_swaps) {
+      if (!explicitSwapTickers.has(sw.ticker.toUpperCase())) {
+        effectiveActions.push({
+          type: "tax_swap",
+          ticker: sw.ticker.toUpperCase(),
+          target_ticker: benchTicker,
+          pct: 100
+        });
+      }
+    }
+    for (const ex of rotationQueue.mandatory_exits) {
+      if (!explicitSellTickers.has(ex.ticker.toUpperCase())) {
+        effectiveActions.push({
+          type: "sell",
+          ticker: ex.ticker.toUpperCase(),
+          pct: 100
+        });
+      }
+    }
+    for (const ct of rotationQueue.cap_trims) {
+      if (!explicitSellTickers.has(ct.ticker.toUpperCase()) && ct.proceeds_base > 0) {
+        effectiveActions.push({
+          type: "sell",
+          ticker: ct.ticker.toUpperCase(),
+          amount_base: ct.proceeds_base
+        });
+      }
+    }
+  }
+  effectiveActions.push(...req.actions);
+  const simMap = /* @__PURE__ */ new Map();
+  for (const [k, slot] of baselineMap.entries()) {
+    simMap.set(k, { ...slot });
+  }
+  const ensureSlot = (sym, overrides) => {
+    const existing = simMap.get(sym);
+    if (existing) return existing;
+    const th = thesisByTicker.get(sym);
+    const isBench = sym === benchTicker;
+    const isEtf = Boolean(overrides?.is_etf ?? th?.is_etf ?? etfSet.has(sym) ?? isBench);
+    const accumulating = Boolean(overrides?.accumulating ?? th?.accumulating ?? (isBench && sym === "VWRA"));
+    const slot = {
+      key: sym,
+      ticker: sym,
+      yf_symbol: overrides?.yf_symbol || (isBench ? benchYf : th?.yf_symbol || sym),
+      us_situs: overrides?.us_situs ?? (isBench ? false : th?.us_situs ?? true),
+      is_etf: isEtf,
+      accumulating,
+      is_external: false,
+      is_cash: false,
+      value_base: 0,
+      dividend_yield_pct: th?.model?.dividend_yield_pct ?? (isEtf && !accumulating ? 1.3 : 0)
+    };
+    simMap.set(sym, slot);
+    return slot;
+  };
+  const appliedLog = [];
+  let cashShortfallBase = 0;
+  const swapsAndSells = effectiveActions.filter((a) => a.type === "tax_swap" || a.type === "sell");
+  const buysAndParks = effectiveActions.filter((a) => a.type === "buy" || a.type === "park_cash_in_benchmark");
+  for (const act of swapsAndSells) {
+    if (act.type === "tax_swap") {
+      const fromSym = act.ticker.toUpperCase();
+      const targetSym = (act.target_ticker || benchTicker).toUpperCase();
+      const fromSlot = simMap.get(fromSym);
+      if (!fromSlot || fromSlot.value_base <= 0.01) continue;
+      const amt = round(fromSlot.value_base * (Math.min(100, Math.max(1, act.pct ?? 100)) / 100), 2);
+      fromSlot.value_base = round(Math.max(0, fromSlot.value_base - amt), 2);
+      const targetSlot = ensureSlot(targetSym, {
+        yf_symbol: targetSym === benchTicker ? benchYf : void 0,
+        us_situs: targetSym === benchTicker ? false : void 0,
+        is_etf: targetSym === benchTicker ? true : void 0,
+        accumulating: targetSym === benchTicker ? true : void 0
+      });
+      targetSlot.value_base = round(targetSlot.value_base + amt, 2);
+      appliedLog.push({
+        label: `Tax swap ${fromSym} \u2192 ${targetSym}`,
+        type: "tax_swap",
+        ticker: fromSym,
+        target_ticker: targetSym,
+        amount_base: amt
+      });
+    } else if (act.type === "sell") {
+      const sym = act.ticker.toUpperCase();
+      const fromSlot = simMap.get(sym);
+      if (!fromSlot || fromSlot.value_base <= 0.01) continue;
+      const rawAmt = act.amount_base !== void 0 ? Math.min(fromSlot.value_base, act.amount_base) : fromSlot.value_base * (Math.min(100, Math.max(1, act.pct ?? 100)) / 100);
+      const amt = round(rawAmt, 2);
+      if (amt <= 0.01) continue;
+      fromSlot.value_base = round(Math.max(0, fromSlot.value_base - amt), 2);
+      const cashSlot = simMap.get("__CASH__");
+      cashSlot.value_base = round(cashSlot.value_base + amt, 2);
+      appliedLog.push({
+        label: `Sell ${sym}`,
+        type: "sell",
+        ticker: sym,
+        amount_base: amt
+      });
+    }
+  }
+  for (const act of buysAndParks) {
+    const cashSlot = simMap.get("__CASH__");
+    if (act.type === "buy") {
+      const sym = act.ticker.toUpperCase();
+      const wanted = round(act.amount_base, 2);
+      const funded = round(Math.min(cashSlot.value_base, wanted), 2);
+      if (wanted - funded > 0.5) {
+        cashShortfallBase = round(cashShortfallBase + (wanted - funded), 2);
+      }
+      if (funded <= 0.01) continue;
+      cashSlot.value_base = round(Math.max(0, cashSlot.value_base - funded), 2);
+      const targetSlot = ensureSlot(sym, {
+        yf_symbol: act.yf_symbol,
+        us_situs: act.us_situs
+      });
+      targetSlot.value_base = round(targetSlot.value_base + funded, 2);
+      appliedLog.push({
+        label: `Buy ${sym}`,
+        type: "buy",
+        ticker: sym,
+        amount_base: funded,
+        note: wanted - funded > 0.5 ? `Capped by available cash (${round(wanted - funded, 0)} shortfall)` : void 0
+      });
+    } else if (act.type === "park_cash_in_benchmark") {
+      const reserveAmt = act.keep_reserve && profile.liquidity_reserve.enabled ? profile.liquidity_reserve.amount_base : 0;
+      const excessCash = Math.max(0, cashSlot.value_base - reserveAmt);
+      const amt = round(excessCash * (Math.min(100, Math.max(1, act.pct ?? 100)) / 100), 2);
+      if (amt <= 0.01) continue;
+      cashSlot.value_base = round(Math.max(0, cashSlot.value_base - amt), 2);
+      const benchSlot = ensureSlot(benchTicker, {
+        yf_symbol: benchYf,
+        us_situs: false,
+        is_etf: true,
+        accumulating: true
+      });
+      benchSlot.value_base = round(benchSlot.value_base + amt, 2);
+      appliedLog.push({
+        label: `Sweep excess cash \u2192 ${benchTicker}`,
+        type: "park_cash_in_benchmark",
+        target_ticker: benchTicker,
+        amount_base: amt
+      });
+    }
+  }
+  const allKeys = Array.from(/* @__PURE__ */ new Set([...baselineMap.keys(), ...simMap.keys()])).filter((k) => {
+    const bVal = baselineMap.get(k)?.value_base ?? 0;
+    const sVal = simMap.get(k)?.value_base ?? 0;
+    return bVal > 0.01 || sVal > 0.01;
+  });
+  const baseRiskTax = evaluateRiskAndTaxForHoldings(
+    Array.from(baselineMap.values()),
+    profile,
+    etfWeights,
+    fxUsdToBase
+  );
+  const simRiskTax = evaluateRiskAndTaxForHoldings(
+    Array.from(simMap.values()),
+    profile,
+    etfWeights,
+    fxUsdToBase
+  );
+  const estMarginalRate = profile.tax_profile.nra_us_estate_tax_enabled && baseRiskTax.estate_tax_base > 0 ? 34 : 0;
+  const assets = allKeys.map((key) => {
+    const slot = simMap.get(key) ?? baselineMap.get(key);
+    if (slot.is_cash) {
+      return {
+        key,
+        slot,
+        mu: rfPct / 100,
+        vol: 5e-3,
+        returnSource: "risk_free",
+        retMap: /* @__PURE__ */ new Map(),
+        qualityGrade: null,
+        maxWeightPct: 100
+      };
+    }
+    const th = thesisByTicker.get(slot.ticker);
+    const taxInfo = computeAfterTaxHurdle(
+      profile,
+      slot.us_situs,
+      slot.dividend_yield_pct,
+      estMarginalRate,
+      {
+        dividendWhtPctOverride: th?.model?.dividend_wht_pct ?? null,
+        accumulating: slot.accumulating
+      }
+    );
+    let mu = (benchCagrPct - taxInfo.total_tax_drag_pct) / 100;
+    let returnSource = "unmodeled_default";
+    let scenVol = null;
+    if (th?.scenario_summary) {
+      const s = th.scenario_summary;
+      mu = Math.max(-0.2, Math.min(0.35, s.expected_after_tax_cagr_pct / 100));
+      returnSource = "dossier_scenarios";
+      const bearR = s.cases.bear.after_tax_cagr_pct / 100;
+      const bullR = s.cases.bull.after_tax_cagr_pct / 100;
+      const spread = Math.max(0.06, bullR - bearR);
+      scenVol = Math.max(0.14, Math.min(0.75, spread * 1.15));
+    } else if (slot.ticker === benchTicker) {
+      mu = benchCagrPct / 100;
+      returnSource = "benchmark";
+    } else if (slot.is_etf) {
+      mu = (benchCagrPct - taxInfo.total_tax_drag_pct) / 100;
+      returnSource = "etf_benchmark";
+    } else {
+      mu = (benchCagrPct + 0.5 - taxInfo.total_tax_drag_pct) / 100;
+      returnSource = "unmodeled_default";
+    }
+    const retMap = buildWeeklyReturnMapByWeek(slot.ticker, slot.yf_symbol, historyCache);
+    const empVol = computeAnnualizedVol(retMap);
+    const fallbackVol = slot.is_etf ? 0.17 : 0.34;
+    const rawVol = empVol !== null && scenVol !== null ? 0.65 * empVol + 0.35 * scenVol : empVol ?? scenVol ?? fallbackVol;
+    const vol = Math.max(0.08, Math.min(0.95, rawVol * volMult));
+    return {
+      key,
+      slot,
+      mu,
+      vol,
+      returnSource,
+      retMap,
+      qualityGrade: th?.quality_grade ?? null,
+      maxWeightPct: th?.max_weight_pct ?? (slot.is_etf ? 70 : 12)
+    };
+  });
+  const n = assets.length;
+  const rawCorr = Array.from({ length: n }, () => Array(n).fill(0));
+  let pairwiseSum = 0;
+  let pairwiseCount = 0;
+  for (let i = 0; i < n; i += 1) {
+    rawCorr[i][i] = 1;
+    for (let j = i + 1; j < n; j += 1) {
+      const a = assets[i];
+      const b = assets[j];
+      let c = 0;
+      if (a.slot.is_cash || b.slot.is_cash) {
+        c = 0;
+      } else if (canonicalAssetName(a.slot.ticker) === canonicalAssetName(b.slot.ticker)) {
+        c = 0.96;
+      } else {
+        const res = computeSampleVolAndCorr(a.retMap, b.retMap);
+        if (res.corr !== null) {
+          c = res.corr;
+        } else {
+          c = a.slot.is_etf || b.slot.is_etf ? 0.68 : 0.52;
+        }
+      }
+      rawCorr[i][j] = c;
+      rawCorr[j][i] = c;
+      if (!a.slot.is_cash && !b.slot.is_cash) {
+        pairwiseSum += c;
+        pairwiseCount += 1;
+      }
+    }
+  }
+  const avgCorr = pairwiseCount > 0 ? Math.max(0.1, Math.min(0.8, pairwiseSum / pairwiseCount)) : 0.45;
+  const shrinkLambda = 0.25;
+  const cov = Array.from({ length: n }, () => Array(n).fill(0));
+  for (let i = 0; i < n; i += 1) {
+    for (let j = 0; j < n; j += 1) {
+      const a = assets[i];
+      const b = assets[j];
+      let corrIJ = rawCorr[i][j];
+      if (i !== j && !a.slot.is_cash && !b.slot.is_cash) {
+        corrIJ = (1 - shrinkLambda) * corrIJ + shrinkLambda * avgCorr;
+      }
+      cov[i][j] = a.vol * b.vol * corrIJ;
+    }
+  }
+  const L = choleskyDecompose(cov);
+  const baseStartVec = assets.map((a) => baselineMap.get(a.key)?.value_base ?? 0);
+  const simStartVec = assets.map((a) => simMap.get(a.key)?.value_base ?? 0);
+  const baseStartTotal = baseStartVec.reduce((acc, v) => acc + v, 0);
+  const simStartTotal = simStartVec.reduce((acc, v) => acc + v, 0);
+  const benchEndBase = round(baseStartTotal * Math.pow(1 + benchCagrPct / 100, horizon), 2);
+  const baseYearSamples = Array.from({ length: horizon + 1 }, () => []);
+  const simYearSamples = Array.from({ length: horizon + 1 }, () => []);
+  const rng = mulberry32(20260601 ^ horizon * 31 ^ simulations * 17);
+  const zStd = new Float64Array(n);
+  const corrShock = new Float64Array(n);
+  const baseCur = new Float64Array(n);
+  const simCur = new Float64Array(n);
+  for (let p = 0; p < simulations; p += 1) {
+    let bSum0 = 0;
+    let sSum0 = 0;
+    for (let i = 0; i < n; i += 1) {
+      baseCur[i] = baseStartVec[i];
+      simCur[i] = simStartVec[i];
+      bSum0 += baseCur[i];
+      sSum0 += simCur[i];
+    }
+    baseYearSamples[0].push(bSum0);
+    simYearSamples[0].push(sSum0);
+    for (let yr = 1; yr <= horizon; yr += 1) {
+      for (let i = 0; i < n; i += 1) {
+        zStd[i] = sampleStandardNormal(rng);
+      }
+      const tScale = sampleStudentTScale(rng, 6);
+      let bSum = 0;
+      let sSum = 0;
+      for (let i = 0; i < n; i += 1) {
+        let dot = 0;
+        const rowL = L[i];
+        for (let k = 0; k <= i; k += 1) {
+          dot += rowL[k] * zStd[k];
+        }
+        const a = assets[i];
+        const shock = a.slot.is_cash ? dot : dot * tScale;
+        corrShock[i] = shock;
+        const drift = a.mu - 0.5 * a.vol * a.vol;
+        const growth = Math.exp(Math.max(-2.2, Math.min(1.6, drift + shock)));
+        baseCur[i] = baseCur[i] * growth;
+        simCur[i] = simCur[i] * growth;
+        bSum += baseCur[i];
+        sSum += simCur[i];
+      }
+      baseYearSamples[yr].push(bSum);
+      simYearSamples[yr].push(sSum);
+    }
+  }
+  const computeAnalyticalStats = (vec, total) => {
+    const w = vec.map((v) => total > 0 ? v / total : 0);
+    const sigmaW = Array(n).fill(0);
+    let portVar = 0;
+    let portMu = 0;
+    for (let i = 0; i < n; i += 1) {
+      portMu += w[i] * assets[i].mu;
+      let sw = 0;
+      for (let j = 0; j < n; j += 1) {
+        sw += cov[i][j] * w[j];
+      }
+      sigmaW[i] = sw;
+      portVar += w[i] * sw;
+    }
+    const portVol = Math.sqrt(Math.max(1e-8, portVar));
+    const sharpe = portVol > 1e-6 ? round((portMu - rfPct / 100) / portVol, 2) : 0;
+    const mrcPct = assets.map((_, i) => portVar > 1e-9 ? round(w[i] * sigmaW[i] / portVar * 100, 1) : 0);
+    const corrWithPort = assets.map(
+      (a, i) => a.slot.is_cash || portVol <= 1e-6 || a.vol <= 1e-6 ? 0 : round(Math.max(-1, Math.min(1, sigmaW[i] / (a.vol * portVol))), 2)
+    );
+    return { volPct: round(portVol * 100, 2), sharpe, mrcPct, corrWithPort };
+  };
+  const baseAnalytics = computeAnalyticalStats(baseStartVec, baseStartTotal);
+  const simAnalytics = computeAnalyticalStats(simStartVec, simStartTotal);
+  const summarizePath = (yearSamples, startTotal, analytics, riskTax, endingCashBase) => {
+    const trajectory = yearSamples.map((arr, yr) => {
+      const sorted = [...arr].sort((a, b) => a - b);
+      const mean = arr.reduce((s, v) => s + v, 0) / Math.max(1, arr.length);
+      return {
+        year: yr,
+        p10_base: round(quantile(sorted, 0.1), 0),
+        p25_base: round(quantile(sorted, 0.25), 0),
+        p50_base: round(quantile(sorted, 0.5), 0),
+        p75_base: round(quantile(sorted, 0.75), 0),
+        p90_base: round(quantile(sorted, 0.9), 0),
+        mean_base: round(mean, 0)
+      };
+    });
+    const finalSamples = yearSamples[horizon] ?? [startTotal];
+    const finalPt = trajectory[horizon];
+    const safeStart = Math.max(1, startTotal);
+    const cagrFrom = (endVal) => round((Math.pow(Math.max(0.01, endVal / safeStart), 1 / horizon) - 1) * 100, 2);
+    const beatCount = finalSamples.filter((v) => v >= benchEndBase).length;
+    const lossCount = finalSamples.filter((v) => v < startTotal).length;
+    return {
+      starting_wealth_base: round(startTotal, 2),
+      ending_p10_base: finalPt.p10_base,
+      ending_p50_base: finalPt.p50_base,
+      ending_p90_base: finalPt.p90_base,
+      ending_mean_base: finalPt.mean_base,
+      expected_cagr_p50_pct: cagrFrom(finalPt.p50_base),
+      p10_cagr_pct: cagrFrom(finalPt.p10_base),
+      p90_cagr_pct: cagrFrom(finalPt.p90_base),
+      annual_vol_pct: analytics.volPct,
+      expected_sharpe: analytics.sharpe,
+      prob_beat_benchmark_pct: round(beatCount / Math.max(1, finalSamples.length) * 100, 1),
+      prob_loss_pct: round(lossCount / Math.max(1, finalSamples.length) * 100, 1),
+      us_situs_portfolio_pct: riskTax.us_situs_portfolio_pct,
+      estate_tax_base: riskTax.estate_tax_base,
+      annual_wht_drag_base: riskTax.annual_wht_drag_base,
+      cap_breaches_count: riskTax.cap_breaches_count,
+      breached_cap_labels: riskTax.breached_cap_labels,
+      ending_cash_base: round(endingCashBase, 2),
+      trajectory
+    };
+  };
+  const baseSummary = summarizePath(
+    baseYearSamples,
+    baseStartTotal,
+    baseAnalytics,
+    baseRiskTax,
+    baselineMap.get("__CASH__")?.value_base ?? 0
+  );
+  const simSummary = summarizePath(
+    simYearSamples,
+    simStartTotal,
+    simAnalytics,
+    simRiskTax,
+    simMap.get("__CASH__")?.value_base ?? 0
+  );
+  const simBreachSet = new Set(simRiskTax.breached_cap_labels);
+  const curedCaps = baseRiskTax.breached_cap_labels.filter((l) => !simBreachSet.has(l));
+  const baseHurdlePct = (profile.benchmark.expected_cagr_pct ?? 8) + (profile.benchmark.alpha_buffer_pct ?? 2.5);
+  const positionRows = assets.map((a, idx) => {
+    const bVal = baseStartVec[idx];
+    const sVal = simStartVec[idx];
+    const corrP = simAnalytics.corrWithPort[idx];
+    const corrAdjHurdle = a.slot.is_cash ? rfPct : a.slot.ticker === benchTicker ? benchCagrPct : round(Math.max(benchCagrPct, baseHurdlePct + (corrP - 0.55) * 3), 2);
+    const excessMu = a.mu - rfPct / 100;
+    const varI = Math.max(0.01, a.vol * a.vol);
+    const rawQuarterKellyPct = a.slot.is_cash || excessMu <= 0 ? 0 : 0.25 * (excessMu / varI) * (1 - 0.3 * Math.max(0, corrP - 0.5)) * 100;
+    const boundedKelly = round(Math.max(0, Math.min(a.maxWeightPct, rawQuarterKellyPct)), 1);
+    return {
+      ticker: a.slot.ticker,
+      is_external: a.slot.is_external,
+      is_cash: a.slot.is_cash,
+      before_value_base: round(bVal, 2),
+      after_value_base: round(sVal, 2),
+      before_weight_pct: baseStartTotal > 0 ? round(bVal / baseStartTotal * 100, 2) : 0,
+      after_weight_pct: simStartTotal > 0 ? round(sVal / simStartTotal * 100, 2) : 0,
+      expected_cagr_pct: round(a.mu * 100, 2),
+      annual_vol_pct: round(a.vol * 100, 1),
+      return_source: a.returnSource,
+      marginal_risk_contrib_pct: simAnalytics.mrcPct[idx],
+      corr_with_portfolio: corrP,
+      corr_adjusted_hurdle_pct: corrAdjHurdle,
+      quarter_kelly_weight_pct: boundedKelly,
+      quality_grade: a.qualityGrade
+    };
+  }).sort((a, b) => b.after_value_base - a.after_value_base);
+  return {
+    horizon_years: horizon,
+    base_currency: profile.base_currency,
+    include_external_wealth: includeExt,
+    regime_vol_multiplier: round(volMult, 2),
+    simulations,
+    rf_pct: rfPct,
+    benchmark_ticker: benchTicker,
+    benchmark_cagr_pct: benchCagrPct,
+    benchmark_ending_base: benchEndBase,
+    baseline: baseSummary,
+    simulated: simSummary,
+    deltas: {
+      p50_base: round(simSummary.ending_p50_base - baseSummary.ending_p50_base, 0),
+      p10_base: round(simSummary.ending_p10_base - baseSummary.ending_p10_base, 0),
+      p90_base: round(simSummary.ending_p90_base - baseSummary.ending_p90_base, 0),
+      cagr_p50_pct: round(simSummary.expected_cagr_p50_pct - baseSummary.expected_cagr_p50_pct, 2),
+      annual_vol_pct: round(simSummary.annual_vol_pct - baseSummary.annual_vol_pct, 2),
+      sharpe: round(simSummary.expected_sharpe - baseSummary.expected_sharpe, 2),
+      estate_tax_saved_base: round(baseSummary.estate_tax_base - simSummary.estate_tax_base, 2),
+      annual_wht_saved_base: round(baseSummary.annual_wht_drag_base - simSummary.annual_wht_drag_base, 2),
+      us_situs_delta_pct: round(simSummary.us_situs_portfolio_pct - baseSummary.us_situs_portfolio_pct, 2),
+      cap_breaches_delta: simSummary.cap_breaches_count - baseSummary.cap_breaches_count,
+      cured_caps: curedCaps,
+      remaining_breached_caps: simRiskTax.breached_cap_labels
+    },
+    applied_actions: appliedLog,
+    cash_shortfall_base: cashShortfallBase,
+    positions: positionRows,
+    methodology_note: `Seeded ${simulations}-path correlated Student-t (df=6) simulation using Ledoit-Wolf shrunk covariance (\u03BB=0.25) blended with dossier 5Y after-tax scenarios, Rf=${rfPct}%, Vol\xD7${round(volMult, 2)}. Forecast bands reflect modeled assumptions & historical covariance, not guarantees.`
+  };
+}
+
+// src/server/market.ts
+var YF_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (compatible; InvestmentOS-Plugin/0.6.0)",
+  Accept: "application/json"
+};
+var YAHOO_HISTORY_TTL_MS = 24 * 60 * 60 * 1e3;
+var IBKR_HISTORY_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
+function round4(n) {
+  return Math.round((n + Number.EPSILON) * 1e4) / 1e4;
+}
+function round2(n) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+function inferMarketState(meta3, nowSec) {
+  const explicit = meta3.marketState?.trim().toUpperCase();
+  if (explicit) return explicit;
+  const tp = meta3.currentTradingPeriod;
+  if (tp?.regular?.start && tp?.regular?.end && nowSec >= tp.regular.start && nowSec <= tp.regular.end) {
+    return "REGULAR";
+  }
+  if (tp?.pre?.start && tp?.pre?.end && nowSec >= tp.pre.start && nowSec <= tp.pre.end) {
+    return "PRE";
+  }
+  if (tp?.post?.start && tp?.post?.end && nowSec >= tp.post.start && nowSec <= tp.post.end) {
+    return "POST";
+  }
+  return "CLOSED";
+}
+async function fetchIntradayExtendedQuote(symbol2, scale, timeoutMs, fetchImpl) {
+  const url2 = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol2)}?interval=1m&range=1d&includePrePost=true`;
+  try {
+    const resp = await fetchImpl(url2, {
+      headers: YF_HEADERS,
+      signal: AbortSignal.timeout(Math.min(timeoutMs, 3500))
+    });
+    if (!resp.ok) return { extendedPrice: null, quoteTime: null };
+    const data = await resp.json();
+    const result = data?.chart?.result?.[0];
+    const meta3 = result?.meta;
+    if (!meta3) return { extendedPrice: null, quoteTime: null };
+    if (typeof meta3.postMarketPrice === "number" && Number.isFinite(meta3.postMarketPrice) && meta3.postMarketPrice > 0) {
+      return {
+        extendedPrice: round4(meta3.postMarketPrice * scale),
+        quoteTime: typeof meta3.postMarketTime === "number" && Number.isFinite(meta3.postMarketTime) ? new Date(meta3.postMarketTime * 1e3).toISOString() : null
+      };
+    }
+    if (typeof meta3.preMarketPrice === "number" && Number.isFinite(meta3.preMarketPrice) && meta3.preMarketPrice > 0) {
+      return {
+        extendedPrice: round4(meta3.preMarketPrice * scale),
+        quoteTime: typeof meta3.preMarketTime === "number" && Number.isFinite(meta3.preMarketTime) ? new Date(meta3.preMarketTime * 1e3).toISOString() : null
+      };
+    }
+    const timestamps = result?.timestamp ?? [];
+    const closes = result?.indicators?.quote?.[0]?.close ?? [];
+    const regStart = meta3.currentTradingPeriod?.regular?.start;
+    const regEnd = meta3.currentTradingPeriod?.regular?.end;
+    for (let i = timestamps.length - 1; i >= 0; i -= 1) {
+      const ts = timestamps[i];
+      const px = closes[i];
+      if (typeof ts !== "number" || typeof px !== "number" || !Number.isFinite(px) || px <= 0) continue;
+      const isExtended = typeof regEnd === "number" && ts > regEnd || typeof regStart === "number" && ts < regStart;
+      if (isExtended) {
+        return {
+          extendedPrice: round4(px * scale),
+          quoteTime: new Date(ts * 1e3).toISOString()
+        };
+      }
+      break;
+    }
+    return { extendedPrice: null, quoteTime: null };
+  } catch {
+    return { extendedPrice: null, quoteTime: null };
+  }
+}
+async function fetchYahooChartQuote(symbol2, timeoutMs = 7e3, fetchImpl = fetch) {
+  const url2 = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol2)}?interval=1d&range=1mo&includePrePost=true`;
+  try {
+    const resp = await fetchImpl(url2, {
+      headers: YF_HEADERS,
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const result = data?.chart?.result?.[0];
+    const meta3 = result?.meta;
+    if (!meta3) return null;
+    let price = meta3.regularMarketPrice ?? meta3.previousClose ?? meta3.chartPreviousClose;
+    if (typeof price !== "number" || !Number.isFinite(price) || price <= 0) {
+      return null;
+    }
+    let scale = 1;
+    let currency = (meta3.currency ?? "USD").trim();
+    if (currency === "GBp" || currency === "GBX") {
+      scale = 0.01;
+      price = round4(price * scale);
+      currency = "GBP";
+    } else {
+      currency = currency.toUpperCase();
+    }
+    if (!/^[A-Z]{3}$/.test(currency)) {
+      currency = "USD";
+    }
+    const nowSec = Math.floor(Date.now() / 1e3);
+    const marketState = inferMarketState(meta3, nowSec);
+    let extendedPrice = null;
+    let quoteTimeSec = meta3.regularMarketTime;
+    if ((marketState === "POST" || marketState === "POSTPOST" || marketState === "CLOSED") && typeof meta3.postMarketPrice === "number" && Number.isFinite(meta3.postMarketPrice) && meta3.postMarketPrice > 0) {
+      extendedPrice = round4(meta3.postMarketPrice * scale);
+      quoteTimeSec = meta3.postMarketTime ?? quoteTimeSec;
+    } else if ((marketState === "PRE" || marketState === "PREPRE") && typeof meta3.preMarketPrice === "number" && Number.isFinite(meta3.preMarketPrice) && meta3.preMarketPrice > 0) {
+      extendedPrice = round4(meta3.preMarketPrice * scale);
+      quoteTimeSec = meta3.preMarketTime ?? quoteTimeSec;
+    } else if (typeof meta3.postMarketPrice === "number" && Number.isFinite(meta3.postMarketPrice) && meta3.postMarketPrice > 0) {
+      extendedPrice = round4(meta3.postMarketPrice * scale);
+      quoteTimeSec = meta3.postMarketTime ?? quoteTimeSec;
+    } else if (typeof meta3.preMarketPrice === "number" && Number.isFinite(meta3.preMarketPrice) && meta3.preMarketPrice > 0) {
+      extendedPrice = round4(meta3.preMarketPrice * scale);
+      quoteTimeSec = meta3.preMarketTime ?? quoteTimeSec;
+    }
+    let quoteTime = typeof quoteTimeSec === "number" && Number.isFinite(quoteTimeSec) && quoteTimeSec > 0 ? new Date(quoteTimeSec * 1e3).toISOString() : null;
+    const isEquityLike = !symbol2.startsWith("^") && !symbol2.endsWith("=X");
+    if (extendedPrice === null && isEquityLike && (marketState === "PRE" || marketState === "POST")) {
+      const intraday = await fetchIntradayExtendedQuote(symbol2, scale, timeoutMs, fetchImpl);
+      if (intraday.extendedPrice !== null) {
+        extendedPrice = intraday.extendedPrice;
+        if (intraday.quoteTime) quoteTime = intraday.quoteTime;
+      }
+    }
+    const rawCloses = result?.indicators?.quote?.[0]?.close ?? [];
+    const sparkline = rawCloses.filter((v) => typeof v === "number" && Number.isFinite(v) && v > 0).map((v) => round4(v * scale)).slice(-22);
+    let prevClose = null;
+    if (sparkline.length >= 2) {
+      const lastPt = sparkline[sparkline.length - 1];
+      const sameAsLast = Math.abs(price - lastPt) / price < 5e-4;
+      prevClose = sameAsLast ? sparkline[sparkline.length - 2] : lastPt;
+    } else if (typeof meta3.previousClose === "number" && meta3.previousClose > 0) {
+      prevClose = meta3.previousClose * scale;
+    }
+    const anchor1mRaw = typeof meta3.chartPreviousClose === "number" && meta3.chartPreviousClose > 0 ? meta3.chartPreviousClose * scale : sparkline[0];
+    const change1d = prevClose && prevClose > 0 ? round2((price - prevClose) / prevClose * 100) : null;
+    const change1m = anchor1mRaw && anchor1mRaw > 0 ? round2((price - anchor1mRaw) / anchor1mRaw * 100) : null;
+    const high52w = typeof meta3.fiftyTwoWeekHigh === "number" && Number.isFinite(meta3.fiftyTwoWeekHigh) && meta3.fiftyTwoWeekHigh > 0 ? round4(meta3.fiftyTwoWeekHigh * scale) : null;
+    const low52w = typeof meta3.fiftyTwoWeekLow === "number" && Number.isFinite(meta3.fiftyTwoWeekLow) && meta3.fiftyTwoWeekLow > 0 ? round4(meta3.fiftyTwoWeekLow * scale) : null;
+    return {
+      symbol: symbol2,
+      price,
+      regular_price: price,
+      extended_price: extendedPrice,
+      market_state: marketState,
+      marketState,
+      quote_time: quoteTime,
+      fifty_two_week_high: high52w,
+      fifty_two_week_low: low52w,
+      currency,
+      sparkline,
+      change_1d_pct: change1d,
+      change_1m_pct: change1m
+    };
+  } catch {
+    return null;
+  }
+}
+async function fetchQuotesBatch(symbols, concurrency = 4, fetchImpl = fetch) {
+  const unique = Array.from(new Set(symbols.map((s) => s.trim()).filter(Boolean)));
+  const out = /* @__PURE__ */ new Map();
+  let idx = 0;
+  async function worker() {
+    while (idx < unique.length) {
+      const current = unique[idx];
+      idx += 1;
+      if (!current) continue;
+      const res = await fetchYahooChartQuote(current, 7e3, fetchImpl);
+      if (res) {
+        out.set(current, res);
+      }
+    }
+  }
+  const workers = Array.from({ length: Math.min(concurrency, Math.max(1, unique.length)) }, () => worker());
+  await Promise.all(workers);
+  return out;
+}
+async function fetchFxRatesToBase(currencies, baseCurrency, fallbackRates, fetchImpl = fetch) {
+  const base = baseCurrency.toUpperCase();
+  const out = { ...fallbackRates, [base]: 1 };
+  const needed = Array.from(new Set(currencies.map((c) => c.toUpperCase()).filter((c) => c !== base)));
+  for (const ccy of needed) {
+    const directSym = ccy === "USD" ? `${base}=X` : `${ccy}${base}=X`;
+    const direct = await fetchYahooChartQuote(directSym, 7e3, fetchImpl);
+    if (direct && direct.price > 0) {
+      out[ccy] = direct.price;
+      continue;
+    }
+    const inverseSym = `${base}${ccy}=X`;
+    const inverse = await fetchYahooChartQuote(inverseSym, 7e3, fetchImpl);
+    if (inverse && inverse.price > 0) {
+      out[ccy] = 1 / inverse.price;
+    }
+  }
+  return out;
+}
+function classifyMacroRegime(vix, hyCreditRatio) {
+  if (vix !== null && (vix >= 35 || vix >= 28 && hyCreditRatio !== null && hyCreditRatio < 0.78)) {
+    return "STRESS";
+  }
+  if (vix !== null && vix >= 28) {
+    return "HIGH_VOL";
+  }
+  if (vix !== null && vix >= 20) {
+    return "ELEVATED";
+  }
+  return "CALM";
+}
+async function fetchMacroRegime(opts) {
+  const fetchImpl = opts?.fetchImpl ?? fetch;
+  const nowIso = opts?.nowIso ?? (/* @__PURE__ */ new Date()).toISOString();
+  const quotes = await fetchQuotesBatch(["^VIX", "^TNX", "^IRX", "HYG", "IEF", "DX-Y.NYB"], 6, fetchImpl);
+  const vixRaw = quotes.get("^VIX")?.price ?? null;
+  const tnxRaw = quotes.get("^TNX")?.price ?? null;
+  const irxRaw = quotes.get("^IRX")?.price ?? null;
+  const hygRaw = quotes.get("HYG")?.price ?? null;
+  const iefRaw = quotes.get("IEF")?.price ?? null;
+  const dxyRaw = quotes.get("DX-Y.NYB")?.price ?? null;
+  const normalizeYield = (val) => {
+    if (val === null || !Number.isFinite(val)) return null;
+    return round2(val > 25 ? val / 10 : val);
+  };
+  const vix = vixRaw !== null ? round2(vixRaw) : null;
+  const us10yPct = normalizeYield(tnxRaw);
+  const us3mPct = normalizeYield(irxRaw);
+  const hyCreditRatio = hygRaw !== null && iefRaw !== null && iefRaw > 0 ? round4(hygRaw / iefRaw) : null;
+  const dxy = dxyRaw !== null ? round2(dxyRaw) : null;
+  const regimeLabel = classifyMacroRegime(vix, hyCreditRatio);
+  const noteParts = [];
+  if (us10yPct !== null && us3mPct !== null) {
+    const slopeBps = Math.round((us10yPct - us3mPct) * 100);
+    noteParts.push(`10Y-3M slope ${slopeBps >= 0 ? "+" : ""}${slopeBps} bps`);
+  }
+  if (vix !== null && vix >= 28) {
+    noteParts.push("High volatility regime \u2014 stage tranches 2-3 weeks apart");
+  }
+  return MacroRegimeSchema.parse({
+    updated_at: nowIso,
+    vix,
+    us10y_pct: us10yPct,
+    us3m_pct: us3mPct,
+    hy_credit_ratio: hyCreditRatio,
+    dxy,
+    regime_label: regimeLabel,
+    notes: noteParts.length > 0 ? noteParts.join("; ") : null
+  });
+}
+async function fetchYahooHistory(symbol2, range = "5y", interval = "1wk", timeoutMs = 9e3, fetchImpl = fetch) {
+  const url2 = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol2)}?interval=${encodeURIComponent(interval)}&range=${encodeURIComponent(range)}`;
+  try {
+    const resp = await fetchImpl(url2, {
+      headers: YF_HEADERS,
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const result = data?.chart?.result?.[0];
+    if (!result) return null;
+    const timestamps = result.timestamp ?? [];
+    const adjCloses = result.indicators?.adjclose?.[0]?.adjclose ?? [];
+    const rawCloses = result.indicators?.quote?.[0]?.close ?? [];
+    if (timestamps.length === 0) return null;
+    let scale = 1;
+    let currency = (result.meta?.currency ?? "USD").trim();
+    if (currency === "GBp" || currency === "GBX") {
+      scale = 0.01;
+      currency = "GBP";
+    } else {
+      currency = currency.toUpperCase();
+    }
+    if (!/^[A-Z]{3}$/.test(currency)) {
+      currency = "USD";
+    }
+    const byDate = /* @__PURE__ */ new Map();
+    for (let i = 0; i < timestamps.length; i += 1) {
+      const ts = timestamps[i];
+      if (typeof ts !== "number" || !Number.isFinite(ts)) continue;
+      const adj = adjCloses[i];
+      const raw = rawCloses[i];
+      const val = typeof adj === "number" && Number.isFinite(adj) && adj > 0 ? adj : typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : null;
+      if (val === null) continue;
+      const dateStr = new Date(ts * 1e3).toISOString().slice(0, 10);
+      byDate.set(dateStr, round4(val * scale));
+    }
+    const points = Array.from(byDate.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date5, close]) => ({ date: date5, close }));
+    if (points.length < 2) return null;
+    return { symbol: symbol2, currency, points };
+  } catch {
+    return null;
+  }
+}
+async function fetchYahooDailyBenchmark(symbol2, range = "1y", timeoutMs = 9e3, fetchImpl = fetch) {
+  return fetchYahooHistory(symbol2, range, "1d", timeoutMs, fetchImpl);
+}
+function fxHistorySymbolToUsd(currency) {
+  const ccy = currency.trim().toUpperCase();
+  if (!/^[A-Z]{3}$/.test(ccy) || ccy === "USD") return null;
+  return `${ccy}USD=X`;
+}
+async function ensureHistorySeries(dataDir, symbols, opts) {
+  const nowMs = opts?.nowMs ?? Date.now();
+  const concurrency = opts?.concurrency ?? 4;
+  const fetchImpl = opts?.fetchImpl ?? fetch;
+  const cache = loadHistoryCache(dataDir);
+  const fxSymbols = (opts?.fxCurrencies ?? []).map((c) => fxHistorySymbolToUsd(c)).filter((s) => Boolean(s));
+  const unique = Array.from(new Set([...symbols, ...fxSymbols].map((s) => s.trim()).filter(Boolean)));
+  const toFetch = [];
+  for (const sym of unique) {
+    const existing = cache.series[sym];
+    if (existing && existing.points.length >= 10) {
+      const updatedMs = Date.parse(existing.updated_at);
+      const ageMs = Number.isFinite(updatedMs) ? nowMs - updatedMs : Number.POSITIVE_INFINITY;
+      if (existing.source === "manual") continue;
+      if (existing.source === "ibkr" && ageMs < IBKR_HISTORY_TTL_MS) {
+        continue;
+      }
+      if (existing.source === "yahoo" && ageMs < YAHOO_HISTORY_TTL_MS) {
+        continue;
+      }
+    }
+    toFetch.push(sym);
+  }
+  let dirty = false;
+  const nowIso = new Date(nowMs).toISOString();
+  if (toFetch.length > 0) {
+    let idx = 0;
+    async function worker() {
+      while (idx < toFetch.length) {
+        const sym = toFetch[idx];
+        idx += 1;
+        if (!sym) continue;
+        const fetched = await fetchYahooHistory(sym, "5y", "1wk", 9e3, fetchImpl);
+        if (fetched && fetched.points.length >= 2) {
+          cache.series[sym] = {
+            symbol: sym,
+            currency: fetched.currency,
+            source: "yahoo",
+            updated_at: nowIso,
+            points: fetched.points
+          };
+          dirty = true;
+        }
+      }
+    }
+    const workers = Array.from({ length: Math.min(concurrency, toFetch.length) }, () => worker());
+    await Promise.all(workers);
+  }
+  if (opts?.dailyBenchmarkSymbol?.trim()) {
+    const benchSym = opts.dailyBenchmarkSymbol.trim();
+    const dailyKey = `daily:${benchSym}`;
+    const existingDaily = cache.series[dailyKey];
+    const updatedMs = existingDaily ? Date.parse(existingDaily.updated_at) : Number.NaN;
+    const ageMs = Number.isFinite(updatedMs) ? nowMs - updatedMs : Number.POSITIVE_INFINITY;
+    if (!existingDaily || existingDaily.points.length < 10 || ageMs >= YAHOO_HISTORY_TTL_MS) {
+      const fetchedDaily = await fetchYahooDailyBenchmark(benchSym, "1y", 9e3, fetchImpl);
+      if (fetchedDaily && fetchedDaily.points.length >= 2) {
+        cache.series[dailyKey] = {
+          symbol: benchSym,
+          currency: fetchedDaily.currency,
+          source: "yahoo",
+          updated_at: nowIso,
+          points: fetchedDaily.points
+        };
+        dirty = true;
+      }
+    }
+  }
+  if (dirty) {
+    cache.updated_at = nowIso;
+    return saveHistoryCache(dataDir, cache);
+  }
+  return cache;
+}
+
 // src/server/engine.ts
 function inferSecurityMeta(ticker, isin = "") {
   const sym = ticker.trim().toUpperCase();
@@ -38622,6 +39468,17 @@ Synthetic open-source sample dossier illustrating a **Bench** candidate with non
         iv_skew_pct: 1.7,
         note: "Sample post-earnings ATM straddle pricing \xB16.0% implied move."
       },
+      consensus: {
+        as_of: "2026-11-23",
+        ntm_rev_b: 304.5,
+        ntm_rev_growth_pct: 13.5,
+        ntm_eps: 14.1,
+        fy1_eps_est: 13.8,
+        fy2_eps_est: 15.9,
+        eps_revision_90d_pct: 2.8,
+        target_price_mean: 545,
+        analyst_count: 54
+      },
       themes: ["Enterprise Cloud Infrastructure", "AI Productivity Software", "Hyperscale Data Centers"],
       connections: [
         { ticker: "AMZN", name: "Amazon Web Services", relation: "competitor" },
@@ -38688,11 +39545,18 @@ Synthetic open-source sample dossier illustrating a **Bench** candidate with non
         dio_days: null,
         ocf_to_ni_pct: 131.54,
         fcf_margin_pct: 24.45,
+        owner_earnings_margin_pct: 20.51,
         sbc_pct_rev: 3.94,
+        roic_pct: 28.4,
+        incremental_roic_pct: 24.1,
+        accruals_ratio_pct: -5.4,
+        quality_grade: "A",
+        quality_flags: [],
         net_cash_b: 32,
         diluted_shares_yoy_pct: -0.53,
         ttm_eps: 13.2,
         ttm_fcf_per_share: 9.5,
+        ttm_owner_earnings_per_share: 8.02,
         ttm_rev_per_share: 37.11
       }
     },
@@ -38717,11 +39581,18 @@ Synthetic open-source sample dossier illustrating a **Bench** candidate with non
         dio_days: 10.2,
         ocf_to_ni_pct: 112.41,
         fcf_margin_pct: 27.35,
+        owner_earnings_margin_pct: 24.41,
         sbc_pct_rev: 2.94,
+        roic_pct: 49.2,
+        incremental_roic_pct: 42.5,
+        accruals_ratio_pct: -3.1,
+        quality_grade: "A",
+        quality_flags: [],
         net_cash_b: 48,
         diluted_shares_yoy_pct: -1.95,
         ttm_eps: 7.4,
         ttm_fcf_per_share: 7.35,
+        ttm_owner_earnings_per_share: 6.57,
         ttm_rev_per_share: 27.15
       }
     }
@@ -39112,6 +39983,7 @@ async function buildDashboardPayload(opts) {
       theses: [],
       catalysts,
       edgar: edgarRaw,
+      forecast: null,
       lab: {
         benchmark_summary: benchHurdle,
         active_count: 0,
@@ -39681,7 +40553,9 @@ async function buildDashboardPayload(opts) {
       }
     );
     const scenarioSummary = computeScenarioSummary(price, model, taxInfo, { isEtf, fundamentals });
-    const reverseDcf = computeReverseDcf(price, model, taxInfo);
+    const reverseDcf = computeReverseDcf(price, model, taxInfo, {
+      consensusRevGrowthPct: intel?.consensus?.ntm_rev_growth_pct ?? null
+    });
     const tickerSeries = lookupHistorySeries(historyCache, yfSym, sym);
     const valuationBands = computeValuationBands(tickerSeries, fundamentals, price);
     const reentryPrice = typeof fm.reentry_price === "number" && Number.isFinite(fm.reentry_price) ? fm.reentry_price : null;
@@ -39901,6 +40775,51 @@ async function buildDashboardPayload(opts) {
   };
   const totalPnlUsd = totPosUsd - totCostUsd;
   const totalPnlPct = totCostUsd > 0 ? totalPnlUsd / totCostUsd * 100 : 0;
+  let defaultForecast = null;
+  try {
+    const forecastThesisRefs = thesesOut.map((t) => {
+      const m = isDemo ? demoState?.dossierModels[t.ticker] ?? null : loadDossierModel(opts.dataDir, t.ticker);
+      return {
+        ticker: t.ticker,
+        yf_symbol: t.yf_symbol,
+        currency: t.currency,
+        us_situs: t.us_situs,
+        price: t.price,
+        max_weight_pct: t.max_weight_pct,
+        is_etf: etfTickersSet.has(t.ticker) || (positionAssetTypeMap.get(t.ticker) ?? "").toUpperCase().includes("ETF") || t.ticker === profile.benchmark.ticker.toUpperCase(),
+        accumulating: m?.accumulating ?? ((positionAssetTypeMap.get(t.ticker) ?? "").toUpperCase().includes("UCITS") || t.ticker === "VWRA"),
+        scenario_summary: t.scenario_summary,
+        model: m,
+        quality_grade: t.fundamentals_summary?.latest_ratios.quality_grade ?? null
+      };
+    });
+    const defaultForecastReq = ForecastRequestSchema.parse({
+      horizon_years: 5,
+      include_external_wealth: profile.external_exposure.enabled,
+      apply_recommended_rotations: true,
+      actions: [],
+      regime_vol_multiplier: 1,
+      simulations: 800
+    });
+    defaultForecast = runPortfolioForecast(
+      defaultForecastReq,
+      portfolio,
+      effectiveProfileForRotation,
+      forecastThesisRefs,
+      rotationQueue,
+      etfCfg,
+      historyCache,
+      fxRates,
+      {
+        defaultRfPct: macroRegime?.us3m_pct ?? 3.8,
+        vix: vixVal,
+        liveExternalBase: extLiveMarked ? extTotalBase - extPortfolioBase : null,
+        livePricesMap: currentPricesMap
+      }
+    );
+  } catch {
+    defaultForecast = null;
+  }
   return {
     initialized: true,
     is_demo: isDemo,
@@ -39970,6 +40889,7 @@ async function buildDashboardPayload(opts) {
     theses: thesesOut,
     catalysts,
     edgar: edgarState,
+    forecast: defaultForecast,
     lab
   };
 }
@@ -40138,6 +41058,110 @@ async function executePortfolioBacktest(opts) {
   payload.lab.latest_backtest = backtest;
   return { backtest, payload };
 }
+async function executePortfolioForecast(opts) {
+  const req = ForecastRequestSchema.parse(opts.rawRequest);
+  const isDemo = Boolean(req.demo);
+  const payload = await buildDashboardPayload({
+    dataDir: opts.dataDir,
+    pluginRoot: opts.pluginRoot,
+    live: false,
+    useCache: !isDemo,
+    activeTab: "forecast",
+    demo: isDemo
+  });
+  if (!payload.initialized) {
+    throw new Error("Portfolio is not initialized yet. Save positions via update_portfolio_positions or use Demo Mode.");
+  }
+  const demoState = isDemo ? buildDemoState() : null;
+  const portfolio = demoState ? demoState.portfolio : loadPortfolio(opts.dataDir);
+  if (!portfolio) {
+    throw new Error("Portfolio file not found.");
+  }
+  const etfCfg = loadEtfWeights(opts.dataDir, opts.pluginRoot);
+  const etfSet = new Set(Object.keys(etfCfg.etf_weights ?? {}).map((k) => k.toUpperCase()));
+  const posAssetMap = new Map(portfolio.positions.map((p) => [p.ticker.toUpperCase(), p.asset_type]));
+  let historyCache;
+  if (isDemo) {
+    historyCache = demoState.historyCache;
+  } else {
+    const benchSym = payload.profile.benchmark.yf_symbol || payload.profile.benchmark.ticker;
+    const symbolsToEnsure = [benchSym];
+    const fxCurrencies = /* @__PURE__ */ new Set();
+    for (const p of portfolio.positions) {
+      symbolsToEnsure.push(p.yf_symbol || p.ticker);
+      if (p.currency && p.currency !== "USD") fxCurrencies.add(p.currency);
+    }
+    for (const act of req.actions) {
+      if (act.type === "buy") {
+        const th = payload.theses.find((t) => t.ticker === act.ticker);
+        symbolsToEnsure.push(act.yf_symbol || th?.yf_symbol || act.ticker);
+        if (act.currency && act.currency !== "USD") fxCurrencies.add(act.currency);
+      } else if (act.type === "tax_swap" && act.target_ticker) {
+        const th = payload.theses.find((t) => t.ticker === act.target_ticker);
+        symbolsToEnsure.push(th?.yf_symbol || act.target_ticker);
+      }
+    }
+    if (req.include_external_wealth && payload.profile.external_exposure.enabled && payload.profile.external_exposure.ticker) {
+      symbolsToEnsure.push(payload.profile.external_exposure.ticker);
+    }
+    historyCache = await ensureHistorySeries(opts.dataDir, symbolsToEnsure, {
+      fxCurrencies: Array.from(fxCurrencies),
+      dailyBenchmarkSymbol: benchSym
+    });
+  }
+  const effectiveProfile = payload.summary.ext_live_marked ? {
+    ...payload.profile,
+    external_exposure: {
+      ...payload.profile.external_exposure,
+      amount_base: payload.summary.ext_total_base - payload.summary.ext_portfolio_base
+    }
+  } : payload.profile;
+  const livePricesMap = /* @__PURE__ */ new Map();
+  for (const pos of payload.portfolio.positions) {
+    livePricesMap.set(pos.ticker, pos.price);
+    if (pos.yf_symbol) livePricesMap.set(pos.yf_symbol, pos.price);
+  }
+  for (const t of payload.theses) {
+    if (t.price !== null) {
+      livePricesMap.set(t.ticker, t.price);
+      if (t.yf_symbol) livePricesMap.set(t.yf_symbol, t.price);
+    }
+  }
+  const thesisRefs = payload.theses.map((t) => {
+    const model = isDemo ? demoState?.dossierModels[t.ticker] ?? null : loadDossierModel(opts.dataDir, t.ticker);
+    return {
+      ticker: t.ticker,
+      yf_symbol: t.yf_symbol,
+      currency: t.currency,
+      us_situs: t.us_situs,
+      price: t.price,
+      max_weight_pct: t.max_weight_pct,
+      is_etf: etfSet.has(t.ticker) || (posAssetMap.get(t.ticker) ?? "").toUpperCase().includes("ETF") || t.ticker === payload.profile.benchmark.ticker.toUpperCase(),
+      accumulating: model?.accumulating ?? ((posAssetMap.get(t.ticker) ?? "").toUpperCase().includes("UCITS") || t.ticker === "VWRA"),
+      scenario_summary: t.scenario_summary,
+      model,
+      quality_grade: t.fundamentals_summary?.latest_ratios.quality_grade ?? null
+    };
+  });
+  const forecast = runPortfolioForecast(
+    req,
+    portfolio,
+    effectiveProfile,
+    thesisRefs,
+    payload.rotation_queue,
+    etfCfg,
+    historyCache,
+    payload.fx_rates,
+    {
+      defaultRfPct: payload.macro_regime?.us3m_pct ?? 3.8,
+      vix: payload.vix,
+      liveExternalBase: payload.summary.ext_live_marked ? payload.summary.ext_total_base - payload.summary.ext_portfolio_base : null,
+      livePricesMap
+    }
+  );
+  payload.forecast = forecast;
+  return { forecast, payload };
+}
 function buildSummaryText(payload) {
   if (!payload.initialized) {
     return `Investment OS (${payload.generated_at}, Base: ${payload.base_currency}): No portfolio saved yet. Prompt the user to onboard via update_profile and update_portfolio_positions, or let them click Preview Sample Portfolio in the sidecar.`;
@@ -40176,6 +41200,12 @@ function buildSummaryText(payload) {
   lines.push(
     `- Research Graph: Active ${payload.lab.active_count}/${payload.lab.active_cap} \xB7 Bench ${payload.lab.bench_count} \xB7 Passed ${payload.lab.passed_count} \xB7 Themes ${payload.themes.length} \xB7 Unack Alerts ${unackAlerts} \xB7 Needs Re-Test ${payload.lab.needs_retest_count}`
   );
+  if (payload.forecast) {
+    const fc = payload.forecast;
+    lines.push(
+      `- ${fc.horizon_years}Y Forward Forecast (Base P50): ${fc.baseline.ending_p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} -> ${fc.simulated.ending_p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy} (${fc.deltas.p50_base >= 0 ? "+" : ""}${fc.deltas.p50_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy} with recommended rotations; P10 downside ${fc.deltas.p10_base >= 0 ? "+" : ""}${fc.deltas.p10_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy})`
+    );
+  }
   lines.push(`- Risk Cap Breaches (${breaches.length}): ${breaches.length > 0 ? breaches.join(", ") : "None"}`);
   if (payload.stale_tickers.length > 0) {
     lines.push(`- Stale / Fallback Quotes: ${payload.stale_tickers.join(", ")}`);
@@ -40618,6 +41648,16 @@ var ST_DEBT_CONCEPTS = [
   { taxonomy: "us-gaap", tag: "CommercialPaper" },
   { taxonomy: "ifrs-full", tag: "CurrentBorrowings" }
 ];
+var TOTAL_ASSETS_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "Assets" },
+  { taxonomy: "ifrs-full", tag: "Assets" }
+];
+var STOCKHOLDERS_EQUITY_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "StockholdersEquity" },
+  { taxonomy: "us-gaap", tag: "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest" },
+  { taxonomy: "ifrs-full", tag: "EquityAttributableToOwnersOfParent" },
+  { taxonomy: "ifrs-full", tag: "Equity" }
+];
 function round3(val, decimals = 2) {
   const factor = 10 ** decimals;
   return Math.round((val + Number.EPSILON) * factor) / factor;
@@ -40824,22 +41864,45 @@ function computePeriodRatios(period, isAnnual) {
   const inv = period.inventory_m ?? null;
   const cash = period.cash_and_st_inv_m ?? null;
   const debt = period.total_debt_m ?? null;
+  const totalAssets = period.total_assets_m ?? null;
+  const equity = period.stockholders_equity_m ?? null;
   const shares = period.diluted_shares_m ?? null;
   const eps = period.eps_diluted ?? (ni !== null && shares !== null && shares > 0 ? round3(ni / shares, 2) : null);
   const daysBasis = isAnnual ? 365 : 91.25;
+  const annFactor = isAnnual ? 1 : 4;
   const grossMarginPct = rev !== null && rev > 0 && gp !== null ? round3(gp / rev * 100, 2) : null;
   const operatingMarginPct = rev !== null && rev > 0 && opInc !== null ? round3(opInc / rev * 100, 2) : null;
   const fcfMarginPct = rev !== null && rev > 0 && fcf !== null ? round3(fcf / rev * 100, 2) : null;
+  const ownerEarningsM = fcf !== null && sbc !== null ? round3(fcf - sbc, 2) : fcf;
+  const ownerEarningsMarginPct = rev !== null && rev > 0 && ownerEarningsM !== null ? round3(ownerEarningsM / rev * 100, 2) : null;
   const ocfToNiPct = ni !== null && ni > 0 && ocf !== null ? round3(ocf / ni * 100, 2) : null;
   const sbcPctRev = rev !== null && rev > 0 && sbc !== null ? round3(sbc / rev * 100, 2) : null;
   const dsoDays = rev !== null && rev > 0 && ar !== null ? round3(ar / rev * daysBasis, 1) : null;
   const dioDays = cogs !== null && cogs > 0 && inv !== null ? round3(inv / cogs * daysBasis, 1) : null;
   const netCashB = cash !== null ? round3((cash - (debt ?? 0)) / 1e3, 3) : null;
+  let investedCapitalM = null;
+  if (equity !== null) {
+    const rawIc = equity + (debt ?? 0) - (cash ?? 0);
+    const totalCapital = equity + (debt ?? 0);
+    if (rawIc > Math.max(10, totalCapital * 0.1)) {
+      investedCapitalM = round3(rawIc, 2);
+    } else if (totalCapital > 0) {
+      investedCapitalM = round3(totalCapital, 2);
+    }
+  }
+  const nopatM = opInc !== null ? opInc * 0.79 : null;
+  const roicPct = nopatM !== null && investedCapitalM !== null && investedCapitalM > 0 ? round3(Math.max(-200, Math.min(250, nopatM * annFactor / investedCapitalM * 100)), 2) : null;
+  const accrualsRatioPct = ni !== null && ocf !== null && totalAssets !== null && totalAssets > 0 ? round3((ni - ocf) * annFactor / totalAssets * 100, 2) : null;
   return {
     ...period,
     gross_profit_m: gp,
     cogs_m: cogs,
     fcf_m: fcf,
+    owner_earnings_m: ownerEarningsM,
+    owner_earnings_margin_pct: ownerEarningsMarginPct,
+    invested_capital_m: investedCapitalM,
+    roic_pct: roicPct,
+    accruals_ratio_pct: accrualsRatioPct,
     eps_diluted: eps,
     net_cash_b: netCashB,
     gross_margin_pct: grossMarginPct,
@@ -40876,23 +41939,44 @@ function deriveLatestRatios(quarterly, annual, overrides) {
   }
   let ttmEps = null;
   let ttmFcfPerShare = null;
+  let ttmOwnerEarningsPerShare = null;
   let ttmRevPerShare = null;
+  let ttmOwnerEarningsMarginPct = latest?.owner_earnings_margin_pct ?? null;
+  let ttmRoicPct = latest?.roic_pct ?? null;
+  let ttmAccrualsPct = latest?.accruals_ratio_pct ?? null;
   if (quarterly.length >= 4) {
     const q4 = quarterly.slice(0, 4);
     const shares = q4[0]?.diluted_shares_m ?? annual[0]?.diluted_shares_m ?? null;
     if (q4.every((q) => typeof q.eps_diluted === "number")) {
       ttmEps = round3(q4.reduce((acc, q) => acc + (q.eps_diluted ?? 0), 0), 2);
     } else if (shares && shares > 0 && q4.every((q) => typeof q.net_income_m === "number")) {
-      const ttmNi = q4.reduce((acc, q) => acc + (q.net_income_m ?? 0), 0);
-      ttmEps = round3(ttmNi / shares, 2);
+      const ttmNi2 = q4.reduce((acc, q) => acc + (q.net_income_m ?? 0), 0);
+      ttmEps = round3(ttmNi2 / shares, 2);
     }
-    if (shares && shares > 0 && q4.every((q) => typeof q.fcf_m === "number")) {
-      const ttmFcf = q4.reduce((acc, q) => acc + (q.fcf_m ?? 0), 0);
+    const ttmRev = q4.every((q) => typeof q.revenue_m === "number") ? q4.reduce((acc, q) => acc + (q.revenue_m ?? 0), 0) : null;
+    const ttmFcf = q4.every((q) => typeof q.fcf_m === "number") ? q4.reduce((acc, q) => acc + (q.fcf_m ?? 0), 0) : null;
+    const ttmSbc = q4.every((q) => typeof q.sbc_m === "number") ? q4.reduce((acc, q) => acc + (q.sbc_m ?? 0), 0) : null;
+    const ttmOp = q4.every((q) => typeof q.operating_income_m === "number") ? q4.reduce((acc, q) => acc + (q.operating_income_m ?? 0), 0) : null;
+    const ttmNi = q4.every((q) => typeof q.net_income_m === "number") ? q4.reduce((acc, q) => acc + (q.net_income_m ?? 0), 0) : null;
+    const ttmOcf = q4.every((q) => typeof q.ocf_m === "number") ? q4.reduce((acc, q) => acc + (q.ocf_m ?? 0), 0) : null;
+    if (shares && shares > 0 && ttmFcf !== null) {
       ttmFcfPerShare = round3(ttmFcf / shares, 2);
+      const ttmOe = ttmSbc !== null ? ttmFcf - ttmSbc : ttmFcf;
+      ttmOwnerEarningsPerShare = round3(ttmOe / shares, 2);
+      if (ttmRev && ttmRev > 0) {
+        ttmOwnerEarningsMarginPct = round3(ttmOe / ttmRev * 100, 2);
+      }
     }
-    if (shares && shares > 0 && q4.every((q) => typeof q.revenue_m === "number")) {
-      const ttmRev = q4.reduce((acc, q) => acc + (q.revenue_m ?? 0), 0);
+    if (shares && shares > 0 && ttmRev !== null) {
       ttmRevPerShare = round3(ttmRev / shares, 2);
+    }
+    const latestIc = q4[0]?.invested_capital_m ?? annual[0]?.invested_capital_m ?? null;
+    if (ttmOp !== null && latestIc && latestIc > 0) {
+      ttmRoicPct = round3(Math.max(-200, Math.min(250, ttmOp * 0.79 / latestIc * 100)), 2);
+    }
+    const latestAssets = q4[0]?.total_assets_m ?? annual[0]?.total_assets_m ?? null;
+    if (ttmNi !== null && ttmOcf !== null && latestAssets && latestAssets > 0) {
+      ttmAccrualsPct = round3((ttmNi - ttmOcf) / latestAssets * 100, 2);
     }
   } else if (annual[0]) {
     const fy = annual[0];
@@ -40900,8 +41984,62 @@ function deriveLatestRatios(quarterly, annual, overrides) {
     ttmEps = fy.eps_diluted ?? null;
     if (shares && shares > 0) {
       ttmFcfPerShare = fy.fcf_m != null ? round3(fy.fcf_m / shares, 2) : null;
+      ttmOwnerEarningsPerShare = fy.owner_earnings_m != null ? round3(fy.owner_earnings_m / shares, 2) : ttmFcfPerShare;
       ttmRevPerShare = fy.revenue_m != null ? round3(fy.revenue_m / shares, 2) : null;
     }
+  }
+  let incrementalRoicPct = null;
+  if (annual.length >= 2) {
+    const cur = annual[0];
+    const prev = annual[Math.min(2, annual.length - 1)];
+    if (typeof cur.operating_income_m === "number" && typeof prev.operating_income_m === "number" && typeof cur.invested_capital_m === "number" && typeof prev.invested_capital_m === "number") {
+      const dIc = cur.invested_capital_m - prev.invested_capital_m;
+      const dNopat = (cur.operating_income_m - prev.operating_income_m) * 0.79;
+      if (dIc > Math.max(25, prev.invested_capital_m * 0.05)) {
+        incrementalRoicPct = round3(Math.max(-200, Math.min(250, dNopat / dIc * 100)), 2);
+      }
+    }
+  }
+  const qualityFlags = [];
+  let qualityScore = 0;
+  let qualityChecks = 0;
+  if (ttmRoicPct !== null) {
+    qualityChecks += 1;
+    if (ttmRoicPct >= 20) qualityScore += 2;
+    else if (ttmRoicPct >= 12) qualityScore += 1;
+    else if (ttmRoicPct < 8) qualityFlags.push(`Low ROIC (${ttmRoicPct.toFixed(1)}% < 8% WACC proxy)`);
+  }
+  if (ttmOwnerEarningsMarginPct !== null) {
+    qualityChecks += 1;
+    if (ttmOwnerEarningsMarginPct >= 18) qualityScore += 2;
+    else if (ttmOwnerEarningsMarginPct >= 8) qualityScore += 1;
+    else if (ttmOwnerEarningsMarginPct < 0) qualityFlags.push(`Negative SBC-adjusted Owner Earnings (${ttmOwnerEarningsMarginPct.toFixed(1)}%)`);
+  }
+  const ocfNi = latest?.ocf_to_ni_pct ?? null;
+  if (ocfNi !== null) {
+    qualityChecks += 1;
+    if (ocfNi >= 100) qualityScore += 2;
+    else if (ocfNi >= 80) qualityScore += 1;
+    else qualityFlags.push(`Weak cash conversion (OCF/NI ${ocfNi.toFixed(0)}% < 80%)`);
+  }
+  if (ttmAccrualsPct !== null) {
+    qualityChecks += 1;
+    if (ttmAccrualsPct <= 0) qualityScore += 2;
+    else if (ttmAccrualsPct <= 4) qualityScore += 1;
+    else qualityFlags.push(`Elevated accruals (${ttmAccrualsPct.toFixed(1)}% of assets > 4%)`);
+  }
+  const sbcPct = latest?.sbc_pct_rev ?? null;
+  if (sbcPct !== null && sbcPct >= 8) {
+    qualityFlags.push(`Heavy stock-based comp (${sbcPct.toFixed(1)}% of revenue)`);
+    qualityScore = Math.max(0, qualityScore - 1);
+  }
+  if (dilutedSharesYoyPct !== null && dilutedSharesYoyPct >= 3) {
+    qualityFlags.push(`Share dilution (+${dilutedSharesYoyPct.toFixed(1)}% YoY)`);
+  }
+  let qualityGrade = null;
+  if (qualityChecks >= 2) {
+    const pct = qualityScore / (qualityChecks * 2);
+    qualityGrade = pct >= 0.78 ? "A" : pct >= 0.52 ? "B" : pct >= 0.28 ? "C" : "D";
   }
   const ratios = {
     gross_margin_pct: latest?.gross_margin_pct ?? null,
@@ -40910,11 +42048,18 @@ function deriveLatestRatios(quarterly, annual, overrides) {
     dio_days: latest?.dio_days ?? null,
     ocf_to_ni_pct: latest?.ocf_to_ni_pct ?? null,
     fcf_margin_pct: latest?.fcf_margin_pct ?? null,
+    owner_earnings_margin_pct: ttmOwnerEarningsMarginPct,
     sbc_pct_rev: latest?.sbc_pct_rev ?? null,
+    roic_pct: ttmRoicPct,
+    incremental_roic_pct: incrementalRoicPct,
+    accruals_ratio_pct: ttmAccrualsPct,
+    quality_grade: qualityGrade,
+    quality_flags: qualityFlags,
     net_cash_b: latest?.net_cash_b ?? null,
     diluted_shares_yoy_pct: dilutedSharesYoyPct,
     ttm_eps: ttmEps,
     ttm_fcf_per_share: ttmFcfPerShare,
+    ttm_owner_earnings_per_share: ttmOwnerEarningsPerShare,
     ttm_rev_per_share: ttmRevPerShare
   };
   if (overrides) {
@@ -40925,11 +42070,16 @@ function deriveLatestRatios(quarterly, annual, overrides) {
       "dio_days",
       "ocf_to_ni_pct",
       "fcf_margin_pct",
+      "owner_earnings_margin_pct",
       "sbc_pct_rev",
+      "roic_pct",
+      "incremental_roic_pct",
+      "accruals_ratio_pct",
       "net_cash_b",
       "diluted_shares_yoy_pct",
       "ttm_eps",
       "ttm_fcf_per_share",
+      "ttm_owner_earnings_per_share",
       "ttm_rev_per_share"
     ];
     for (const k of numericKeys) {
@@ -40966,6 +42116,8 @@ function parseCompanyFactsToFundamentals(ticker, payload, opts) {
   const stInvInstants = collectInstantFacts(payload, ST_INVESTMENTS_CONCEPTS, ccyMatcher);
   const ltDebtInstants = collectInstantFacts(payload, LT_DEBT_NONCURRENT_CONCEPTS, ccyMatcher);
   const stDebtInstants = collectInstantFacts(payload, ST_DEBT_CONCEPTS, ccyMatcher);
+  const assetsInstants = collectInstantFacts(payload, TOTAL_ASSETS_CONCEPTS, ccyMatcher);
+  const equityInstants = collectInstantFacts(payload, STOCKHOLDERS_EQUITY_CONCEPTS, ccyMatcher);
   const qRev = buildQuarterlyFlowMap(revFacts, true);
   const qCogs = buildQuarterlyFlowMap(cogsFacts, true);
   const qGp = buildQuarterlyFlowMap(gpFacts, true);
@@ -41033,7 +42185,9 @@ function parseCompanyFactsToFundamentals(ticker, payload, opts) {
       inventory_m: toM(findInstantNear(invInstants, periodEnd)),
       cogs_m: toM(qCogs.get(periodEnd)?.val),
       cash_and_st_inv_m: resolveCashM(periodEnd),
-      total_debt_m: resolveDebtM(periodEnd)
+      total_debt_m: resolveDebtM(periodEnd),
+      total_assets_m: toM(findInstantNear(assetsInstants, periodEnd)),
+      stockholders_equity_m: toM(findInstantNear(equityInstants, periodEnd))
     };
     return computePeriodRatios(base, false);
   });
@@ -41064,7 +42218,9 @@ function parseCompanyFactsToFundamentals(ticker, payload, opts) {
       inventory_m: toM(findInstantNear(invInstants, periodEnd)),
       cogs_m: toM(aCogs.get(periodEnd)?.val),
       cash_and_st_inv_m: resolveCashM(periodEnd),
-      total_debt_m: resolveDebtM(periodEnd)
+      total_debt_m: resolveDebtM(periodEnd),
+      total_assets_m: toM(findInstantNear(assetsInstants, periodEnd)),
+      stockholders_equity_m: toM(findInstantNear(equityInstants, periodEnd))
     };
     return computePeriodRatios(base, true);
   });
@@ -41425,15 +42581,30 @@ async function runWatchdogSweep(dataDir, pluginRoot, opts) {
       });
     }
   }
+  const heldTickerSet = new Set(
+    (portfolio?.positions ?? []).filter((p) => p.qty > 0).map((p) => p.ticker.toUpperCase())
+  );
+  const activeTickerSet = new Set(
+    parsedTheses.filter(({ fm }) => (DossierTierSchema.safeParse(fm.tier).success ? fm.tier : "active") === "active").map(({ fm }) => normalizeTicker(fm.ticker))
+  );
+  const nowMs = nowDate.getTime();
   const redFlags = extractSecRedFlags(latestEdgar.filings_by_ticker);
   for (const rf of redFlags) {
+    if (rf.severity === "info") continue;
+    const filedMs = Date.parse(`${rf.filingDate}T00:00:00Z`);
+    const ageDays = Number.isFinite(filedMs) ? (nowMs - filedMs) / 864e5 : 999;
+    const symUp = rf.ticker.toUpperCase();
+    if (rf.severity === "high" && ageDays > 90) continue;
+    if (rf.severity === "medium" && (ageDays > 45 || !heldTickerSet.has(symUp) && !activeTickerSet.has(symUp))) {
+      continue;
+    }
     enqueueAlert({
-      id: `sec-red-flag:${rf.ticker.toUpperCase()}:${rf.code}:${rf.accession}`,
+      id: `sec-red-flag:${symUp}:${rf.code}:${rf.accession}`,
       detected_at: nowIso,
       severity: rf.severity,
       kind: "sec_red_flag",
-      ticker: rf.ticker.toUpperCase(),
-      title: `${rf.ticker} ${rf.code} Forensic Filing Alert`,
+      ticker: symUp,
+      title: `${symUp} ${rf.code} Filing Alert`,
       detail: `${rf.label} (${rf.form} filed ${rf.filingDate})`,
       acknowledged: false
     });
@@ -41492,7 +42663,7 @@ async function runWatchdogSweep(dataDir, pluginRoot, opts) {
       });
     }
     const priceAtAudit = typeof fm.price_at_audit === "number" && fm.price_at_audit > 0 ? fm.price_at_audit : null;
-    if (priceAtAudit !== null && curPrice !== null) {
+    if (tier !== "passed" && priceAtAudit !== null && curPrice !== null) {
       const driftPct = round((curPrice - priceAtAudit) / priceAtAudit * 100, 1);
       if (Math.abs(driftPct) >= 15) {
         const bucket = Math.floor(Math.abs(driftPct) / 15) * 15;
@@ -41574,7 +42745,7 @@ async function runWatchdogSweep(dataDir, pluginRoot, opts) {
 }
 
 // src/server/index.ts
-var APP_URI = "ui://investment-os/v5/dashboard.html";
+var APP_URI = "ui://investment-os/v6/dashboard.html";
 var APP_MIME = "text/html;profile=mcp-app";
 var currentDir = typeof __dirname !== "undefined" ? __dirname : import_node_path2.default.dirname(import_node_path2.default.resolve(process.argv[1] || process.cwd()));
 var inferredRoot = import_node_path2.default.basename(currentDir) === "dist" ? import_node_path2.default.resolve(currentDir, "..") : import_node_path2.default.resolve(currentDir, "..", "..");
@@ -41682,13 +42853,13 @@ var TOOLS = [
   {
     name: "open_dashboard",
     title: "Investment OS",
-    description: "Open or refresh the interactive Investment OS v0.5 Quantamental Personal CIO sidecar dashboard showing portfolio valuation, look-through exposures, Priority Sells & Tax Swaps, Macro Strip, Shared Themes, Watchdog Alerts, living dossiers (Reverse DCF bridge, XBRL, Form 4, 5Y scenarios, dip triage), SEC EDGAR filings, and the Backtest & Judgment Lab.",
+    description: "Open or refresh the interactive Investment OS v0.6 Executive Quantamental Personal-CIO sidecar dashboard showing unified wealth overview, Forward Portfolio Forecast & Action Simulator, look-through exposures, Priority Sells & Tax Swaps, living dossiers (Owner Earnings, ROIC, Reverse DCF bridge, 5Y scenarios, dip triage), Shared Themes, SEC EDGAR & Watchdog signals, and Backtest Lab.",
     inputSchema: {
       type: "object",
       properties: {
         tab: {
           type: "string",
-          enum: ["overview", "holdings", "theses", "edgar", "lab"],
+          enum: ["overview", "forecast", "holdings", "theses", "edgar", "lab"],
           description: "Initial dashboard tab to focus."
         },
         live: {
@@ -42056,6 +43227,43 @@ var TOOLS = [
     _meta: INLINE_META
   },
   {
+    name: "simulate_portfolio_forecast",
+    title: "Simulate Forward Portfolio Forecast & Action Plan",
+    description: "Run a correlated fat-tail Monte Carlo (1,500 seeded Student-t paths, Ledoit-Wolf shrunk covariance blended with dossier 5Y after-tax scenarios) comparing Current Portfolio vs. Toggled Action Plan (UCITS tax swaps, mandatory exits, cap trims, planned buys, benchmark cash sweeps) over 1-10 years, reporting Bear/Base/Bull wealth trajectories, estate tax & WHT savings, cured risk caps, marginal risk contribution %, correlation-adjusted hurdles, and Quarter-Kelly sizing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        horizon_years: { type: "integer", description: "Forecast horizon in years (1-10, default 5)." },
+        include_external_wealth: { type: "boolean", description: "Include external equity exposure in wealth fan & correlation (default true)." },
+        apply_recommended_rotations: { type: "boolean", description: "Automatically apply all Tier 1 Tax Swaps, Tier 2 Mandatory Exits, and Tier 3 Cap Trims before applying custom actions (default false)." },
+        actions: {
+          type: "array",
+          description: "Explicit ordered action list: tax_swap, sell, buy, or park_cash_in_benchmark.",
+          items: {
+            type: "object",
+            properties: {
+              type: { type: "string", enum: ["tax_swap", "sell", "buy", "park_cash_in_benchmark"] },
+              ticker: { type: "string" },
+              target_ticker: { type: "string" },
+              pct: { type: "number" },
+              amount_base: { type: "number" },
+              yf_symbol: { type: "string" },
+              currency: { type: "string" },
+              us_situs: { type: "boolean" },
+              keep_reserve: { type: "boolean" }
+            },
+            required: ["type"]
+          }
+        },
+        regime_vol_multiplier: { type: "number", description: "Volatility stress multiplier (0.5-2.5, default 1.0; use 1.25 for High-Vol stress)." },
+        simulations: { type: "integer", description: "Number of seeded Monte Carlo paths (200-5000, default 1500)." },
+        rf_pct: { type: "number", description: "Annual risk-free rate % (defaults to cached 3M T-bill or 3.8%)." },
+        demo: { type: "boolean", description: "Simulate against synthetic Demo Mode portfolio." }
+      }
+    },
+    _meta: INLINE_META
+  },
+  {
     name: "manage_catalysts",
     title: "Manage Binary Catalysts & SEC Gates",
     description: "Add, remove, or replace tracked catalyst dates and optional SEC form filing gates in ${PLUGIN_DATA}/catalysts.yaml.",
@@ -42152,7 +43360,7 @@ var TOOLS = [
       properties: {
         live: { type: "boolean" },
         use_cache: { type: "boolean" },
-        tab: { type: "string", enum: ["overview", "holdings", "theses", "edgar", "lab"] },
+        tab: { type: "string", enum: ["overview", "forecast", "holdings", "theses", "edgar", "lab"] },
         demo: { type: "boolean" }
       }
     },
@@ -42180,7 +43388,7 @@ var TOOLS = [
       properties: {
         include_xbrl: { type: "boolean" },
         include_insiders: { type: "boolean" },
-        tab: { type: "string", enum: ["overview", "holdings", "theses", "edgar", "lab"] }
+        tab: { type: "string", enum: ["overview", "forecast", "holdings", "theses", "edgar", "lab"] }
       }
     },
     _meta: APP_ONLY_META
@@ -42210,7 +43418,7 @@ var TOOLS = [
         id: { type: "string" },
         ids: { type: "array", items: { type: "string" } },
         use_cache: { type: "boolean" },
-        tab: { type: "string", enum: ["overview", "holdings", "theses", "edgar", "lab"] }
+        tab: { type: "string", enum: ["overview", "forecast", "holdings", "theses", "edgar", "lab"] }
       }
     },
     _meta: APP_ONLY_META
@@ -42316,6 +43524,25 @@ var TOOLS = [
       required: ["candidate_ticker"]
     },
     _meta: APP_ONLY_META
+  },
+  {
+    name: "app_simulate_forecast",
+    title: "App Simulate Forward Portfolio Forecast",
+    description: "Internal UI tool to run the correlated Monte Carlo forward portfolio forecast & what-if action simulator from the Forecast tab.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        horizon_years: { type: "integer" },
+        include_external_wealth: { type: "boolean" },
+        apply_recommended_rotations: { type: "boolean" },
+        actions: { type: "array", items: { type: "object" } },
+        regime_vol_multiplier: { type: "number" },
+        simulations: { type: "integer" },
+        rf_pct: { type: "number" },
+        demo: { type: "boolean" }
+      }
+    },
+    _meta: APP_ONLY_META
   }
 ];
 function collectDefaultEdgarTickers(dataDir) {
@@ -42383,10 +43610,10 @@ function mergeProfileUpdate(current, args) {
   return ProfileSchema.parse(next);
 }
 var server = new Server(
-  { name: "investment-os-dashboard", version: "0.5.0" },
+  { name: "investment-os-dashboard", version: "0.6.0" },
   {
     capabilities: { tools: {}, resources: {} },
-    instructions: "Quantamental Personal-CIO portfolio dashboard, 3-layer research graph (Themes, Living Dossiers, PIT Ledger), automated SEC/XBRL/Form 4 signal harness, and local analytics server for Investment OS."
+    instructions: "Quantamental Personal-CIO executive portfolio workstation, correlated Monte Carlo forward portfolio forecast & action simulator, 3-layer research graph, automated SEC/XBRL (Owner Earnings, ROIC, Accruals)/Form 4 signal harness, and local analytics server for Investment OS."
   }
 );
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -42764,6 +43991,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         structuredContent: payload
       };
     }
+    if (name === "simulate_portfolio_forecast") {
+      const { forecast, payload } = await executePortfolioForecast({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        rawRequest: args
+      });
+      const ccy = forecast.base_currency;
+      const fmtM = (n) => `${Math.round(n).toLocaleString("en-US")} ${ccy}`;
+      const fmtDeltaM = (n) => `${n >= 0 ? "+" : ""}${Math.round(n).toLocaleString("en-US")} ${ccy}`;
+      const text = [
+        `Forward Portfolio Forecast (${forecast.horizon_years}Y | ${forecast.simulations} correlated Student-t paths | External Wealth: ${forecast.include_external_wealth ? "Included" : "Excluded"} | Vol\xD7${forecast.regime_vol_multiplier}):`,
+        `- Starting Wealth: ${fmtM(forecast.baseline.starting_wealth_base)} | Actions Applied: ${forecast.applied_actions.length}${forecast.cash_shortfall_base > 0 ? ` (Cash shortfall: ${fmtM(forecast.cash_shortfall_base)})` : ""}`,
+        `- Current Path (${forecast.horizon_years}Y): Bear P10 ${fmtM(forecast.baseline.ending_p10_base)} | Base P50 ${fmtM(forecast.baseline.ending_p50_base)} (${forecast.baseline.expected_cagr_p50_pct}% CAGR) | Bull P90 ${fmtM(forecast.baseline.ending_p90_base)} | Vol ${forecast.baseline.annual_vol_pct}% | Sharpe ${forecast.baseline.expected_sharpe}`,
+        `- Action Plan (${forecast.horizon_years}Y): Bear P10 ${fmtM(forecast.simulated.ending_p10_base)} (${fmtDeltaM(forecast.deltas.p10_base)}) | Base P50 ${fmtM(forecast.simulated.ending_p50_base)} (${fmtDeltaM(forecast.deltas.p50_base)}, ${forecast.simulated.expected_cagr_p50_pct}% CAGR) | Bull P90 ${fmtM(forecast.simulated.ending_p90_base)} | Vol ${forecast.simulated.annual_vol_pct}% | Sharpe ${forecast.simulated.expected_sharpe}`,
+        `- Tax & Risk Impact: Estate Tax Saved ${fmtM(forecast.deltas.estate_tax_saved_base)} | Annual WHT Saved ${fmtM(forecast.deltas.annual_wht_saved_base)}/yr | US-Situs ${forecast.baseline.us_situs_portfolio_pct}% -> ${forecast.simulated.us_situs_portfolio_pct}% | Cap Breaches ${forecast.baseline.cap_breaches_count} -> ${forecast.simulated.cap_breaches_count}${forecast.deltas.cured_caps.length > 0 ? ` (Cured: ${forecast.deltas.cured_caps.join(", ")})` : ""}`,
+        `- Benchmark (${forecast.benchmark_ticker} @ ${forecast.benchmark_cagr_pct}%): ${fmtM(forecast.benchmark_ending_base)} | Prob Beat Bench: ${forecast.baseline.prob_beat_benchmark_pct}% -> ${forecast.simulated.prob_beat_benchmark_pct}%`,
+        `- Methodology: ${forecast.methodology_note}`
+      ].join("\n");
+      return {
+        content: [{ type: "text", text }],
+        structuredContent: payload
+      };
+    }
     if (name === "manage_catalysts") {
       const action = external_exports.enum(["add", "remove", "replace"]).parse(args.action);
       let current = loadCatalysts(DATA_DIR);
@@ -42915,6 +44165,17 @@ Summary: ${record2.summary}`
       return {
         content: [{ type: "text", text: `Completed backtest for ${backtest.candidate_ticker} (${backtest.weeks_analyzed}w).` }],
         structuredContent: backtest
+      };
+    }
+    if (name === "app_simulate_forecast") {
+      const { forecast } = await executePortfolioForecast({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        rawRequest: args
+      });
+      return {
+        content: [{ type: "text", text: `Simulated ${forecast.horizon_years}Y forecast (${forecast.applied_actions.length} actions).` }],
+        structuredContent: forecast
       };
     }
     return {

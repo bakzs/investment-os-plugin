@@ -14,6 +14,7 @@ import {
   buildDashboardPayload,
   buildSummaryText,
   executePortfolioBacktest,
+  executePortfolioForecast,
   formatTimestamp,
   getDossierDetail,
   getThemeDetail,
@@ -59,7 +60,7 @@ import {
 import { runWatchdogSweep } from "./watchdog.js";
 import { syncFundamentalsXbrl } from "./xbrl.js";
 
-const APP_URI = "ui://investment-os/v5/dashboard.html";
+const APP_URI = "ui://investment-os/v6/dashboard.html";
 const APP_MIME = "text/html;profile=mcp-app";
 
 const currentDir =
@@ -181,13 +182,13 @@ const TOOLS: Tool[] = [
     name: "open_dashboard",
     title: "Investment OS",
     description:
-      "Open or refresh the interactive Investment OS v0.5 Quantamental Personal CIO sidecar dashboard showing portfolio valuation, look-through exposures, Priority Sells & Tax Swaps, Macro Strip, Shared Themes, Watchdog Alerts, living dossiers (Reverse DCF bridge, XBRL, Form 4, 5Y scenarios, dip triage), SEC EDGAR filings, and the Backtest & Judgment Lab.",
+      "Open or refresh the interactive Investment OS v0.6 Executive Quantamental Personal-CIO sidecar dashboard showing unified wealth overview, Forward Portfolio Forecast & Action Simulator, look-through exposures, Priority Sells & Tax Swaps, living dossiers (Owner Earnings, ROIC, Reverse DCF bridge, 5Y scenarios, dip triage), Shared Themes, SEC EDGAR & Watchdog signals, and Backtest Lab.",
     inputSchema: {
       type: "object",
       properties: {
         tab: {
           type: "string",
-          enum: ["overview", "holdings", "theses", "edgar", "lab"],
+          enum: ["overview", "forecast", "holdings", "theses", "edgar", "lab"],
           description: "Initial dashboard tab to focus.",
         },
         live: {
@@ -567,6 +568,44 @@ const TOOLS: Tool[] = [
     _meta: INLINE_META,
   },
   {
+    name: "simulate_portfolio_forecast",
+    title: "Simulate Forward Portfolio Forecast & Action Plan",
+    description:
+      "Run a correlated fat-tail Monte Carlo (1,500 seeded Student-t paths, Ledoit-Wolf shrunk covariance blended with dossier 5Y after-tax scenarios) comparing Current Portfolio vs. Toggled Action Plan (UCITS tax swaps, mandatory exits, cap trims, planned buys, benchmark cash sweeps) over 1-10 years, reporting Bear/Base/Bull wealth trajectories, estate tax & WHT savings, cured risk caps, marginal risk contribution %, correlation-adjusted hurdles, and Quarter-Kelly sizing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        horizon_years: { type: "integer", description: "Forecast horizon in years (1-10, default 5)." },
+        include_external_wealth: { type: "boolean", description: "Include external equity exposure in wealth fan & correlation (default true)." },
+        apply_recommended_rotations: { type: "boolean", description: "Automatically apply all Tier 1 Tax Swaps, Tier 2 Mandatory Exits, and Tier 3 Cap Trims before applying custom actions (default false)." },
+        actions: {
+          type: "array",
+          description: "Explicit ordered action list: tax_swap, sell, buy, or park_cash_in_benchmark.",
+          items: {
+            type: "object",
+            properties: {
+              type: { type: "string", enum: ["tax_swap", "sell", "buy", "park_cash_in_benchmark"] },
+              ticker: { type: "string" },
+              target_ticker: { type: "string" },
+              pct: { type: "number" },
+              amount_base: { type: "number" },
+              yf_symbol: { type: "string" },
+              currency: { type: "string" },
+              us_situs: { type: "boolean" },
+              keep_reserve: { type: "boolean" },
+            },
+            required: ["type"],
+          },
+        },
+        regime_vol_multiplier: { type: "number", description: "Volatility stress multiplier (0.5-2.5, default 1.0; use 1.25 for High-Vol stress)." },
+        simulations: { type: "integer", description: "Number of seeded Monte Carlo paths (200-5000, default 1500)." },
+        rf_pct: { type: "number", description: "Annual risk-free rate % (defaults to cached 3M T-bill or 3.8%)." },
+        demo: { type: "boolean", description: "Simulate against synthetic Demo Mode portfolio." },
+      },
+    },
+    _meta: INLINE_META,
+  },
+  {
     name: "manage_catalysts",
     title: "Manage Binary Catalysts & SEC Gates",
     description:
@@ -666,7 +705,7 @@ const TOOLS: Tool[] = [
       properties: {
         live: { type: "boolean" },
         use_cache: { type: "boolean" },
-        tab: { type: "string", enum: ["overview", "holdings", "theses", "edgar", "lab"] },
+        tab: { type: "string", enum: ["overview", "forecast", "holdings", "theses", "edgar", "lab"] },
         demo: { type: "boolean" },
       },
     },
@@ -694,7 +733,7 @@ const TOOLS: Tool[] = [
       properties: {
         include_xbrl: { type: "boolean" },
         include_insiders: { type: "boolean" },
-        tab: { type: "string", enum: ["overview", "holdings", "theses", "edgar", "lab"] },
+        tab: { type: "string", enum: ["overview", "forecast", "holdings", "theses", "edgar", "lab"] },
       },
     },
     _meta: APP_ONLY_META,
@@ -724,7 +763,7 @@ const TOOLS: Tool[] = [
         id: { type: "string" },
         ids: { type: "array", items: { type: "string" } },
         use_cache: { type: "boolean" },
-        tab: { type: "string", enum: ["overview", "holdings", "theses", "edgar", "lab"] },
+        tab: { type: "string", enum: ["overview", "forecast", "holdings", "theses", "edgar", "lab"] },
       },
     },
     _meta: APP_ONLY_META,
@@ -831,6 +870,25 @@ const TOOLS: Tool[] = [
     },
     _meta: APP_ONLY_META,
   },
+  {
+    name: "app_simulate_forecast",
+    title: "App Simulate Forward Portfolio Forecast",
+    description: "Internal UI tool to run the correlated Monte Carlo forward portfolio forecast & what-if action simulator from the Forecast tab.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        horizon_years: { type: "integer" },
+        include_external_wealth: { type: "boolean" },
+        apply_recommended_rotations: { type: "boolean" },
+        actions: { type: "array", items: { type: "object" } },
+        regime_vol_multiplier: { type: "number" },
+        simulations: { type: "integer" },
+        rf_pct: { type: "number" },
+        demo: { type: "boolean" },
+      },
+    },
+    _meta: APP_ONLY_META,
+  },
 ];
 
 function collectDefaultEdgarTickers(dataDir: string): string[] {
@@ -902,11 +960,11 @@ function mergeProfileUpdate(current: UserProfile, args: Record<string, unknown>)
 }
 
 const server = new Server(
-  { name: "investment-os-dashboard", version: "0.5.0" },
+  { name: "investment-os-dashboard", version: "0.6.0" },
   {
     capabilities: { tools: {}, resources: {} },
     instructions:
-      "Quantamental Personal-CIO portfolio dashboard, 3-layer research graph (Themes, Living Dossiers, PIT Ledger), automated SEC/XBRL/Form 4 signal harness, and local analytics server for Investment OS.",
+      "Quantamental Personal-CIO executive portfolio workstation, correlated Monte Carlo forward portfolio forecast & action simulator, 3-layer research graph, automated SEC/XBRL (Owner Earnings, ROIC, Accruals)/Form 4 signal harness, and local analytics server for Investment OS.",
   },
 );
 
@@ -1327,6 +1385,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
+    if (name === "simulate_portfolio_forecast") {
+      const { forecast, payload } = await executePortfolioForecast({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        rawRequest: args,
+      });
+      const ccy = forecast.base_currency;
+      const fmtM = (n: number) => `${Math.round(n).toLocaleString("en-US")} ${ccy}`;
+      const fmtDeltaM = (n: number) => `${n >= 0 ? "+" : ""}${Math.round(n).toLocaleString("en-US")} ${ccy}`;
+      const text = [
+        `Forward Portfolio Forecast (${forecast.horizon_years}Y | ${forecast.simulations} correlated Student-t paths | External Wealth: ${forecast.include_external_wealth ? "Included" : "Excluded"} | Vol×${forecast.regime_vol_multiplier}):`,
+        `- Starting Wealth: ${fmtM(forecast.baseline.starting_wealth_base)} | Actions Applied: ${forecast.applied_actions.length}${forecast.cash_shortfall_base > 0 ? ` (Cash shortfall: ${fmtM(forecast.cash_shortfall_base)})` : ""}`,
+        `- Current Path (${forecast.horizon_years}Y): Bear P10 ${fmtM(forecast.baseline.ending_p10_base)} | Base P50 ${fmtM(forecast.baseline.ending_p50_base)} (${forecast.baseline.expected_cagr_p50_pct}% CAGR) | Bull P90 ${fmtM(forecast.baseline.ending_p90_base)} | Vol ${forecast.baseline.annual_vol_pct}% | Sharpe ${forecast.baseline.expected_sharpe}`,
+        `- Action Plan (${forecast.horizon_years}Y): Bear P10 ${fmtM(forecast.simulated.ending_p10_base)} (${fmtDeltaM(forecast.deltas.p10_base)}) | Base P50 ${fmtM(forecast.simulated.ending_p50_base)} (${fmtDeltaM(forecast.deltas.p50_base)}, ${forecast.simulated.expected_cagr_p50_pct}% CAGR) | Bull P90 ${fmtM(forecast.simulated.ending_p90_base)} | Vol ${forecast.simulated.annual_vol_pct}% | Sharpe ${forecast.simulated.expected_sharpe}`,
+        `- Tax & Risk Impact: Estate Tax Saved ${fmtM(forecast.deltas.estate_tax_saved_base)} | Annual WHT Saved ${fmtM(forecast.deltas.annual_wht_saved_base)}/yr | US-Situs ${forecast.baseline.us_situs_portfolio_pct}% -> ${forecast.simulated.us_situs_portfolio_pct}% | Cap Breaches ${forecast.baseline.cap_breaches_count} -> ${forecast.simulated.cap_breaches_count}${forecast.deltas.cured_caps.length > 0 ? ` (Cured: ${forecast.deltas.cured_caps.join(", ")})` : ""}`,
+        `- Benchmark (${forecast.benchmark_ticker} @ ${forecast.benchmark_cagr_pct}%): ${fmtM(forecast.benchmark_ending_base)} | Prob Beat Bench: ${forecast.baseline.prob_beat_benchmark_pct}% -> ${forecast.simulated.prob_beat_benchmark_pct}%`,
+        `- Methodology: ${forecast.methodology_note}`,
+      ].join("\n");
+      return {
+        content: [{ type: "text", text }],
+        structuredContent: payload as unknown as Record<string, unknown>,
+      };
+    }
+
     if (name === "manage_catalysts") {
       const action = z.enum(["add", "remove", "replace"]).parse(args.action);
       let current = loadCatalysts(DATA_DIR);
@@ -1492,6 +1574,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return {
         content: [{ type: "text", text: `Completed backtest for ${backtest.candidate_ticker} (${backtest.weeks_analyzed}w).` }],
         structuredContent: backtest as unknown as Record<string, unknown>,
+      };
+    }
+
+    if (name === "app_simulate_forecast") {
+      const { forecast } = await executePortfolioForecast({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        rawRequest: args,
+      });
+      return {
+        content: [{ type: "text", text: `Simulated ${forecast.horizon_years}Y forecast (${forecast.applied_actions.length} actions).` }],
+        structuredContent: forecast as unknown as Record<string, unknown>,
       };
     }
 

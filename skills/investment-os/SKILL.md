@@ -1,61 +1,57 @@
 ---
 name: investment-os
-description: Multi-currency Quantamental Personal-CIO workflow for Antigravity: drive the Investment OS v0.5 sidecar dashboard, onboard residency/tax/benchmark profiles, sync read-only broker holdings and market intelligence, automate SEC XBRL fundamentals, Form 4 insider flows, and delta-only Watchdog sweeps, maintain the 3-layer research graph (Shared Themes + Living Dossiers with Reverse DCF attribution & machine-checkable hypotheses), execute Priority Sell/Tax-Swap reviews, and run FX-aware deterministic backtests. Trigger whenever the user discusses their portfolio, brokerage sync, stock dossiers, themes, valuations, backtests, SEC filings, insider flows, buy/trim zones, or asks to open/update Investment OS.
+description: Multi-currency Quantamental Personal-CIO workflow for Antigravity: drive the Investment OS v0.6 executive sidecar dashboard, run correlated Monte Carlo forward portfolio forecasts & what-if action plans, conduct 3-lens adversarial deep company research, onboard residency/tax/benchmark profiles, sync read-only broker holdings and market intelligence, automate SEC XBRL (Owner Earnings, ROIC, Sloan Accruals), Form 4 insider flows, and quiet delta-only Watchdog sweeps, maintain the 3-layer research graph (Shared Themes + Living Dossiers + PIT Ledger), and run FX-aware deterministic backtests. Trigger whenever the user discusses their portfolio, forward wealth forecast, action simulation, brokerage sync, deep company research, stock dossiers, themes, valuations, backtests, SEC filings, insider flows, buy/trim zones, or asks to open/update Investment OS.
 ---
 
-# Investment OS — Quantamental Personal CIO Workflow (`v0.5`)
+# Investment OS — Quantamental Personal CIO Workflow (`v0.6`)
 
-Your job is to automate data ingestion, live valuation & signal checks, structured 3-layer research graph updates, and deterministic portfolio analytics so the user never edits raw YAML/JSON files by hand. Keep all brokerage interactions strictly **read-only** (never place, modify, cancel orders, or initiate fund transfers).
+Your job is to automate data ingestion, live valuation & quality checks, forward portfolio action forecasting, deep institutional company research, and structured 3-layer research graph updates so the user never edits raw YAML/JSON files by hand. Keep all brokerage interactions strictly **read-only** (never place, modify, cancel orders, or initiate fund transfers).
 
 ## 1. Drive the Sidecar Automatically
 
-- Server name: `investment-os_dashboard` (UI resource `ui://investment-os/v5/dashboard.html`).
-- Tabs available: `overview` (Macro Strip, High-Vol Discipline Banner, Priority Sells & Tax Swaps, Watchdog Alerts & Open Gates, Shared Themes), `holdings`, `theses`, `edgar`, and `lab` (Dip Triage Queue, FX-Aware Backtest Lab, Matured Forward Scorecard & Brier Calibration).
-- Whenever the user asks to view, refresh, analyze, or update their portfolio, themes, dossiers, signals, triggers, backtests, or catalysts, call `open_dashboard` (or call `open_dashboard` after persisting updates) so the sidecar updates in real time.
+- Server name: `investment-os_dashboard` (UI resource `ui://investment-os/v6/dashboard.html`).
+- Tabs available:
+  - `overview` — Executive Cockpit (unified wealth hero, single macro bar, Priority Action Plan, Top-5 high-signal inbox only, Look-Through exposure & breached risk guardrails).
+  - `forecast` — Forward Portfolio Forecast & Action Simulator (interactive 1Y/3Y/5Y Bear/Base/Bull correlated Monte Carlo fan chart, toggleable swaps/exits/trims/buys, before-vs-after estate tax & cap breaches, marginal risk contributions & Quarter-Kelly sizing).
+  - `holdings` — Multi-currency Positions, True ETF Look-Through, Quality grades, and collapsible Outside Wealth Stress-Tester.
+  - `theses` — Living Research Dossiers (Active / Bench / Passed) + Shared Research Themes strip.
+  - `edgar` — Full SEC Filing Archive, Catalysts, Gates & Watchdog Signal Log (routine `info` filings like `8-K:5.02` live here and in agent metadata, never cluttering Overview).
+  - `lab` — 4-Check Dip Triage Queue, FX-Aware Historical Backtester, Matured Forward Scorecard & Brier Calibration.
+- Whenever the user asks to view, forecast, refresh, research, or update their portfolio, themes, dossiers, signals, triggers, backtests, or catalysts, call `open_dashboard` or `simulate_portfolio_forecast` so the sidecar updates in real time.
 
 ## 2. Guided Onboarding When Uninitialized
 
-- If `open_dashboard` reports `initialized: false` (fresh `${PLUGIN_DATA}`), help the user set up their baseline cleanly:
-  1. Ask for their **base reporting currency** (e.g., `USD`, `EUR`, `GBP`, `SGD`, `AUD`), **tax residency / whether IRC §2101(c) US NRA estate tax applies** and preferred `estate_tax_drag_mode` (`hedge` default `35 bps/yr` vs. `amortized` 20Y), **opportunity-cost benchmark & alpha hurdle** (default `VWRA` / `VWRA.L`, `8.0%` expected CAGR + `2.5%` alpha buffer = `10.5%`), optional **external/employer equity exposure** (fixed `amount_base` or live-marked `qty`) and **near-term cash reserve**, and preferred **risk caps**. Persist via `update_profile`.
-  2. Collect holdings read-only from a connected broker MCP or user statement/CSV, then persist via `update_portfolio_positions` (and optionally refresh ETF look-through weights via `update_etf_weights`).
-  3. Remind the user they can preview v0.5 immediately in Demo Mode without writing to disk.
+- If `open_dashboard` reports `initialized: false` (fresh `${PLUGIN_DATA}`), help the user set up cleanly:
+  1. Ask for **base reporting currency** (`USD`, `SGD`, `EUR`, `GBP`, `AUD`, etc.), **tax residency / US NRA estate tax flag** and `estate_tax_drag_mode` (`hedge` default `35 bps/yr` vs. `amortized`), **opportunity-cost benchmark & alpha hurdle** (default `VWRA.L`, `8.0%` + `2.5%` = `10.5%`), optional **external/employer equity** and **near-term cash reserve**, and **risk caps** -> `update_profile`.
+  2. Collect holdings read-only from a connected broker MCP or user statement/CSV -> `update_portfolio_positions` (and optional `update_etf_weights`).
+  3. Remind the user they can preview v0.6 immediately in Demo Mode without writing to disk.
 
-## 3. Automated Zero-Key Signal Harness & Watchdog
+## 3. Forward Portfolio Forecasting & Action Simulation (`simulate_portfolio_forecast`)
 
-- **`sync_fundamentals_xbrl`:** Pulls official SEC XBRL `companyfacts` (`16Q + 5FY`) and forensic ratios (`gross_margin_pct`, `operating_margin_pct`, `dso_days`, `dio_days`, `ocf_to_ni_pct`, `fcf_margin_pct`, `sbc_pct_rev`, `net_cash_b`, `diluted_shares_yoy_pct`, TTM EPS/FCF/Rev per share) into `dossiers/<TICKER>/fundamentals.json` while preserving custom `overrides` for FPIs or forensic adjustments.
-- **`sync_insiders_form4`:** Pulls incremental SEC Form 4 XML + Schedule 13D/13D-A into `dossiers/<TICKER>/insiders.json`, separating discretionary buys/sales from 10b5-1 plans over 90D/12M windows and flagging C-suite buy clusters or heavy discretionary selling.
-- **`check_sec_edgar`:** Polls hardened SEC submissions across ALL Active/Bench/Passed dossiers (retaining 4 periodic + 10 event filings separately) and extracts `NT 10-Q/K` & 8-K forensic red flags (`4.01`, `4.02`, `1.02`, `3.02`, `5.02`).
-- **`run_watchdog_sweep`:** Runs the full quiet delta-only CIO sweep (extended quotes, FX, 4-indicator Macro Strip, EDGAR, conditional XBRL, incremental Form 4) and appends only genuine deltas into `alerts_log.jsonl`. Ideal for one-click sidecar refreshes or optional `/schedule` daily post-close automation.
+- Whenever the user asks *"what happens to my portfolio if I do X?"*, *"forecast my holdings over 5 years"*, or *"how should I deploy freed cash?"*, call `simulate_portfolio_forecast`:
+  - Supports `apply_recommended_rotations: true` (auto-applies Tier 1 UCITS tax swaps + Tier 2 mandatory exits + Tier 3 cap trims) plus explicit `actions[]`: `tax_swap`, `sell`, `buy`, and `park_cash_in_benchmark`.
+  - Runs 1,500 seeded correlated Student-t (`df=6`) Monte Carlo paths using Ledoit-Wolf shrunk covariance (`λ=0.25`) blended with each dossier's 5Y after-tax Bear/Base/Bull scenarios.
+  - Reports before-vs-after P10 / P50 / P90 wealth in `base_currency`, expected CAGR & Sharpe, estate tax & WHT savings, cured risk caps, marginal risk contribution %, correlation-adjusted required hurdles, and Quarter-Kelly sizing signals.
 
-## 4. Read-Only Broker Sync & Market Intelligence
+## 4. Deep Institutional Company Research Protocol (3-Lens Adversarial Deep Dive)
 
-- If Interactive Brokers (`ibkr_ibkr-mcp`) or another read-only broker MCP is connected:
-  1. Pull read-only positions, cash, accruals, and FX rates -> `update_portfolio_positions`.
-  2. Call `ingest_research_intel` to persist `dossiers/<TICKER>/intel.json` (earnings previews/recaps, ATM options straddle implied move & IV skew, connections), automatically append snapshots to `dossiers/<TICKER>/intel_history.jsonl`, store fresh weekly bars (`history_series`), and record account `pa_performance`.
-  3. If an ETF factsheet changes, update `${PLUGIN_DATA}/etf_weights.json` via `update_etf_weights`.
-- If a broker plugin is installed but unauthenticated, provide `[Interactive Brokers](customization://ibkr)` or fall back cleanly to Yahoo Finance + SEC zero-key feeds.
+When the user triggers **Deep Research** on a ticker (or asks for a deep dive into a company), execute a structured 3-lens institutional synthesis before persisting:
 
-## 5. 3-Layer Shared Research Graph & Systematic Falsification
+1. **Lens 1 — Business Quality, Moat & Value Chain:** Pull primary SEC filings (`check_sec_edgar`), official XBRL (`sync_fundamentals_xbrl`), Form 4 insiders (`sync_insiders_form4`), and read-only broker intel (`ingest_research_intel` including `consensus` NTM revenue/EPS & revisions if available). Evaluate unit economics, pricing power, ROIC & incremental ROIC, SBC-adjusted Owner Earnings (`FCF - SBC`), Sloan Accruals quality, and shared theme linkages (`upsert_theme`).
+2. **Lens 2 — Expectations Investing (Reverse DCF vs. Street vs. Base Case):** Decompose what the current stock price implies (`Multiple` + `Margin` + `Residual Revenue CAGR` net of dilution & cash), compare against Street consensus growth and Mauboussin corporate base rates, and check 5Y historical valuation bands (`P/E`, `P/FCF`, `P/S`).
+3. **Lens 3 — Steelman Bear Case & Falsifiable Kill-Switches:** Construct the strongest possible bear thesis (avoiding cushioned `> -10%` single-stock bear cases), attach machine-checkable `rule` predicates (`owner_earnings_margin_pct`, `roic_pct`, `gross_margin_pct`, `dso_days`, `accruals_ratio_pct`, `sbc_pct_rev`, `ocf_to_ni_pct`, EDGAR/Form 4 rules) with `is_core: true`, and score honestly.
+4. **Persist Cleanly:** Save the full structured primary-source memo (`memo_md`), 5Y valuation model (`model`), 3-line executive `takeaway`, provenance `sources`, buy/trim zones, and `theme_refs` via `upsert_dossier`, and log the scored test via `record_thesis_test`.
 
-- **Layer 1 — Shared Themes (`upsert_theme`):** Capture multi-stock structural debates (e.g., GPU vs. TPU, Cloud Capex vs. Software ROI) in `themes/<slug>.yaml` + `<slug>.md` with `relationship_mode` (`zero_sum`/`symbiotic`/`cyclical`/`structural`), `shared_assumptions[]`, per-ticker `exposures[]` (`beneficiary`/`hedged_tollbooth`/`at_risk`/`watch`), and falsifiable `signposts[]`. Link stocks via `theme_refs[]` in `upsert_dossier` / `update_thesis`; updating a theme automatically flags older linked dossiers for re-test.
-- **Layer 2 — Living Dossiers (`upsert_dossier`):** Maintain tiered `active` / `bench` / `passed` dossiers with 3-line `takeaway`, provenance `sources`, `model.json` (Reverse DCF with `net_cash_b` & `annual_dilution_pct`, `accumulating`, per-dossier `dividend_wht_pct`, Bear/Base/Bull scenarios free of outside-view GIGO warnings), and primary-source `memo.md`.
-- **Layer 3 — Systematic Thesis Testing (`record_thesis_test`):**
-  1. Gather fresh primary signals (`check_sec_edgar`, `sync_fundamentals_xbrl`, `sync_insiders_form4`, `ingest_research_intel`).
-  2. Attach machine-checkable `rule` predicates (`source`, `metric`, `op`, `threshold`, `period`) and `is_core` flags to key hypotheses; honor automated breaches objectively (never soften a breached rule without an explicit dated `waiver_reason`).
-  3. Call `record_thesis_test` — automatically capturing `pit_snapshot` (VIX, US10Y, modeled CAGR, hurdle, implied rev CAGR, portfolio weight, latest fundamentals period) and `benchmark_price_at_test` into `test_log.jsonl`.
-  4. Provide a concise `rationale` whenever modifying buy/trim zones, `gated` status, or `model.json` so immutable `rule_change` events are logged.
+## 5. Automated Zero-Key Signal Harness & Strict Human-vs-Agent Signal Hygiene
 
-## 6. Priority Sells & Tax Swaps, Dip Triage & FX-Aware Backtesting
+- **`sync_fundamentals_xbrl`:** Pulls official SEC XBRL `companyfacts` (`16Q + 5FY`) including **Owner Earnings (`FCF - SBC`)**, **ROIC & Incremental ROIC**, **Sloan Accruals Ratio**, **Quality Grade (`A`–`D`)**, GM%, OM%, DSO, DIO, OCF/NI, SBC%, Net Cash, and TTM per-share metrics into `dossiers/<TICKER>/fundamentals.json` while preserving `overrides`.
+- **`sync_insiders_form4`:** Incremental Form 4 XML + Schedule 13D/A separating discretionary buys/sales from 10b5-1 plans over 90D/12M windows.
+- **`check_sec_edgar` & `run_watchdog_sweep`:** Strict 3-tier signal hygiene:
+  - **Tier 1 (`high`):** `NT 10-Q/K`, `8-K:4.01` (auditor change), `4.02` (restatement), `1.03` (bankruptcy), `2.06` (impairment), `3.01` (delisting), core hypothesis breaches, SEC gate clearances, newly breached caps, C-suite buy clusters.
+  - **Tier 2 (`medium`):** Recent (`<=45d`) `8-K:1.02` / `3.02` on held/active names, Passed re-entry hits, `>=15%` audit drift on active/bench names.
+  - **Tier 3 (`info`, Agent Backend Metadata):** Routine `8-K:5.02` (officer/board appointments & comp) and older filings remain fully preserved in `edgar_cache.json` and the `SEC & Alerts` archive for agents without spamming Overview.
 
-- **Priority Sell & Tax-Swap Reviews:** Always inspect `payload.rotation_queue` before proposing any new buy:
-  - **Tier 1:** Riskless US-ETF -> UCITS benchmark tax swaps (`total_estate_tax_saved_base` + `auto_cured_caps`).
-  - **Tier 2:** Mandatory held exits (`EXIT` verdict, triggered kill-switch, or `max_weight_pct === 0`, even if `tier === "passed"`).
-  - **Tier 3:** Remaining cap-breach trims net of swap/exit relief.
-- **Dip Triage:** Pair buy tranches with `available_funding_base` (`deployable_cash_base + total_freed_base`), respect `GATED` ahead of `CAP_BLOCKED`, distinguish `single_name_room_pct` (swap room) from `portfolio_cap_room_pct` (net-add room), and enforce staged 2–3 week tranche pacing when `VIX >= 28`.
-- **Backtest Lab (`run_portfolio_backtest`):** Use `include_external_wealth: true` (default) and cached 3M T-bill `rf_pct` to evaluate FX-converted 5Y CAGR, Max Drawdown, `Sharpe ± SE`, rebalance counts, historical regimes, and cluster correlations.
+## 6. Read-Only Broker Sync & Analytical Discipline
 
-## 7. Analytical Discipline
-
-- **Currency, Extended Hours & Timestamp Hygiene:** Always report retrieval timestamps, separate trading currency from `base_currency`, distinguish RTH close from `Pre`/`Post` extended prices, and flag stale marks.
-- **No Double-Counting Liquidity:** Never sum Cash, Available Funds, and Buying Power as separate pools.
-- **Forensic & Calibration Honesty:** Inspect Reverse DCF 3-part attribution (`Multiple` + `Margin` + `Residual Rev` vs. `Constant-Multiple Baseline`), heed `valuation_warnings`, never count `<30d PENDING` calls as matured hit rates, and respect cross-border IRC §2101(c) & dividend WHT mechanics.
+- If Interactive Brokers (`ibkr_ibkr-mcp`) or another read-only broker MCP is connected, pull positions, cash, accruals, FX, earnings insights, options IV, and weekly price history read-only into `update_portfolio_positions` and `ingest_research_intel`.
+- Always report retrieval timestamps, separate trading currency from `base_currency`, distinguish RTH close from extended hours, never double-count liquidity pools, heed `valuation_warnings` (including Owner Earnings vs headline FCF SBC divergence), and never count `<30d PENDING` calls as matured hit rates.

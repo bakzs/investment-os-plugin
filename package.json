@@ -1,7 +1,7 @@
 {
   "name": "investment-os-plugin",
-  "version": "0.5.0",
-  "description": "Open-source Antigravity Quantamental Personal-CIO MCP App plugin for multi-currency portfolio analytics, ETF look-through, Priority Sells & Tax Swaps, automated SEC XBRL/Form 4/macro signals, 3-layer shared research graph, living dossiers (Reverse DCF bridge & 5Y scenarios), deterministic backtesting, and delta-only CIO Watchdog.",
+  "version": "0.6.0",
+  "description": "Open-source Antigravity Quantamental Personal-CIO MCP App plugin for multi-currency portfolio analytics, correlated Monte Carlo forward forecasting & action simulation, ETF look-through, Priority Sells & Tax Swaps, automated SEC XBRL (Owner Earnings, ROIC, Accruals)/Form 4 signals, 3-layer research graph, adversarial deep company research, deterministic backtesting, and quiet delta-only Watchdog.",
   "license": "MIT",
   "type": "module",
   "repository": {

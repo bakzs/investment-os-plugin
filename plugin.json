@@ -1,14 +1,14 @@
 {
   "name": "investment-os",
   "displayName": "Investment OS",
-  "version": "0.5.0",
-  "description": "Quantamental Personal-CIO sidecar workstation for multi-currency portfolios: ETF look-through, Priority Sells & Tax Swaps, automated SEC XBRL & Form 4 insider signals, 4-indicator Macro Strip, Shared Themes graph, Reverse DCF attribution bridge, dip triage, FX-aware backtesting, and delta-only Watchdog.",
+  "version": "0.6.0",
+  "description": "Quantamental Personal-CIO sidecar workstation for multi-currency portfolios: executive cockpit, 5Y correlated Monte Carlo forward portfolio forecast & action simulator, ETF look-through, Owner Earnings & ROIC XBRL quality scoring, Form 4 insiders, 3-lens adversarial deep company research, Reverse DCF bridge, FX-aware backtesting, and quiet Watchdog.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Open my Investment OS dashboard and help me onboard my portfolio",
-    "Run a Watchdog sweep and review Priority Sells & Tax Swaps, alerts, and open SEC gates",
-    "Sync XBRL fundamentals and Form 4 insiders, then run a systematic thesis test on a stock",
-    "Create a shared macro/sector theme linking multiple stocks and run a 5-year portfolio-impact backtest"
+    "Forecast my portfolio over 5 years if I apply the recommended tax swaps, exits, and deploy freed cash",
+    "Run a 3-lens institutional deep dive on a company and update its living dossier and Reverse DCF model",
+    "Run a Watchdog sweep and summarize only high-priority actionable deltas across my holdings"
   ],
   "author": {
     "name": "bakzs",

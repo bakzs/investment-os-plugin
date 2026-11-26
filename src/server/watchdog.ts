@@ -384,16 +384,33 @@ export async function runWatchdogSweep(
     }
   }
 
-  // 4b. SEC 8-K / NT red flags
+  // 4b. SEC 8-K / NT critical red flags (filter out routine `info` items like 8-K:5.02 & stale history)
+  const heldTickerSet = new Set<string>(
+    (portfolio?.positions ?? []).filter((p) => p.qty > 0).map((p) => p.ticker.toUpperCase()),
+  );
+  const activeTickerSet = new Set<string>(
+    parsedTheses
+      .filter(({ fm }) => (DossierTierSchema.safeParse(fm.tier).success ? fm.tier : "active") === "active")
+      .map(({ fm }) => normalizeTicker(fm.ticker)),
+  );
+  const nowMs = nowDate.getTime();
   const redFlags = extractSecRedFlags(latestEdgar.filings_by_ticker);
   for (const rf of redFlags) {
+    if (rf.severity === "info") continue; // Preserved in edgar_cache/sec_red_flags for agents; never pollutes human inbox
+    const filedMs = Date.parse(`${rf.filingDate}T00:00:00Z`);
+    const ageDays = Number.isFinite(filedMs) ? (nowMs - filedMs) / 86_400_000 : 999;
+    const symUp = rf.ticker.toUpperCase();
+    if (rf.severity === "high" && ageDays > 90) continue;
+    if (rf.severity === "medium" && (ageDays > 45 || (!heldTickerSet.has(symUp) && !activeTickerSet.has(symUp)))) {
+      continue;
+    }
     enqueueAlert({
-      id: `sec-red-flag:${rf.ticker.toUpperCase()}:${rf.code}:${rf.accession}`,
+      id: `sec-red-flag:${symUp}:${rf.code}:${rf.accession}`,
       detected_at: nowIso,
       severity: rf.severity,
       kind: "sec_red_flag",
-      ticker: rf.ticker.toUpperCase(),
-      title: `${rf.ticker} ${rf.code} Forensic Filing Alert`,
+      ticker: symUp,
+      title: `${symUp} ${rf.code} Filing Alert`,
       detail: `${rf.label} (${rf.form} filed ${rf.filingDate})`,
       acknowledged: false,
     });
@@ -466,7 +483,7 @@ export async function runWatchdogSweep(
     }
 
     const priceAtAudit = typeof fm.price_at_audit === "number" && fm.price_at_audit > 0 ? fm.price_at_audit : null;
-    if (priceAtAudit !== null && curPrice !== null) {
+    if (tier !== "passed" && priceAtAudit !== null && curPrice !== null) {
       const driftPct = round(((curPrice - priceAtAudit) / priceAtAudit) * 100, 1);
       if (Math.abs(driftPct) >= 15) {
         const bucket = Math.floor(Math.abs(driftPct) / 15) * 15;

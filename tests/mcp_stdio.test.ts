@@ -15,7 +15,7 @@ function findNodeRuntime(): string {
   return process.execPath;
 }
 
-test("bundled dist/server.cjs passes end-to-end v0.5 stdio MCP App lifecycle", async () => {
+test("bundled dist/server.cjs passes end-to-end v0.6 stdio MCP App lifecycle", async () => {
   const rootDir = path.resolve(process.cwd());
   const serverPath = path.join(rootDir, "dist", "server.cjs");
   assert.equal(fs.existsSync(serverPath), true, "dist/server.cjs must be built before running stdio test");
@@ -28,7 +28,7 @@ test("bundled dist/server.cjs passes end-to-end v0.5 stdio MCP App lifecycle", a
   });
 
   const client = new Client(
-    { name: "investment-os-test-client", version: "0.5.0" },
+    { name: "investment-os-test-client", version: "0.6.0" },
     { capabilities: {} },
   );
 
@@ -42,7 +42,7 @@ test("bundled dist/server.cjs passes end-to-end v0.5 stdio MCP App lifecycle", a
     const openTool = byName.get("open_dashboard");
     assert.ok(openTool);
     const openMeta = openTool._meta as Record<string, unknown>;
-    assert.deepEqual(openMeta?.ui, { resourceUri: "ui://investment-os/v5/dashboard.html" });
+    assert.deepEqual(openMeta?.ui, { resourceUri: "ui://investment-os/v6/dashboard.html" });
     const agyUi = openMeta?.["com.google.antigravity/ui"] as { entrypoints?: Array<{ type: string; title: string }> };
     assert.equal(agyUi?.entrypoints?.length, 2);
 
@@ -56,11 +56,12 @@ test("bundled dist/server.cjs passes end-to-end v0.5 stdio MCP App lifecycle", a
       "run_watchdog_sweep",
       "update_etf_weights",
       "run_portfolio_backtest",
+      "simulate_portfolio_forecast",
     ]) {
       const tool = byName.get(inlineToolName);
       assert.ok(tool, `missing ${inlineToolName}`);
       assert.deepEqual((tool._meta as Record<string, unknown>)?.ui, {
-        resourceUri: "ui://investment-os/v5/dashboard.html",
+        resourceUri: "ui://investment-os/v6/dashboard.html",
       });
     }
 
@@ -76,6 +77,7 @@ test("bundled dist/server.cjs passes end-to-end v0.5 stdio MCP App lifecycle", a
       "app_get_dossier_detail",
       "app_save_dossier_model",
       "app_run_backtest",
+      "app_simulate_forecast",
     ]) {
       const appTool = byName.get(appToolName);
       assert.ok(appTool, `missing ${appToolName}`);
@@ -84,15 +86,15 @@ test("bundled dist/server.cjs passes end-to-end v0.5 stdio MCP App lifecycle", a
 
     // 2. Verify resource listing and HTML content
     const resList = await client.listResources();
-    assert.equal(resList.resources[0]?.uri, "ui://investment-os/v5/dashboard.html");
+    assert.equal(resList.resources[0]?.uri, "ui://investment-os/v6/dashboard.html");
     assert.equal(resList.resources[0]?.mimeType, "text/html;profile=mcp-app");
 
-    const resRead = await client.readResource({ uri: "ui://investment-os/v5/dashboard.html" });
+    const resRead = await client.readResource({ uri: "ui://investment-os/v6/dashboard.html" });
     const item = resRead.contents[0];
     assert.ok(item && "text" in item);
     assert.equal(item.mimeType, "text/html;profile=mcp-app");
     assert.equal(item.text.includes("Investment OS"), true);
-    assert.equal(item.text.includes("v0.5"), true);
+    assert.equal(item.text.includes("v0.6"), true);
     assert.equal(item.text.includes('<dialog id="stock-inspector"'), true);
     assert.equal(Buffer.byteLength(item.text, "utf-8") < 1_000_000, true);
 
@@ -102,13 +104,14 @@ test("bundled dist/server.cjs passes end-to-end v0.5 stdio MCP App lifecycle", a
     assert.equal(emptyPayload.initialized, false);
     assert.equal(fs.readdirSync(tempDataDir).length, 0);
 
-    // 4. Demo mode renders synthetic v0.5 preview + demo dossier detail + demo theme detail + backtest without writing files
+    // 4. Demo mode renders synthetic v0.6 preview + forecast + demo dossier detail + demo theme detail + backtest without writing files
     const demoCall = await client.callTool({ name: "app_get_dashboard", arguments: { demo: true } });
     const demoPayload = demoCall.structuredContent as {
       initialized: boolean;
       is_demo: boolean;
       macro_regime: { regime_label: string } | null;
       rotation_queue: { tax_swaps: unknown[]; mandatory_exits: unknown[] };
+      forecast: { baseline: { ending_p50_base: number }; simulated: { ending_p50_base: number } } | null;
       themes: Array<{ slug: string }>;
       alerts: unknown[];
       portfolio: { positions: unknown[] };
@@ -119,11 +122,26 @@ test("bundled dist/server.cjs passes end-to-end v0.5 stdio MCP App lifecycle", a
     assert.equal(demoPayload.macro_regime?.regime_label, "CALM");
     assert.equal(demoPayload.rotation_queue.tax_swaps.length >= 1, true);
     assert.equal(demoPayload.rotation_queue.mandatory_exits.length >= 1, true);
+    assert.equal(Boolean(demoPayload.forecast && demoPayload.forecast.simulated.ending_p50_base > 0), true);
     assert.equal(demoPayload.themes.length >= 1, true);
     assert.equal(demoPayload.alerts.length >= 1, true);
     assert.equal(demoPayload.lab.active_count, 3);
     assert.equal(demoPayload.lab.bench_count, 1);
     assert.equal(demoPayload.lab.passed_count, 1);
+
+    const demoForecastCall = await client.callTool({
+      name: "app_simulate_forecast",
+      arguments: { demo: true, horizon_years: 5, apply_recommended_rotations: true, simulations: 400 },
+    });
+    const demoForecast = demoForecastCall.structuredContent as {
+      horizon_years: number;
+      deltas: { estate_tax_saved_base: number };
+      simulated: { ending_p10_base: number; ending_p50_base: number; ending_p90_base: number };
+    };
+    assert.equal(demoForecast.horizon_years, 5);
+    assert.equal(demoForecast.simulated.ending_p10_base < demoForecast.simulated.ending_p50_base, true);
+    assert.equal(demoForecast.simulated.ending_p50_base < demoForecast.simulated.ending_p90_base, true);
+    assert.equal(demoForecast.deltas.estate_tax_saved_base > 0, true);
 
     const demoDetailCall = await client.callTool({
       name: "app_get_dossier_detail",
@@ -387,6 +405,23 @@ test("bundled dist/server.cjs passes end-to-end v0.5 stdio MCP App lifecycle", a
     assert.equal(themeDetail.slug, "edge-ai-services");
     assert.equal(themeDetail.memo_md?.includes("Stdio theme round-trip check"), true);
     assert.equal(themeDetail.linked_theses[0]?.ticker, "AAPL");
+
+    const forecastCall = await client.callTool({
+      name: "simulate_portfolio_forecast",
+      arguments: {
+        horizon_years: 5,
+        simulations: 400,
+        apply_recommended_rotations: false,
+        actions: [{ type: "park_cash_in_benchmark" }],
+      },
+    });
+    assert.equal(Boolean(forecastCall.isError), false);
+    const forecastPayload = forecastCall.structuredContent as {
+      forecast: { simulated: { ending_p50_base: number; ending_cash_base: number } } | null;
+    };
+    assert.equal(Boolean(forecastPayload.forecast && forecastPayload.forecast.simulated.ending_p50_base > 0), true);
+    // Preserves configured £5,000 liquidity_reserve while sweeping £5,000 excess cash into VWRA
+    assert.equal(forecastPayload.forecast?.simulated.ending_cash_base, 5000);
 
     const finalCall = await client.callTool({ name: "open_dashboard", arguments: {} });
     const finalPayload = finalCall.structuredContent as {

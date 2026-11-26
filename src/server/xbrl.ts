@@ -171,6 +171,18 @@ const ST_DEBT_CONCEPTS: ConceptCandidate[] = [
   { taxonomy: "ifrs-full", tag: "CurrentBorrowings" },
 ];
 
+const TOTAL_ASSETS_CONCEPTS: ConceptCandidate[] = [
+  { taxonomy: "us-gaap", tag: "Assets" },
+  { taxonomy: "ifrs-full", tag: "Assets" },
+];
+
+const STOCKHOLDERS_EQUITY_CONCEPTS: ConceptCandidate[] = [
+  { taxonomy: "us-gaap", tag: "StockholdersEquity" },
+  { taxonomy: "us-gaap", tag: "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest" },
+  { taxonomy: "ifrs-full", tag: "EquityAttributableToOwnersOfParent" },
+  { taxonomy: "ifrs-full", tag: "Equity" },
+];
+
 function round(val: number, decimals = 2): number {
   const factor = 10 ** decimals;
   return Math.round((val + Number.EPSILON) * factor) / factor;
@@ -439,26 +451,57 @@ function computePeriodRatios(period: FundamentalsPeriod, isAnnual: boolean): Fun
   const inv = period.inventory_m ?? null;
   const cash = period.cash_and_st_inv_m ?? null;
   const debt = period.total_debt_m ?? null;
+  const totalAssets = period.total_assets_m ?? null;
+  const equity = period.stockholders_equity_m ?? null;
   const shares = period.diluted_shares_m ?? null;
   const eps =
     period.eps_diluted ??
     (ni !== null && shares !== null && shares > 0 ? round(ni / shares, 2) : null);
 
   const daysBasis = isAnnual ? 365 : 91.25;
+  const annFactor = isAnnual ? 1 : 4;
   const grossMarginPct = rev !== null && rev > 0 && gp !== null ? round((gp / rev) * 100, 2) : null;
   const operatingMarginPct = rev !== null && rev > 0 && opInc !== null ? round((opInc / rev) * 100, 2) : null;
   const fcfMarginPct = rev !== null && rev > 0 && fcf !== null ? round((fcf / rev) * 100, 2) : null;
+  const ownerEarningsM = fcf !== null && sbc !== null ? round(fcf - sbc, 2) : fcf;
+  const ownerEarningsMarginPct =
+    rev !== null && rev > 0 && ownerEarningsM !== null ? round((ownerEarningsM / rev) * 100, 2) : null;
   const ocfToNiPct = ni !== null && ni > 0 && ocf !== null ? round((ocf / ni) * 100, 2) : null;
   const sbcPctRev = rev !== null && rev > 0 && sbc !== null ? round((sbc / rev) * 100, 2) : null;
   const dsoDays = rev !== null && rev > 0 && ar !== null ? round((ar / rev) * daysBasis, 1) : null;
   const dioDays = cogs !== null && cogs > 0 && inv !== null ? round((inv / cogs) * daysBasis, 1) : null;
   const netCashB = cash !== null ? round((cash - (debt ?? 0)) / 1000, 3) : null;
 
+  let investedCapitalM: number | null = null;
+  if (equity !== null) {
+    const rawIc = equity + (debt ?? 0) - (cash ?? 0);
+    const totalCapital = equity + (debt ?? 0);
+    if (rawIc > Math.max(10, totalCapital * 0.1)) {
+      investedCapitalM = round(rawIc, 2);
+    } else if (totalCapital > 0) {
+      investedCapitalM = round(totalCapital, 2);
+    }
+  }
+  const nopatM = opInc !== null ? opInc * 0.79 : null;
+  const roicPct =
+    nopatM !== null && investedCapitalM !== null && investedCapitalM > 0
+      ? round(Math.max(-200, Math.min(250, ((nopatM * annFactor) / investedCapitalM) * 100)), 2)
+      : null;
+  const accrualsRatioPct =
+    ni !== null && ocf !== null && totalAssets !== null && totalAssets > 0
+      ? round((((ni - ocf) * annFactor) / totalAssets) * 100, 2)
+      : null;
+
   return {
     ...period,
     gross_profit_m: gp,
     cogs_m: cogs,
     fcf_m: fcf,
+    owner_earnings_m: ownerEarningsM,
+    owner_earnings_margin_pct: ownerEarningsMarginPct,
+    invested_capital_m: investedCapitalM,
+    roic_pct: roicPct,
+    accruals_ratio_pct: accrualsRatioPct,
     eps_diluted: eps,
     net_cash_b: netCashB,
     gross_margin_pct: grossMarginPct,
@@ -501,10 +544,14 @@ function deriveLatestRatios(
     );
   }
 
-  // TTM per-share metrics
+  // TTM per-share metrics & SOTA Quality Score (Owner Earnings, ROIC, Incremental ROIC, Accruals)
   let ttmEps: number | null = null;
   let ttmFcfPerShare: number | null = null;
+  let ttmOwnerEarningsPerShare: number | null = null;
   let ttmRevPerShare: number | null = null;
+  let ttmOwnerEarningsMarginPct: number | null = latest?.owner_earnings_margin_pct ?? null;
+  let ttmRoicPct: number | null = latest?.roic_pct ?? null;
+  let ttmAccrualsPct: number | null = latest?.accruals_ratio_pct ?? null;
 
   if (quarterly.length >= 4) {
     const q4 = quarterly.slice(0, 4);
@@ -517,14 +564,43 @@ function deriveLatestRatios(
       ttmEps = round(ttmNi / shares, 2);
     }
 
-    if (shares && shares > 0 && q4.every((q) => typeof q.fcf_m === "number")) {
-      const ttmFcf = q4.reduce((acc, q) => acc + (q.fcf_m ?? 0), 0);
-      ttmFcfPerShare = round(ttmFcf / shares, 2);
-    }
+    const ttmRev = q4.every((q) => typeof q.revenue_m === "number")
+      ? q4.reduce((acc, q) => acc + (q.revenue_m ?? 0), 0)
+      : null;
+    const ttmFcf = q4.every((q) => typeof q.fcf_m === "number")
+      ? q4.reduce((acc, q) => acc + (q.fcf_m ?? 0), 0)
+      : null;
+    const ttmSbc = q4.every((q) => typeof q.sbc_m === "number")
+      ? q4.reduce((acc, q) => acc + (q.sbc_m ?? 0), 0)
+      : null;
+    const ttmOp = q4.every((q) => typeof q.operating_income_m === "number")
+      ? q4.reduce((acc, q) => acc + (q.operating_income_m ?? 0), 0)
+      : null;
+    const ttmNi = q4.every((q) => typeof q.net_income_m === "number")
+      ? q4.reduce((acc, q) => acc + (q.net_income_m ?? 0), 0)
+      : null;
+    const ttmOcf = q4.every((q) => typeof q.ocf_m === "number")
+      ? q4.reduce((acc, q) => acc + (q.ocf_m ?? 0), 0)
+      : null;
 
-    if (shares && shares > 0 && q4.every((q) => typeof q.revenue_m === "number")) {
-      const ttmRev = q4.reduce((acc, q) => acc + (q.revenue_m ?? 0), 0);
+    if (shares && shares > 0 && ttmFcf !== null) {
+      ttmFcfPerShare = round(ttmFcf / shares, 2);
+      const ttmOe = ttmSbc !== null ? ttmFcf - ttmSbc : ttmFcf;
+      ttmOwnerEarningsPerShare = round(ttmOe / shares, 2);
+      if (ttmRev && ttmRev > 0) {
+        ttmOwnerEarningsMarginPct = round((ttmOe / ttmRev) * 100, 2);
+      }
+    }
+    if (shares && shares > 0 && ttmRev !== null) {
       ttmRevPerShare = round(ttmRev / shares, 2);
+    }
+    const latestIc = q4[0]?.invested_capital_m ?? annual[0]?.invested_capital_m ?? null;
+    if (ttmOp !== null && latestIc && latestIc > 0) {
+      ttmRoicPct = round(Math.max(-200, Math.min(250, ((ttmOp * 0.79) / latestIc) * 100)), 2);
+    }
+    const latestAssets = q4[0]?.total_assets_m ?? annual[0]?.total_assets_m ?? null;
+    if (ttmNi !== null && ttmOcf !== null && latestAssets && latestAssets > 0) {
+      ttmAccrualsPct = round(((ttmNi - ttmOcf) / latestAssets) * 100, 2);
     }
   } else if (annual[0]) {
     const fy = annual[0];
@@ -532,8 +608,72 @@ function deriveLatestRatios(
     ttmEps = fy.eps_diluted ?? null;
     if (shares && shares > 0) {
       ttmFcfPerShare = fy.fcf_m != null ? round(fy.fcf_m / shares, 2) : null;
+      ttmOwnerEarningsPerShare = fy.owner_earnings_m != null ? round(fy.owner_earnings_m / shares, 2) : ttmFcfPerShare;
       ttmRevPerShare = fy.revenue_m != null ? round(fy.revenue_m / shares, 2) : null;
     }
+  }
+
+  let incrementalRoicPct: number | null = null;
+  if (annual.length >= 2) {
+    const cur = annual[0]!;
+    const prev = annual[Math.min(2, annual.length - 1)]!;
+    if (
+      typeof cur.operating_income_m === "number" &&
+      typeof prev.operating_income_m === "number" &&
+      typeof cur.invested_capital_m === "number" &&
+      typeof prev.invested_capital_m === "number"
+    ) {
+      const dIc = cur.invested_capital_m - prev.invested_capital_m;
+      const dNopat = (cur.operating_income_m - prev.operating_income_m) * 0.79;
+      if (dIc > Math.max(25, prev.invested_capital_m * 0.05)) {
+        incrementalRoicPct = round(Math.max(-200, Math.min(250, (dNopat / dIc) * 100)), 2);
+      }
+    }
+  }
+
+  // Deterministic institutional quality grade (A-D) & flags
+  const qualityFlags: string[] = [];
+  let qualityScore = 0;
+  let qualityChecks = 0;
+
+  if (ttmRoicPct !== null) {
+    qualityChecks += 1;
+    if (ttmRoicPct >= 20) qualityScore += 2;
+    else if (ttmRoicPct >= 12) qualityScore += 1;
+    else if (ttmRoicPct < 8) qualityFlags.push(`Low ROIC (${ttmRoicPct.toFixed(1)}% < 8% WACC proxy)`);
+  }
+  if (ttmOwnerEarningsMarginPct !== null) {
+    qualityChecks += 1;
+    if (ttmOwnerEarningsMarginPct >= 18) qualityScore += 2;
+    else if (ttmOwnerEarningsMarginPct >= 8) qualityScore += 1;
+    else if (ttmOwnerEarningsMarginPct < 0) qualityFlags.push(`Negative SBC-adjusted Owner Earnings (${ttmOwnerEarningsMarginPct.toFixed(1)}%)`);
+  }
+  const ocfNi = latest?.ocf_to_ni_pct ?? null;
+  if (ocfNi !== null) {
+    qualityChecks += 1;
+    if (ocfNi >= 100) qualityScore += 2;
+    else if (ocfNi >= 80) qualityScore += 1;
+    else qualityFlags.push(`Weak cash conversion (OCF/NI ${ocfNi.toFixed(0)}% < 80%)`);
+  }
+  if (ttmAccrualsPct !== null) {
+    qualityChecks += 1;
+    if (ttmAccrualsPct <= 0) qualityScore += 2;
+    else if (ttmAccrualsPct <= 4) qualityScore += 1;
+    else qualityFlags.push(`Elevated accruals (${ttmAccrualsPct.toFixed(1)}% of assets > 4%)`);
+  }
+  const sbcPct = latest?.sbc_pct_rev ?? null;
+  if (sbcPct !== null && sbcPct >= 8) {
+    qualityFlags.push(`Heavy stock-based comp (${sbcPct.toFixed(1)}% of revenue)`);
+    qualityScore = Math.max(0, qualityScore - 1);
+  }
+  if (dilutedSharesYoyPct !== null && dilutedSharesYoyPct >= 3) {
+    qualityFlags.push(`Share dilution (+${dilutedSharesYoyPct.toFixed(1)}% YoY)`);
+  }
+
+  let qualityGrade: "A" | "B" | "C" | "D" | null = null;
+  if (qualityChecks >= 2) {
+    const pct = qualityScore / (qualityChecks * 2);
+    qualityGrade = pct >= 0.78 ? "A" : pct >= 0.52 ? "B" : pct >= 0.28 ? "C" : "D";
   }
 
   const ratios: FundamentalsRatios = {
@@ -543,11 +683,18 @@ function deriveLatestRatios(
     dio_days: latest?.dio_days ?? null,
     ocf_to_ni_pct: latest?.ocf_to_ni_pct ?? null,
     fcf_margin_pct: latest?.fcf_margin_pct ?? null,
+    owner_earnings_margin_pct: ttmOwnerEarningsMarginPct,
     sbc_pct_rev: latest?.sbc_pct_rev ?? null,
+    roic_pct: ttmRoicPct,
+    incremental_roic_pct: incrementalRoicPct,
+    accruals_ratio_pct: ttmAccrualsPct,
+    quality_grade: qualityGrade,
+    quality_flags: qualityFlags,
     net_cash_b: latest?.net_cash_b ?? null,
     diluted_shares_yoy_pct: dilutedSharesYoyPct,
     ttm_eps: ttmEps,
     ttm_fcf_per_share: ttmFcfPerShare,
+    ttm_owner_earnings_per_share: ttmOwnerEarningsPerShare,
     ttm_rev_per_share: ttmRevPerShare,
   };
 
@@ -559,17 +706,22 @@ function deriveLatestRatios(
       "dio_days",
       "ocf_to_ni_pct",
       "fcf_margin_pct",
+      "owner_earnings_margin_pct",
       "sbc_pct_rev",
+      "roic_pct",
+      "incremental_roic_pct",
+      "accruals_ratio_pct",
       "net_cash_b",
       "diluted_shares_yoy_pct",
       "ttm_eps",
       "ttm_fcf_per_share",
+      "ttm_owner_earnings_per_share",
       "ttm_rev_per_share",
     ];
     for (const k of numericKeys) {
       const ov = overrides[k];
       if (typeof ov === "number" && Number.isFinite(ov)) {
-        ratios[k] = ov;
+        (ratios as Record<string, unknown>)[k] = ov;
       }
     }
   }
@@ -612,6 +764,8 @@ export function parseCompanyFactsToFundamentals(
   const stInvInstants = collectInstantFacts(payload, ST_INVESTMENTS_CONCEPTS, ccyMatcher);
   const ltDebtInstants = collectInstantFacts(payload, LT_DEBT_NONCURRENT_CONCEPTS, ccyMatcher);
   const stDebtInstants = collectInstantFacts(payload, ST_DEBT_CONCEPTS, ccyMatcher);
+  const assetsInstants = collectInstantFacts(payload, TOTAL_ASSETS_CONCEPTS, ccyMatcher);
+  const equityInstants = collectInstantFacts(payload, STOCKHOLDERS_EQUITY_CONCEPTS, ccyMatcher);
 
   const qRev = buildQuarterlyFlowMap(revFacts, true);
   const qCogs = buildQuarterlyFlowMap(cogsFacts, true);
@@ -690,6 +844,8 @@ export function parseCompanyFactsToFundamentals(
       cogs_m: toM(qCogs.get(periodEnd)?.val),
       cash_and_st_inv_m: resolveCashM(periodEnd),
       total_debt_m: resolveDebtM(periodEnd),
+      total_assets_m: toM(findInstantNear(assetsInstants, periodEnd)),
+      stockholders_equity_m: toM(findInstantNear(equityInstants, periodEnd)),
     };
     return computePeriodRatios(base, false);
   });
@@ -723,6 +879,8 @@ export function parseCompanyFactsToFundamentals(
       cogs_m: toM(aCogs.get(periodEnd)?.val),
       cash_and_st_inv_m: resolveCashM(periodEnd),
       total_debt_m: resolveDebtM(periodEnd),
+      total_assets_m: toM(findInstantNear(assetsInstants, periodEnd)),
+      stockholders_equity_m: toM(findInstantNear(equityInstants, periodEnd)),
     };
     return computePeriodRatios(base, true);
   });

@@ -249,6 +249,8 @@ interface ReverseDcfSummary {
   implied_revenue_cagr_pct: number | null;
   base_revenue_cagr_pct: number | null;
   revenue_cagr_gap_pct: number | null;
+  consensus_rev_growth_pct?: number | null;
+  expectations_gap_vs_consensus_pct?: number | null;
   target_margin_pct: number | null;
   linked_hypothesis_ids: string[];
   notes: string | null;
@@ -324,6 +326,10 @@ interface FundamentalsPeriod {
   diluted_shares_m?: number | null;
   eps_diluted?: number | null;
   net_cash_b?: number | null;
+  owner_earnings_m?: number | null;
+  owner_earnings_margin_pct?: number | null;
+  roic_pct?: number | null;
+  accruals_ratio_pct?: number | null;
   gross_margin_pct?: number | null;
   operating_margin_pct?: number | null;
   fcf_margin_pct?: number | null;
@@ -340,11 +346,18 @@ interface FundamentalsRatios {
   dio_days?: number | null;
   ocf_to_ni_pct?: number | null;
   fcf_margin_pct?: number | null;
+  owner_earnings_margin_pct?: number | null;
   sbc_pct_rev?: number | null;
+  roic_pct?: number | null;
+  incremental_roic_pct?: number | null;
+  accruals_ratio_pct?: number | null;
+  quality_grade?: "A" | "B" | "C" | "D" | null;
+  quality_flags?: string[];
   net_cash_b?: number | null;
   diluted_shares_yoy_pct?: number | null;
   ttm_eps?: number | null;
   ttm_fcf_per_share?: number | null;
+  ttm_owner_earnings_per_share?: number | null;
   ttm_rev_per_share?: number | null;
 }
 
@@ -480,7 +493,7 @@ interface SecRedFlag {
   filingDate: string;
   accession: string;
   code: string;
-  severity: "high" | "medium";
+  severity: "high" | "medium" | "info";
   label: string;
   items?: string;
   url: string;
@@ -667,6 +680,17 @@ interface DossierIntel {
     iv_skew_pct?: number | null;
     iv_percentile_52w?: number | null;
     note?: string;
+  } | null;
+  consensus?: {
+    as_of?: string;
+    ntm_rev_b?: number | null;
+    ntm_rev_growth_pct?: number | null;
+    ntm_eps?: number | null;
+    fy1_eps_est?: number | null;
+    fy2_eps_est?: number | null;
+    eps_revision_90d_pct?: number | null;
+    target_price_mean?: number | null;
+    analyst_count?: number | null;
   } | null;
   themes: string[];
   connections: Array<{ ticker?: string; name: string; relation: string }>;
@@ -893,6 +917,97 @@ interface EdgarFiling {
   url: string;
 }
 
+interface ForecastYearPoint {
+  year: number;
+  p10_base: number;
+  p25_base: number;
+  p50_base: number;
+  p75_base: number;
+  p90_base: number;
+  mean_base: number;
+}
+
+interface ForecastPathSummary {
+  starting_wealth_base: number;
+  ending_p10_base: number;
+  ending_p50_base: number;
+  ending_p90_base: number;
+  ending_mean_base: number;
+  expected_cagr_p50_pct: number;
+  p10_cagr_pct: number;
+  p90_cagr_pct: number;
+  annual_vol_pct: number;
+  expected_sharpe: number;
+  prob_beat_benchmark_pct: number;
+  prob_loss_pct: number;
+  us_situs_portfolio_pct: number;
+  estate_tax_base: number;
+  annual_wht_drag_base: number;
+  cap_breaches_count: number;
+  breached_cap_labels: string[];
+  ending_cash_base: number;
+  trajectory: ForecastYearPoint[];
+}
+
+interface ForecastPositionSizingRow {
+  ticker: string;
+  is_external: boolean;
+  is_cash: boolean;
+  before_value_base: number;
+  after_value_base: number;
+  before_weight_pct: number;
+  after_weight_pct: number;
+  expected_cagr_pct: number;
+  annual_vol_pct: number;
+  return_source: string;
+  marginal_risk_contrib_pct: number;
+  corr_with_portfolio: number;
+  corr_adjusted_hurdle_pct: number;
+  quarter_kelly_weight_pct: number;
+  quality_grade?: "A" | "B" | "C" | "D" | null;
+}
+
+interface ForecastAppliedActionLog {
+  label: string;
+  type: string;
+  ticker?: string;
+  target_ticker?: string;
+  amount_base: number;
+  note?: string;
+}
+
+interface PortfolioForecastResult {
+  horizon_years: number;
+  base_currency: string;
+  include_external_wealth: boolean;
+  regime_vol_multiplier: number;
+  simulations: number;
+  rf_pct: number;
+  benchmark_ticker: string;
+  benchmark_cagr_pct: number;
+  benchmark_ending_base: number;
+  baseline: ForecastPathSummary;
+  simulated: ForecastPathSummary;
+  deltas: {
+    p50_base: number;
+    p10_base: number;
+    p90_base: number;
+    cagr_p50_pct: number;
+    annual_vol_pct: number;
+    sharpe: number;
+    estate_tax_saved_base: number;
+    annual_wht_saved_base: number;
+    us_situs_delta_pct: number;
+    cap_breaches_delta: number;
+    cured_caps: string[];
+    remaining_breached_caps: string[];
+  };
+  applied_actions: ForecastAppliedActionLog[];
+  cash_shortfall_base: number;
+  positions: ForecastPositionSizingRow[];
+  methodology_note: string;
+}
+
 interface DashboardPayload {
   initialized: boolean;
   is_demo: boolean;
@@ -964,20 +1079,23 @@ interface DashboardPayload {
   themes?: ThemeObject[];
   alerts?: WatchdogAlert[];
   sec_red_flags?: SecRedFlag[];
+  forecast?: PortfolioForecastResult | null;
   lab?: DashboardLabSection;
 }
 
-type TabId = "overview" | "holdings" | "theses" | "edgar" | "lab";
+type TabId = "overview" | "forecast" | "holdings" | "theses" | "edgar" | "lab";
 type SortKey = "ticker" | "mv_base" | "weight_nav_pct" | "pnl_pct" | "change_1d_pct";
 type HoldingsMode = "positions" | "lookthrough";
 type TierFilter = "active" | "bench" | "passed" | "all";
 type ThesisSubFilter = "all" | "buy" | "gated" | "trim" | "retest";
+type InspectorTabId = "summary" | "memo" | "valuation" | "signals";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "overview", label: "Overview" },
+  { id: "forecast", label: "Forecast" },
   { id: "holdings", label: "Holdings" },
-  { id: "theses", label: "Theses & Dossiers" },
-  { id: "edgar", label: "Catalysts & SEC" },
+  { id: "theses", label: "Research" },
+  { id: "edgar", label: "SEC & Alerts" },
   { id: "lab", label: "Lab" },
 ];
 
@@ -992,7 +1110,7 @@ const SLICE_PALETTE = [
   "var(--viz-8)",
 ];
 
-const app = new App({ name: "Investment OS", version: "0.5.0" }, {});
+const app = new App({ name: "Investment OS", version: "0.6.0" }, {});
 let state: DashboardPayload | null = null;
 let activeTab: TabId = "overview";
 let hostCaps: McpUiHostCapabilities | undefined;
@@ -1010,6 +1128,7 @@ let simExtBase = 0;
 let simReserveBase = 0;
 let inspectorTicker: string | null = null;
 let inspectorThemeSlug: string | null = null;
+let inspectorTab: InspectorTabId = "summary";
 let inspectorLoading = false;
 let inspectorRefineOpen = false;
 let inspectorSendMode: "background" | "here" = "background";
@@ -1024,6 +1143,17 @@ let btWeight = 5;
 let btFunding = "cash";
 let btBand = 25;
 let btIncludeExternal = true;
+let forecastResult: PortfolioForecastResult | null = null;
+let forecastBusy = false;
+let forecastError = "";
+let forecastHorizon = 5;
+let forecastVolMult = 1.0;
+let forecastIncludeExt = true;
+let forecastParkCash = false;
+const forecastDisabledRotations = new Set<string>();
+let forecastPlannedBuys: Array<{ id: string; ticker: string; amount_base: number }> = [];
+let forecastBuyTicker = "";
+let forecastBuyAmount = 25000;
 let hasInitializedFromResult = false;
 let svgIdSeq = 0;
 let supportsDisplayTransitionCache: boolean | undefined;
@@ -1145,25 +1275,31 @@ function applyThemeContext(ctx?: McpUiHostContext): void {
   }
 }
 
+function qualityGradeBadge(grade: "A" | "B" | "C" | "D" | null | undefined, compact = false): string {
+  if (!grade) return "";
+  const cls = grade === "A" ? "q-a" : grade === "B" ? "q-b" : grade === "C" ? "q-c" : "q-d";
+  const tip =
+    grade === "A"
+      ? "Quality Grade A — Strong ROIC, Owner Earnings (FCF-SBC), and cash-backed accruals"
+      : grade === "B"
+        ? "Quality Grade B — Solid capital returns and cash conversion"
+        : grade === "C"
+          ? "Quality Grade C — Mixed capital efficiency or elevated SBC/accruals"
+          : "Quality Grade D — Weak Owner Earnings, low ROIC, or aggressive accruals";
+  return `<span class="quality-pill ${cls}" title="${esc(tip)}">${compact ? grade : `Q:${grade}`}</span>`;
+}
+
+function isRoutineNoiseAlert(a: WatchdogAlert): boolean {
+  if (a.severity === "info") return true;
+  if (a.kind === "sec_red_flag" && (a.id.includes(":8-K:5.02:") || a.title.includes("8-K:5.02"))) return true;
+  return false;
+}
+
 function actionVerdictPill(v: ActionVerdict | string | null | undefined): string {
   const up = (v || "WAIT").toUpperCase();
   if (up === "GO") return `<span class="verdict-pill verdict-go">GO</span>`;
   if (up === "PASS") return `<span class="verdict-pill verdict-pass">PASS</span>`;
   return `<span class="verdict-pill verdict-wait">WAIT</span>`;
-}
-
-function statusChip(status: string): string {
-  const s = status.toUpperCase();
-  if (s.includes("BUY") || s.includes("RE-ENTRY")) {
-    return `<span class="status-tag"><span class="dot ok"></span>${esc(status)}</span>`;
-  }
-  if (s.includes("TRIM") || s.includes("EXIT")) {
-    return `<span class="status-tag"><span class="dot bad"></span>${esc(status)}</span>`;
-  }
-  if (s.includes("GATE") || s.includes("DEEP")) {
-    return `<span class="status-tag"><span class="dot warn"></span>${esc(status)}</span>`;
-  }
-  return `<span class="status-tag quiet"><span class="dot"></span>${esc(status)}</span>`;
 }
 
 function verdictTag(verdict: string | null | undefined): string {
@@ -1496,6 +1632,103 @@ function renderEquityCurveSvg(res: BacktestResult): string {
   `;
 }
 
+function renderForecastFanSvg(fc: PortfolioForecastResult, ccy: string): string {
+  const basePts = fc.baseline.trajectory;
+  const simPts = fc.simulated.trajectory;
+  if (!simPts || simPts.length < 2) {
+    return `<div class="muted-sub">Run simulation to generate wealth projection chart.</div>`;
+  }
+
+  const w = 640;
+  const h = 210;
+  const padL = 56;
+  const padR = 76;
+  const padT = 16;
+  const padB = 26;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+
+  const benchPts = simPts.map((pt) =>
+    fc.baseline.starting_wealth_base * Math.pow(1 + fc.benchmark_cagr_pct / 100, pt.year),
+  );
+  const allVals: number[] = [];
+  for (let i = 0; i < simPts.length; i += 1) {
+    allVals.push(simPts[i]!.p10_base, simPts[i]!.p50_base, simPts[i]!.p90_base, benchPts[i]!);
+    if (basePts[i]) allVals.push(basePts[i]!.p10_base, basePts[i]!.p50_base);
+  }
+  const rawMin = Math.min(...allVals);
+  const rawMax = Math.max(...allVals);
+  const spanPad = Math.max(1000, (rawMax - rawMin) * 0.1);
+  const lo = Math.max(0, rawMin - spanPad);
+  const hi = rawMax + spanPad;
+  const span = Math.max(1, hi - lo);
+
+  const maxYr = Math.max(1, simPts[simPts.length - 1]!.year);
+  const mapX = (yr: number) => padL + (yr / maxYr) * plotW;
+  const mapY = (v: number) => padT + (1 - (v - lo) / span) * plotH;
+
+  const buildLine = (pts: Array<{ year: number; v: number }>) =>
+    pts.map((p, i) => `${i === 0 ? "M" : "L"}${mapX(p.year).toFixed(1)} ${mapY(p.v).toFixed(1)}`).join(" ");
+
+  const upper = simPts.map((p) => `${mapX(p.year).toFixed(1)} ${mapY(p.p90_base).toFixed(1)}`);
+  const lower = [...simPts].reverse().map((p) => `${mapX(p.year).toFixed(1)} ${mapY(p.p10_base).toFixed(1)}`);
+  const outerFanPath = `M${upper.join(" L")} L${lower.join(" L")} Z`;
+
+  const upper25 = simPts.map((p) => `${mapX(p.year).toFixed(1)} ${mapY(p.p75_base).toFixed(1)}`);
+  const lower25 = [...simPts].reverse().map((p) => `${mapX(p.year).toFixed(1)} ${mapY(p.p25_base).toFixed(1)}`);
+  const innerFanPath = `M${upper25.join(" L")} L${lower25.join(" L")} Z`;
+
+  const yTicks = [hi, (lo + hi) / 2, lo];
+  const gridSvg = yTicks
+    .map((val) => {
+      const y = mapY(val).toFixed(1);
+      return `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="var(--border-color)" stroke-width="1" /><text x="${padL - 7}" y="${Number(y) + 3}" text-anchor="end" fill="var(--fg-muted)" font-size="9.5" font-family="ui-monospace, monospace">${esc(fmtCompact(val, ccy))}</text>`;
+    })
+    .join("");
+
+  const xSvg = simPts
+    .map(
+      (p) =>
+        `<text x="${mapX(p.year).toFixed(1)}" y="${h - 6}" text-anchor="middle" fill="var(--fg-muted)" font-size="9.5" font-family="ui-monospace, monospace">${p.year === 0 ? "Now" : `Y${p.year}`}</text>`,
+    )
+    .join("");
+
+  const lastSim = simPts[simPts.length - 1]!;
+  const lastBase = basePts[basePts.length - 1]!;
+  const endX = mapX(lastSim.year);
+
+  const labelY90 = mapY(lastSim.p90_base);
+  const labelY50 = mapY(lastSim.p50_base);
+  const labelY10 = mapY(lastSim.p10_base);
+
+  return `
+    <div class="forecast-fan-wrap">
+      <svg class="forecast-fan-svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="${fc.horizon_years}-year portfolio wealth projection fan chart comparing Current Path vs Action Plan">
+        ${gridSvg}
+        ${xSvg}
+        <path d="${outerFanPath}" fill="var(--accent)" fill-opacity="0.11" />
+        <path d="${innerFanPath}" fill="var(--accent)" fill-opacity="0.15" />
+        <path d="${buildLine(simPts.map((p, idx) => ({ year: p.year, v: benchPts[idx]! })))}" fill="none" stroke="var(--viz-5)" stroke-width="1.35" stroke-dasharray="2 3" />
+        <path d="${buildLine(basePts.map((p) => ({ year: p.year, v: p.p50_base })))}" fill="none" stroke="var(--fg-muted)" stroke-width="1.8" stroke-dasharray="5 3" />
+        <path d="${buildLine(simPts.map((p) => ({ year: p.year, v: p.p50_base })))}" fill="none" stroke="var(--accent)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+        <circle cx="${endX.toFixed(1)}" cy="${labelY90.toFixed(1)}" r="2.5" fill="var(--ok)" />
+        <circle cx="${endX.toFixed(1)}" cy="${labelY50.toFixed(1)}" r="3.4" fill="var(--accent)" />
+        <circle cx="${endX.toFixed(1)}" cy="${mapY(lastBase.p50_base).toFixed(1)}" r="2.5" fill="var(--fg-muted)" />
+        <circle cx="${endX.toFixed(1)}" cy="${labelY10.toFixed(1)}" r="2.5" fill="var(--warn)" />
+        <text x="${(endX + 7).toFixed(1)}" y="${(labelY90 + 3).toFixed(1)}" fill="var(--ok)" font-size="9.5" font-weight="600" font-family="ui-monospace, monospace">P90 ${esc(fmtCompact(lastSim.p90_base, ccy))}</text>
+        <text x="${(endX + 7).toFixed(1)}" y="${(labelY50 + 3).toFixed(1)}" fill="var(--fg-primary)" font-size="10" font-weight="700" font-family="ui-monospace, monospace">P50 ${esc(fmtCompact(lastSim.p50_base, ccy))}</text>
+        <text x="${(endX + 7).toFixed(1)}" y="${(labelY10 + 3).toFixed(1)}" fill="var(--warn)" font-size="9.5" font-weight="600" font-family="ui-monospace, monospace">P10 ${esc(fmtCompact(lastSim.p10_base, ccy))}</text>
+      </svg>
+      <div class="equity-legend">
+        <span class="legend-item"><span class="legend-swatch-line" style="border-top-color:var(--accent)"></span><strong>Action Plan (P50)</strong> ${fmtCompact(lastSim.p50_base, ccy)} (${fc.simulated.expected_cagr_p50_pct.toFixed(1)}% CAGR)</span>
+        <span class="legend-item"><span class="legend-swatch-line dashed"></span>Current Path (P50) ${fmtCompact(lastBase.p50_base, ccy)} (${fc.baseline.expected_cagr_p50_pct.toFixed(1)}% CAGR)</span>
+        <span class="legend-item"><span class="legend-swatch-line dotted"></span>${esc(fc.benchmark_ticker)} (${fc.benchmark_cagr_pct.toFixed(1)}%) ${fmtCompact(fc.benchmark_ending_base, ccy)}</span>
+        <span class="legend-item"><span class="swatch" style="background:var(--accent);opacity:0.25"></span>P10–P90 Confidence Band (${fc.simulations.toLocaleString("en-US")} correlated paths)</span>
+      </div>
+    </div>
+  `;
+}
+
 interface DonutSegment {
   label: string;
   ticker: string | null;
@@ -1655,6 +1888,20 @@ function ingestPayload(payload: unknown): void {
   if (p.lab?.latest_backtest && !backtestResult) {
     backtestResult = p.lab.latest_backtest;
   }
+  if (p.forecast) {
+    if (!forecastResult || firstLoad) {
+      forecastResult = p.forecast;
+      forecastIncludeExt = p.forecast.include_external_wealth;
+    }
+  }
+  if (!forecastBuyTicker) {
+    const readyCand =
+      p.lab?.dip_triage_queue.find((d) => d.readiness === "READY" && d.ticker !== p.profile.benchmark?.ticker)?.ticker ??
+      p.theses.find((t) => t.tier === "active" && t.action_verdict === "GO")?.ticker ??
+      p.profile.benchmark?.ticker ??
+      "VWRA";
+    forecastBuyTicker = readyCand;
+  }
   render();
   if (inspectorTicker) {
     const dlg = document.getElementById("stock-inspector") as HTMLDialogElement | null;
@@ -1736,9 +1983,8 @@ function renderOverview(data: DashboardPayload): string {
   const ccy = data.base_currency;
   const sim = computeSimulatorMetrics(data);
   const ext = data.profile.external_exposure;
-  const reserve = data.profile.liquidity_reserve;
   const segments = buildAllocationSegments(data);
-  const roster = getRosterCounts(data);
+  const fc = forecastResult ?? data.forecast ?? null;
 
   const heroVal = heroMode === "total" && ext.enabled ? sim.totalWealthBase : data.portfolio.nav_base;
   const heroLabel = heroMode === "total" && ext.enabled ? "Total Liquid Wealth" : `${data.profile.custody_label} NAV`;
@@ -1751,12 +1997,38 @@ function renderOverview(data: DashboardPayload): string {
     `
     : "";
 
-  const vixSvg = renderSparklineSvg(data.vix_sparkline, {
-    width: 64,
-    height: 20,
-    neutral: true,
-    label: "VIX 30-day trend",
-  });
+  const macro = data.macro_regime;
+  const effectiveVix = macro?.vix ?? data.vix ?? null;
+  const regimeLbl =
+    macro?.regime_label ??
+    (effectiveVix !== null
+      ? effectiveVix >= 35
+        ? "STRESS"
+        : effectiveVix >= 28
+          ? "HIGH_VOL"
+          : effectiveVix >= 20
+            ? "ELEVATED"
+            : "CALM"
+      : "CALM");
+  const isHighVol = effectiveVix !== null && effectiveVix >= 28;
+  const macroDotCls = checkDotClass(regimeLbl);
+
+  const macroLineHtml = `
+    <div class="exec-macro-line ${isHighVol ? "is-high-vol" : ""}" aria-label="Market regime">
+      <div class="macro-items">
+        <span class="status-tag ${macroDotCls ? "" : "quiet"}"><span class="dot ${macroDotCls}"></span>${esc(regimeLbl.replace(/_/g, " "))}</span>
+        <span class="macro-item">VIX <strong>${effectiveVix !== null ? effectiveVix.toFixed(1) : "—"}</strong></span>
+        ${macro?.us10y_pct != null ? `<span class="macro-item">10Y <strong>${macro.us10y_pct.toFixed(2)}%</strong></span>` : ""}
+        ${macro?.us3m_pct != null ? `<span class="macro-item">3M <strong>${macro.us3m_pct.toFixed(2)}%</strong></span>` : ""}
+        ${isHighVol ? `<span class="pos-warn">Stage buys 2–3w apart</span>` : ""}
+      </div>
+      ${
+        isHighVol
+          ? `<label class="noise-toggle"><input type="checkbox" id="toggle-mute-vol-noise" ${muteVolNoise ? "checked" : ""} /> Mute 1D% noise</label>`
+          : `<span class="muted-sub">${ccy !== "USD" ? `USD/${ccy} ${data.usd_to_base_fx.toFixed(4)}` : "Base USD"}</span>`
+      }
+    </div>
+  `;
 
   const allocStripHtml = segments
     .map(
@@ -1766,73 +2038,20 @@ function renderOverview(data: DashboardPayload): string {
     .join("");
 
   const allocMiniLegend = segments
-    .slice(0, 7)
+    .slice(0, 6)
     .map(
       (s) =>
         `<button type="button" class="alloc-tag" ${s.ticker ? `data-inspect-ticker="${esc(s.ticker)}"` : "disabled"}><span class="swatch" style="background:${s.color}"></span><span>${esc(s.label)}</span><strong>${fmtPct(s.pct)}</strong></button>`,
     )
     .join("");
 
-  const thirdHeroLabel = data.summary.us_situs_enabled
-    ? "Est. Estate Tax"
-    : ext.enabled
-      ? `${ext.ticker || "External"} % Wealth`
-      : "Invested Holdings";
-  const thirdHeroVal = data.summary.us_situs_enabled
-    ? fmtMoney(sim.estateTaxBase, ccy)
-    : ext.enabled
-      ? fmtPct(sim.extPct)
-      : fmtMoney(data.portfolio.positions_base, ccy);
-  const thirdHeroSub = data.summary.us_situs_enabled
-    ? `${sim.marginalPct.toFixed(0)}% marginal · UCITS swap saves ${fmtMoney(sim.ucitsSavingsBase, ccy)}`
-    : ext.enabled
-      ? `${ext.label} ${fmtMoney(simExtBase, ccy)}`
-      : `${data.portfolio.positions.length} active positions`;
-
-  const fourthHeroLabel =
-    ext.enabled && data.summary.primary_bucket_label ? `${data.summary.primary_bucket_label} (TW)` : "Cash & FX";
-  const fourthHeroVal =
-    ext.enabled && data.summary.primary_bucket_label
-      ? fmtPct(sim.primaryBucketPct)
-      : `${fmtMoney(data.portfolio.cash_base, ccy)}`;
-  const fourthHeroSub =
-    ext.enabled && data.summary.primary_bucket_label
-      ? `Portfolio: ${fmtPct(data.summary.primary_bucket_portfolio_pct)}`
-      : `${ccy !== "USD" ? `USD/${ccy} ${data.usd_to_base_fx.toFixed(4)} · ` : ""}${fmtPct(data.portfolio.cash_pct)} cash`;
-
-  const macro = data.macro_regime;
-  const effectiveVix = macro?.vix ?? data.vix ?? null;
-  const regimeLbl = macro?.regime_label ?? (effectiveVix !== null ? (effectiveVix >= 35 ? "STRESS" : effectiveVix >= 28 ? "HIGH_VOL" : effectiveVix >= 20 ? "ELEVATED" : "CALM") : "CALM");
-  const macroDotCls = checkDotClass(regimeLbl);
-  const macroStripHtml = `
-    <div class="macro-strip" aria-label="Macro regime indicators">
-      <div class="macro-items">
-        <span class="macro-item"><span class="micro-label">VIX</span><strong>${effectiveVix !== null ? effectiveVix.toFixed(2) : "—"}</strong></span>
-        <span class="macro-item"><span class="micro-label">US 10Y</span><strong>${macro?.us10y_pct !== null && macro?.us10y_pct !== undefined ? `${macro.us10y_pct.toFixed(2)}%` : "—"}</strong></span>
-        <span class="macro-item"><span class="micro-label">3M T-Bill</span><strong>${macro?.us3m_pct !== null && macro?.us3m_pct !== undefined ? `${macro.us3m_pct.toFixed(2)}%` : "—"}</strong></span>
-        <span class="macro-item"><span class="micro-label">HY Credit</span><strong>${macro?.hy_credit_ratio !== null && macro?.hy_credit_ratio !== undefined ? macro.hy_credit_ratio.toFixed(3) : "—"}</strong></span>
-        ${macro?.dxy !== null && macro?.dxy !== undefined ? `<span class="macro-item"><span class="micro-label">DXY</span><strong>${macro.dxy.toFixed(1)}</strong></span>` : ""}
-      </div>
-      <span class="status-tag ${macroDotCls ? "" : "quiet"}"><span class="dot ${macroDotCls}"></span>${esc(regimeLbl.replace(/_/g, " "))}</span>
-    </div>
-  `;
-
-  const isHighVol = effectiveVix !== null && effectiveVix >= 28;
-  const reserveZeroWarn =
-    !reserve.enabled || reserve.amount_base <= 0
-      ? " Near-term liquidity reserve is currently 0 — confirm cash runway before deploying capital."
-      : "";
-  const highVolBannerHtml = isHighVol
+  const forecastHeroPill = fc
     ? `
-      <div class="high-vol-banner" role="status">
-        <div class="high-vol-text">
-          <div><strong>High-Vol Discipline Mode (VIX ${effectiveVix.toFixed(1)})</strong> — Stage buys in tranches 2–3 weeks apart and never bypass binary SEC gates.${esc(reserveZeroWarn)}</div>
-        </div>
-        <label class="noise-toggle">
-          <input type="checkbox" id="toggle-mute-vol-noise" ${muteVolNoise ? "checked" : ""} />
-          Mute 1D% &amp; P&amp;L noise
-        </label>
-      </div>
+      <button type="button" class="hero-forecast-pill" data-jump-tab="forecast" title="Open interactive ${fc.horizon_years}Y Forecast & Action Simulator">
+        <span class="micro-label">${fc.horizon_years}Y Projected (Base)</span>
+        <span class="hero-forecast-val">${fmtCompact(fc.simulated.ending_p50_base, ccy)}</span>
+        <span class="muted-sub">${fc.simulated.expected_cagr_p50_pct.toFixed(1)}% CAGR · Open Forecast &rarr;</span>
+      </button>
     `
     : "";
 
@@ -1841,21 +2060,22 @@ function renderOverview(data: DashboardPayload): string {
   const mandatoryExits = rot?.mandatory_exits ?? [];
   const capTrims = rot?.cap_trims ?? [];
   const hasRotationItems = taxSwaps.length > 0 || mandatoryExits.length > 0 || capTrims.length > 0;
+  const freedTotal = rot?.total_freed_base ?? 0;
 
-  const rotationGroupsHtml: string[] = [];
+  const actionRows: string[] = [];
   if (taxSwaps.length > 0) {
-    rotationGroupsHtml.push(`
+    actionRows.push(`
       <div class="rotation-group">
-        <span class="micro-label">1. US-ETF &rarr; UCITS Tax-Arbitrage Swaps (${taxSwaps.length})</span>
+        <span class="micro-label">Tax-Free UCITS Swaps (${taxSwaps.length})</span>
         ${taxSwaps
           .map(
             (sw) => `
           <button type="button" class="rotation-row-btn" data-inspect-ticker="${esc(sw.ticker)}">
             <div class="queue-main">
-              <span class="queue-title">${esc(sw.ticker)} &rarr; ${esc(sw.target_ticker)} · ${sw.shares.toLocaleString("en-US")} sh (${fmtMoney(sw.proceeds_base, ccy)})</span>
-              <span class="queue-sub">Saves ${fmtMoney(sw.estate_tax_saved_base, ccy)} estate tax${sw.annual_wht_saved_base > 0 ? ` + ${fmtMoney(sw.annual_wht_saved_base, ccy)}/yr WHT` : ""}${sw.auto_cured_caps.length > 0 ? ` · Cures: ${esc(sw.auto_cured_caps.join(", "))}` : ""}</span>
+              <span class="queue-title">${esc(sw.ticker)} &rarr; ${esc(sw.target_ticker)} · ${fmtCompact(sw.proceeds_base, ccy)}</span>
+              <span class="queue-sub">Saves ${fmtMoney(sw.estate_tax_saved_base, ccy)} estate tax${sw.annual_wht_saved_base > 0 ? ` + ${fmtMoney(sw.annual_wht_saved_base, ccy)}/yr WHT` : ""}</span>
             </div>
-            <span class="status-tag"><span class="dot ok"></span>TAX SWAP</span>
+            <span class="status-tag"><span class="dot ok"></span>Swap</span>
           </button>
         `,
           )
@@ -1864,18 +2084,18 @@ function renderOverview(data: DashboardPayload): string {
     `);
   }
   if (mandatoryExits.length > 0) {
-    rotationGroupsHtml.push(`
+    actionRows.push(`
       <div class="rotation-group">
-        <span class="micro-label">2. Mandatory Held Exits (${mandatoryExits.length})</span>
+        <span class="micro-label">Mandatory Exits (${mandatoryExits.length})</span>
         ${mandatoryExits
           .map(
             (ex) => `
           <button type="button" class="rotation-row-btn" data-inspect-ticker="${esc(ex.ticker)}">
             <div class="queue-main">
-              <span class="queue-title">${esc(ex.ticker)} <span class="src-badge">${esc(ex.tier)}</span> · Sell ${ex.shares.toLocaleString("en-US")} sh (${fmtMoney(ex.proceeds_base, ccy)} · ${fmtPct(ex.weight_nav_pct, 1)} NAV)</span>
+              <span class="queue-title">${esc(ex.ticker)} · ${fmtCompact(ex.proceeds_base, ccy)} (${fmtPct(ex.weight_nav_pct, 1)} NAV)</span>
               <span class="queue-sub">${esc(ex.reason)}</span>
             </div>
-            <span class="status-tag"><span class="dot bad"></span>${esc(ex.verdict || "EXIT")}</span>
+            <span class="status-tag"><span class="dot bad"></span>Exit</span>
           </button>
         `,
           )
@@ -1884,18 +2104,18 @@ function renderOverview(data: DashboardPayload): string {
     `);
   }
   if (capTrims.length > 0) {
-    rotationGroupsHtml.push(`
+    actionRows.push(`
       <div class="rotation-group">
-        <span class="micro-label">3. Cap-Breach Trims (Net of ETF Swaps · ${capTrims.length})</span>
+        <span class="micro-label">Cap-Breach Trims (${capTrims.length})</span>
         ${capTrims
           .map(
             (ct) => `
           <button type="button" class="rotation-row-btn" data-inspect-ticker="${esc(ct.ticker)}">
             <div class="queue-main">
-              <span class="queue-title">${esc(ct.ticker)} · Trim ${ct.shares_to_trim.toLocaleString("en-US")} sh (${fmtMoney(ct.proceeds_base, ccy)}) · ${esc(ct.cap_label)}</span>
-              <span class="queue-sub">${ct.current_pct.toFixed(1)}% vs ${ct.cap_pct.toFixed(1)}% cap (+${ct.excess_pct.toFixed(1)}% over) · ${esc(ct.note)}</span>
+              <span class="queue-title">${esc(ct.ticker)} · Trim ${fmtCompact(ct.proceeds_base, ccy)}</span>
+              <span class="queue-sub">${ct.current_pct.toFixed(1)}% vs ${ct.cap_pct.toFixed(1)}% ${esc(ct.cap_label)}</span>
             </div>
-            <span class="status-tag"><span class="dot warn"></span>CAP TRIM</span>
+            <span class="status-tag"><span class="dot warn"></span>Trim</span>
           </button>
         `,
           )
@@ -1904,22 +2124,18 @@ function renderOverview(data: DashboardPayload): string {
     `);
   }
 
-  const rotationTotalsHtml =
-    hasRotationItems && rot
-      ? `
-      <div class="rotation-totals">
-        <span>Freed Cash: <strong>${fmtMoney(rot.total_freed_base, ccy)}</strong></span>
-        ${rot.total_swap_base > 0 ? `<span>Tax Swaps: <strong>${fmtMoney(rot.total_swap_base, ccy)}</strong></span>` : ""}
-        ${rot.total_estate_tax_saved_base > 0 ? `<span>Estate Tax Saved: <strong class="pos-ok">${fmtMoney(rot.total_estate_tax_saved_base, ccy)}</strong></span>` : ""}
+  const priorityActionHtml = hasRotationItems
+    ? `
+      ${actionRows.join("")}
+      <div class="signal-inbox-foot">
+        <span>Frees <strong>${fmtCompact(freedTotal, ccy)}</strong>${rot && rot.total_estate_tax_saved_base > 0 ? ` · Saves <strong class="pos-ok">${fmtCompact(rot.total_estate_tax_saved_base, ccy)}</strong> estate tax` : ""}</span>
+        <button type="button" class="primary small" data-jump-tab="forecast">Simulate in Forecast &rarr;</button>
       </div>
     `
-      : "";
+    : `<div class="muted-sub" style="padding:0.5rem 0">Portfolio is clean—no pending tax swaps, mandatory exits, or cap trims.</div>`;
 
-  const priorityRotationHtml = hasRotationItems
-    ? `${rotationGroupsHtml.join("")}${rotationTotalsHtml}`
-    : `<div class="muted-sub" style="padding:0.3rem 0">No priority tax swaps, mandatory exits, or cap-breach trims pending.</div>`;
-
-  interface QueueItem {
+  // Strictly High-Signal Human Inbox (Max 5 items — routine 8-K:5.02 & background alerts live in SEC & Alerts / agent metadata)
+  interface UrgentItem {
     ticker?: string;
     themeSlug?: string;
     alertId?: string;
@@ -1927,122 +2143,92 @@ function renderOverview(data: DashboardPayload): string {
     detail: string;
     badgeLabel: string;
     dotCls: "ok" | "warn" | "bad" | "";
+    priority: number;
   }
-  const queueItems: QueueItem[] = [];
-  const seenKeys = new Set<string>();
-  const pushQueue = (key: string, item: QueueItem) => {
-    if (seenKeys.has(key)) return;
-    seenKeys.add(key);
-    queueItems.push(item);
+  const urgentItems: UrgentItem[] = [];
+  const seenUrgent = new Set<string>();
+  const pushUrgent = (key: string, item: UrgentItem) => {
+    if (seenUrgent.has(key)) return;
+    seenUrgent.add(key);
+    urgentItems.push(item);
   };
 
-  const unackedAlerts = (data.alerts ?? []).filter((a) => !a.acknowledged);
-  for (const a of unackedAlerts) {
-    pushQueue(`alert:${a.id}`, {
+  const allUnacked = (data.alerts ?? []).filter((a) => !a.acknowledged);
+  const backgroundArchivedCount = allUnacked.filter((a) => isRoutineNoiseAlert(a) || a.severity !== "high").length;
+
+  for (const a of allUnacked) {
+    if (isRoutineNoiseAlert(a)) continue;
+    if (a.severity !== "high") continue;
+    pushUrgent(`alert:${a.id}`, {
       ticker: a.ticker ?? undefined,
       themeSlug: a.theme_slug ?? undefined,
       alertId: a.id,
-      title: `${a.ticker ? `${a.ticker} · ` : ""}${a.title}`,
+      title: a.title,
       detail: `${a.detected_at.slice(0, 10)}${a.detail ? ` · ${a.detail}` : ""}`,
-      badgeLabel: a.kind.replace(/_/g, " ").toUpperCase(),
-      dotCls: a.severity === "high" ? "bad" : a.severity === "medium" ? "warn" : "",
+      badgeLabel: a.kind === "hypothesis_rule_breach" ? "Rule Breach" : a.kind === "sec_gate_cleared" ? "Gate Cleared" : "High Priority",
+      dotCls: a.kind === "sec_gate_cleared" ? "ok" : "bad",
+      priority: 1,
     });
   }
 
-  for (const rf of data.sec_red_flags ?? []) {
-    pushQueue(`secflag:${rf.ticker}:${rf.accession}:${rf.code}`, {
-      ticker: rf.ticker,
-      title: `${rf.ticker} · SEC ${rf.form} Red Flag (${rf.code})`,
-      detail: `${rf.filingDate} · ${rf.label}`,
-      badgeLabel: "SEC FLAG",
-      dotCls: rf.severity === "high" ? "bad" : "warn",
-    });
+  for (const t of data.theses) {
+    if (t.tier === "passed" && t.reentry_alert) {
+      pushUrgent(`reentry:${t.ticker}`, {
+        ticker: t.ticker,
+        title: `${t.ticker} hit re-entry target`,
+        detail: `${t.price !== null ? fmtMoney(t.price, t.currency, 2) : ""} <= ${t.reentry_price !== null ? fmtMoney(t.reentry_price, t.currency, 2) : ""} · ${t.reentry_trigger || "Review passed dossier"}`,
+        badgeLabel: "Re-Entry",
+        dotCls: "ok",
+        priority: 2,
+      });
+    }
+    const coreBreach = (t.hypotheses ?? []).find((h) => h.auto_eval?.passed === false && h.is_core);
+    if (coreBreach) {
+      pushUrgent(`rule:${t.ticker}:${coreBreach.id}`, {
+        ticker: t.ticker,
+        title: `${t.ticker} core thesis rule breached`,
+        detail: coreBreach.auto_eval?.detail ?? coreBreach.claim,
+        badgeLabel: "Rule Breach",
+        dotCls: "bad",
+        priority: 1,
+      });
+    }
   }
 
   for (const g of data.edgar.gate_evaluations) {
     if (!g.cleared) {
-      pushQueue(`gate:${g.ticker}:${g.form}`, {
+      pushUrgent(`gate:${g.ticker}:${g.form}`, {
         ticker: g.ticker,
-        title: `${g.ticker} · ${g.form} Gate Open`,
-        detail: `Waiting after ${g.filed_after} · ${g.description}`,
-        badgeLabel: "OPEN GATE",
+        title: `${g.ticker} waiting on SEC ${g.form}`,
+        detail: `${g.description} (after ${g.filed_after})`,
+        badgeLabel: "Open Gate",
         dotCls: "warn",
-      });
-    }
-  }
-
-  for (const t of data.theses) {
-    const breachedRules = (t.hypotheses ?? []).filter((h) => h.auto_eval?.passed === false);
-    if (breachedRules.length > 0) {
-      pushQueue(`xbrlflip:${t.ticker}`, {
-        ticker: t.ticker,
-        title: `${t.ticker} · ${breachedRules.length} Rule Breach${breachedRules.length > 1 ? "es" : ""}`,
-        detail: breachedRules.map((h) => `${h.id}: ${h.auto_eval?.detail ?? "breached"}`).join(" · "),
-        badgeLabel: "AUTO-BREACH",
-        dotCls: "bad",
-      });
-    }
-    if ((t.softening_warnings?.length ?? 0) > 0) {
-      pushQueue(`soften:${t.ticker}`, {
-        ticker: t.ticker,
-        title: `${t.ticker} · Softening Warning`,
-        detail: t.softening_warnings![0] ?? "Observed data breaches threshold while status softened",
-        badgeLabel: "SOFTENING",
-        dotCls: "warn",
-      });
-    }
-    if (t.hypothesis_counts?.falsified > 0) {
-      pushQueue(`falsified:${t.ticker}`, {
-        ticker: t.ticker,
-        title: `${t.ticker} · Falsified Claim`,
-        detail: `${t.hypothesis_counts.falsified} falsified hypothesis · ${t.verdict ? t.verdict.replace(/_/g, " ") : "Review required"}`,
-        badgeLabel: "FALSIFIED",
-        dotCls: "bad",
-      });
-    }
-    if (t.tier === "passed" && t.reentry_alert) {
-      pushQueue(`reentry:${t.ticker}`, {
-        ticker: t.ticker,
-        title: `${t.ticker} · Passed Re-Entry Trigger Hit`,
-        detail: `${t.price !== null ? fmtMoney(t.price, t.currency, 2) : ""} <= ${t.reentry_price !== null ? fmtMoney(t.reentry_price, t.currency, 2) : ""} · ${t.reentry_trigger || "Re-evaluate dossier"}`,
-        badgeLabel: "RE-ENTRY HIT",
-        dotCls: "ok",
-      });
-    }
-    if (t.provenance?.needs_retest) {
-      pushQueue(`retest:${t.ticker}`, {
-        ticker: t.ticker,
-        title: `${t.ticker} · Needs Re-Test`,
-        detail: t.provenance.retest_reasons.join(" · ") || "Material price drift, theme update, or newer SEC filing",
-        badgeLabel: "RE-TEST",
-        dotCls: "warn",
-      });
-    }
-    const st = t.status.toUpperCase();
-    if (t.tier !== "passed" && (st.includes("BUY") || st.includes("DEEP") || st.includes("TRIM") || st.includes("EXIT"))) {
-      pushQueue(`zone:${t.ticker}`, {
-        ticker: t.ticker,
-        title: `${t.ticker} · ${t.status}`,
-        detail: `${t.role || "Active trigger"}${t.price !== null ? ` · ${fmtMoney(t.price, t.currency, 2)}` : ""}`,
-        badgeLabel: t.status,
-        dotCls: st.includes("TRIM") || st.includes("EXIT") ? "bad" : st.includes("DEEP") ? "warn" : "ok",
+        priority: 3,
       });
     }
   }
 
   for (const c of data.catalysts) {
-    const due = daysUntilLabel(c.date);
-    pushQueue(`cat:${c.ticker}:${c.date}:${c.title}`, {
-      ticker: c.ticker,
-      title: `${c.ticker} · ${c.title}`,
-      detail: `${c.date}${c.detail ? ` · ${c.detail}` : ""}`,
-      badgeLabel: due.label,
-      dotCls: due.cls === "bad" ? "bad" : due.cls === "warn" ? "warn" : "",
-    });
+    const targetMs = Date.parse(`${c.date}T00:00:00Z`);
+    const daysAway = Number.isFinite(targetMs) ? Math.round((targetMs - Date.now()) / 86_400_000) : 999;
+    if (daysAway >= 0 && daysAway <= 14) {
+      const due = daysUntilLabel(c.date);
+      pushUrgent(`cat:${c.ticker}:${c.date}`, {
+        ticker: c.ticker,
+        title: `${c.ticker} · ${c.title}`,
+        detail: `${c.date}${c.detail ? ` · ${c.detail}` : ""}`,
+        badgeLabel: due.label,
+        dotCls: c.urgency === "high" ? "bad" : "warn",
+        priority: 2,
+      });
+    }
   }
 
-  const queueHtml = queueItems.length
-    ? queueItems
+  urgentItems.sort((a, b) => a.priority - b.priority);
+  const topUrgent = urgentItems.slice(0, 5);
+
+  const urgentInboxHtml = topUrgent.length
+    ? topUrgent
         .map((q) => {
           const clickAttr = q.ticker
             ? `data-inspect-ticker="${esc(q.ticker)}"`
@@ -2051,7 +2237,7 @@ function renderOverview(data: DashboardPayload): string {
               : "";
           const ackBtn =
             q.alertId && !data.is_demo
-              ? `<button type="button" class="small ghost btn-ack-alert" data-alert-id="${esc(q.alertId)}" title="Acknowledge watchdog alert">Ack</button>`
+              ? `<button type="button" class="small ghost btn-ack-alert" data-alert-id="${esc(q.alertId)}" title="Dismiss alert">Done</button>`
               : "";
           return `
             <div class="alert-row">
@@ -2067,50 +2253,11 @@ function renderOverview(data: DashboardPayload): string {
           `;
         })
         .join("")
-    : `<div class="muted-sub" style="padding:0.4rem 0">All dossiers steady · No watchdog alerts, open SEC gates, or upcoming catalysts.</div>`;
+    : `<div class="muted-sub" style="padding:0.55rem 0">All clear—no urgent red flags, core thesis breaks, or imminent catalysts in the next 14 days.</div>`;
 
-  const themes = data.themes ?? [];
-  const themesStripHtml =
-    themes.length > 0
-      ? `
-      <div class="card">
-        <div class="section-head" style="margin-bottom:0.4rem">
-          <h2 class="section-title">Shared Research Themes</h2>
-          <span class="muted-sub">Click a theme to inspect shared assumptions, stock stances &amp; signposts</span>
-        </div>
-        <div class="theme-strip">
-          ${themes
-            .map(
-              (th) => `
-            <button type="button" class="theme-pill" data-inspect-theme="${esc(th.slug)}">
-              <span>${esc(th.title)}</span>
-              <span class="src-badge">${esc(th.relationship_mode.replace(/_/g, " "))}</span>
-              <span class="muted-sub">${th.exposures.length} stocks</span>
-            </button>
-          `,
-            )
-            .join("")}
-        </div>
-      </div>
-    `
-      : "";
-
-  const rosterPillHtml = `
-    <div class="roster-pill" aria-label="Research roster summary">
-      <button type="button" class="roster-link" data-jump-roster="active">Active <strong>${roster.active}/${roster.cap}</strong></button>
-      <span class="roster-sep">·</span>
-      <button type="button" class="roster-link" data-jump-roster="bench">Bench <strong>${roster.bench}</strong></button>
-      <span class="roster-sep">·</span>
-      <button type="button" class="roster-link" data-jump-roster="passed">Passed <strong>${roster.passed}</strong></button>
-      <span class="roster-sep">·</span>
-      <button type="button" class="roster-link ${roster.retest > 0 ? "roster-alert" : ""}" data-jump-roster="retest">Needs Re-Test <strong>${roster.retest}</strong></button>
-      ${roster.reentry > 0 ? `<span class="roster-sep">·</span><button type="button" class="roster-link pos-ok" data-jump-roster="passed"><strong>${roster.reentry} Re-Entry Hit</strong></button>` : ""}
-    </div>
-  `;
-
-  const maxLtPct = Math.max(1, ...data.lookthrough.slice(0, 8).map((r) => r.pct_nav));
+  const maxLtPct = Math.max(1, ...data.lookthrough.slice(0, 6).map((r) => r.pct_nav));
   const ltBarsHtml = data.lookthrough
-    .slice(0, 8)
+    .slice(0, 6)
     .map((r) => {
       const dirShare = r.total_usd > 0 ? (r.direct_usd / r.total_usd) * 100 : 0;
       const etfShare = 100 - dirShare;
@@ -2119,8 +2266,8 @@ function renderOverview(data: DashboardPayload): string {
       return `
       <button type="button" class="lt-btn" data-inspect-ticker="${esc(clickTicker)}">
         <div class="lt-head">
-          <span><strong>${esc(r.name)}</strong> ${r.via_etfs_usd > 0 ? `<span class="muted-sub">(Direct ${fmtMoney(r.direct_usd, "USD", 0)} + ETF ${fmtMoney(r.via_etfs_usd, "USD", 0)})</span>` : ""}</span>
-          <span><strong>${fmtPct(r.pct_nav, 2)}</strong> · ${fmtCompact(r.total_base, ccy)}</span>
+          <span><strong>${esc(r.name)}</strong> ${r.via_etfs_usd > 0 ? `<span class="muted-sub">(${Math.round(dirShare)}% direct · ${Math.round(etfShare)}% ETF)</span>` : ""}</span>
+          <span><strong>${fmtPct(r.pct_nav, 1)}</strong> · ${fmtCompact(r.total_base, ccy)}</span>
         </div>
         <div class="lt-track">
           <div class="lt-direct" style="width:${((widthPct * dirShare) / 100).toFixed(1)}%"></div>
@@ -2131,202 +2278,475 @@ function renderOverview(data: DashboardPayload): string {
     })
     .join("");
 
-  const capHtml = data.risk_caps.length
-    ? data.risk_caps
-        .map((c) => {
-          const maxScale = Math.max(c.cap_pct * 1.4, c.value_pct, 1);
-          const fillPct = Math.min(100, (c.value_pct / maxScale) * 100);
-          const capPos = Math.min(98, (c.cap_pct / maxScale) * 100);
-          const isPass = c.status === "PASS";
-          const delta = c.value_pct - c.cap_pct;
-          const badge = isPass
-            ? `<span class="muted-sub">PASS</span>`
-            : `<span class="status-tag"><span class="dot bad"></span>OVER +${delta.toFixed(1)}%</span>`;
-          const capRule = data.profile.risk_caps.find((r) => r.id === c.id);
-          const inspAttr =
-            capRule?.kind === "ticker" && capRule.ticker ? `data-inspect-ticker="${esc(capRule.ticker)}"` : "";
-          return `
-            <div class="cap-row ${inspAttr ? "clickable" : ""}" ${inspAttr}>
-              <div class="cap-head">
-                <span>${esc(c.label)}</span>
-                <span><strong>${fmtPct(c.value_pct)}</strong> <span class="muted-sub">/ ${fmtPct(c.cap_pct)}</span> ${badge}</span>
-              </div>
-              <div class="cap-meter" aria-label="${esc(c.label)}: ${c.value_pct}% of ${c.cap_pct}% cap (${c.status})">
-                <div class="cap-fill ${isPass ? "pass" : "breach"}" style="width:${fillPct.toFixed(1)}%"></div>
-                <div class="cap-limit-tick" style="left:${capPos.toFixed(1)}%" title="Cap ${c.cap_pct}%"></div>
-              </div>
-            </div>
-          `;
-        })
-        .join("")
-    : `<div class="muted-sub">No risk cap rules configured in profile.yaml yet.</div>`;
-
-  const showSim = ext.enabled || reserve.enabled;
-  const extMax = Math.max(500000, Math.ceil((Math.max(simExtBase, 1) * 2) / 50000) * 50000);
-  const resMax = Math.max(200000, Math.ceil((Math.max(simReserveBase, 1) * 2) / 25000) * 25000);
-  const hasPaired = Boolean(ext.enabled && ext.paired_tickers && ext.paired_tickers.length > 0);
-  const extPresets = [0, 100000, Math.round(extMax * 0.4), Math.round(extMax * 0.7)].filter(
-    (v, i, a) => a.indexOf(v) === i,
-  );
-  const resPresets = [0, 30000, 100000, Math.round(resMax * 0.75)].filter((v, i, a) => a.indexOf(v) === i);
-
-  const simSection = showSim
-    ? `
-      <div class="card">
-        <div class="section-head">
-          <div>
-            <h2 class="section-title">Outside Wealth &amp; Liquidity Stress-Tester</h2>
-            <div class="muted-sub">Drag sliders or tap presets to model concentration, cash runway, and estate tax.</div>
-          </div>
-          <button type="button" class="primary small" id="btn-save-ext" ${data.is_demo ? "disabled" : ""}>Save Assumptions</button>
+  const renderCapItem = (c: RiskCapRow) => {
+    const maxScale = Math.max(c.cap_pct * 1.4, c.value_pct, 1);
+    const fillPct = Math.min(100, (c.value_pct / maxScale) * 100);
+    const capPos = Math.min(98, (c.cap_pct / maxScale) * 100);
+    const isPass = c.status === "PASS";
+    const delta = c.value_pct - c.cap_pct;
+    const badge = isPass
+      ? `<span class="muted-sub">OK</span>`
+      : `<span class="pos-bad" style="font-weight:600">+${delta.toFixed(1)}%</span>`;
+    const capRule = data.profile.risk_caps.find((r) => r.id === c.id);
+    const inspAttr =
+      capRule?.kind === "ticker" && capRule.ticker ? `data-inspect-ticker="${esc(capRule.ticker)}"` : "";
+    return `
+      <div class="cap-row ${inspAttr ? "clickable" : ""}" ${inspAttr}>
+        <div class="cap-head">
+          <span>${esc(c.label)}</span>
+          <span><strong>${fmtPct(c.value_pct)}</strong> <span class="muted-sub">/ ${fmtPct(c.cap_pct)}</span> ${badge}</span>
         </div>
-        <div class="sim-grid">
-          ${
-            ext.enabled
-              ? `
-            <div class="sim-field">
-              <label for="sim-ext"><span>${esc(ext.label)}</span><span id="sim-ext-lbl">${fmtMoney(simExtBase, ccy)}</span></label>
-              <input id="sim-ext" type="range" min="0" max="${extMax}" step="${Math.round(extMax / 40)}" value="${simExtBase}" />
-              <div class="preset-row">
-                ${extPresets.map((v) => `<button type="button" class="small" data-preset-ext="${v}">${fmtCompact(v, ccy)}</button>`).join("")}
-              </div>
-            </div>
-          `
-              : ""
-          }
-          ${
-            reserve.enabled
-              ? `
-            <div class="sim-field">
-              <label for="sim-res"><span>${esc(reserve.label)}</span><span id="sim-res-lbl">${fmtMoney(simReserveBase, ccy)}</span></label>
-              <input id="sim-res" type="range" min="0" max="${resMax}" step="${Math.round(resMax / 40)}" value="${simReserveBase}" />
-              <div class="preset-row">
-                ${resPresets.map((v) => `<button type="button" class="small" data-preset-res="${v}">${fmtCompact(v, ccy)}</button>`).join("")}
-              </div>
-            </div>
-          `
-              : ""
-          }
-        </div>
-        <div id="sim-results" class="sim-results">
-          ${ext.enabled ? `<div class="metric-cell"><span class="micro-label">${esc(ext.ticker || "External")} % Wealth</span><span class="metric-val">${fmtPct(sim.extPct)}</span></div>` : ""}
-          ${hasPaired ? `<div class="metric-cell"><span class="micro-label">${esc(data.summary.paired_label)}</span><span class="metric-val">${fmtPct(sim.pairedPct)}</span></div>` : ""}
-          <div class="metric-cell"><span class="micro-label">Portfolio Cash Left</span><span class="metric-val ${sim.cashSurplusBase < 0 ? "pos-bad" : ""}">${fmtMoney(sim.cashSurplusBase, ccy)}</span></div>
-          ${
-            data.summary.us_situs_enabled
-              ? `<div class="metric-cell"><span class="micro-label">Est. US Estate Tax</span><span class="metric-val pos-bad">${fmtMoney(sim.estateTaxBase, ccy)}</span></div>`
-              : `<div class="metric-cell"><span class="micro-label">Net Investable</span><span class="metric-val">${fmtMoney(sim.netInvestableBase, ccy)}</span></div>`
-          }
+        <div class="cap-meter">
+          <div class="cap-fill ${isPass ? "pass" : "breach"}" style="width:${fillPct.toFixed(1)}%"></div>
+          <div class="cap-limit-tick" style="left:${capPos.toFixed(1)}%" title="Cap ${c.cap_pct}%"></div>
         </div>
       </div>
+    `;
+  };
+
+  const breachedCaps = data.risk_caps.filter((c) => c.status === "BREACH");
+  const passingCaps = data.risk_caps.filter((c) => c.status === "PASS");
+  const capSectionHtml = data.risk_caps.length
+    ? `
+      <div class="cap-list">
+        ${breachedCaps.length > 0 ? breachedCaps.map(renderCapItem).join("") : `<div class="muted-sub" style="padding:0.3rem 0">All ${passingCaps.length} risk guardrails passing.</div>`}
+      </div>
+      ${
+        passingCaps.length > 0 && breachedCaps.length > 0
+          ? `<details class="cap-pass-disclosure"><summary>Show ${passingCaps.length} passing guardrail${passingCaps.length > 1 ? "s" : ""}</summary><div class="cap-list" style="margin-top:0.3rem">${passingCaps.map(renderCapItem).join("")}</div></details>`
+          : passingCaps.length > 0 && breachedCaps.length === 0
+            ? `<div class="cap-list">${passingCaps.map(renderCapItem).join("")}</div>`
+            : ""
+      }
     `
-    : "";
+    : `<div class="muted-sub">No risk guardrails configured yet.</div>`;
+
+  const secondKpiLabel = data.summary.us_situs_enabled
+    ? "US Estate Tax Exposure"
+    : ext.enabled
+      ? `${ext.ticker || "External"} % Wealth`
+      : "Invested Holdings";
+  const secondKpiVal = data.summary.us_situs_enabled
+    ? fmtMoney(sim.estateTaxBase, ccy)
+    : ext.enabled
+      ? fmtPct(sim.extPct)
+      : fmtMoney(data.portfolio.positions_base, ccy);
+  const secondKpiSub = data.summary.us_situs_enabled
+    ? `UCITS swaps save ${fmtMoney(sim.ucitsSavingsBase, ccy)}`
+    : ext.enabled
+      ? `${ext.label} (${fmtCompact(simExtBase, ccy)})`
+      : `${data.portfolio.positions.length} holdings`;
+
+  const thirdKpiHtml = fc
+    ? `
+      <div class="metric-cell">
+        <span class="micro-label">Action Plan (${fc.horizon_years}Y Impact)</span>
+        <span class="metric-val ${fc.deltas.p10_base >= 0 ? "pos-ok" : ""}">${fc.deltas.p10_base >= 0 ? "+" : ""}${fmtCompact(fc.deltas.p10_base, ccy)} Bear P10</span>
+        <span class="muted-sub">Caps ${fc.baseline.cap_breaches_count} &rarr; ${fc.simulated.cap_breaches_count} · Base ${fc.deltas.p50_base >= 0 ? "+" : ""}${fmtCompact(fc.deltas.p50_base, ccy)}</span>
+      </div>
+    `
+    : `
+      <div class="metric-cell">
+        <span class="micro-label">Research Roster</span>
+        <span class="metric-val">${data.lab?.active_count ?? 0}/${data.lab?.active_cap ?? 12} Active</span>
+        <span class="muted-sub">${data.lab?.bench_count ?? 0} Bench · ${data.lab?.passed_count ?? 0} Passed</span>
+      </div>
+    `;
 
   return `
     <div class="panel-body">
-      ${macroStripHtml}
-      ${highVolBannerHtml}
+      ${macroLineHtml}
+
       <section class="hero-card" aria-label="Portfolio summary">
         <div class="hero-top">
           <div>
-            <div class="micro-label">${esc(heroLabel)}</div>
+            <div class="actions-row" style="gap:0.55rem;margin-bottom:3px">
+              <span class="micro-label">${esc(heroLabel)}</span>
+              ${heroModeBtns}
+            </div>
             <div class="hero-nav-row">
               <div class="hero-nav">${fmtMoney(heroVal, ccy)}</div>
-              ${fmtDeltaTag(data.portfolio.total_unrealized_pnl_pct, "Unrealized P&L", true)}
+              ${fmtDeltaTag(data.portfolio.total_unrealized_pnl_pct, "Unrealized", true)}
             </div>
             <div class="muted-sub" style="margin-top:3px">
-              ${ccy !== "USD" ? `${fmtMoney(data.portfolio.nav_usd, "USD", 0)} NAV · USD/${ccy} ${data.usd_to_base_fx.toFixed(4)}` : `${fmtMoney(data.portfolio.positions_base, ccy)} invested`}
-              ${data.summary.ext_live_marked ? ` · External live-marked` : ""}
+              ${ccy !== "USD" ? `${fmtMoney(data.portfolio.nav_usd, "USD", 0)} brokerage NAV` : `${fmtMoney(data.portfolio.positions_base, ccy)} invested`}
+              ${ext.enabled && heroMode === "portfolio" ? ` · +${fmtCompact(simExtBase, ccy)} external` : ""}
               ${data.stale_tickers.length > 0 ? ` · Stale: ${esc(data.stale_tickers.join(", "))}` : ""}
             </div>
           </div>
-          <div class="hero-right">
-            ${heroModeBtns}
-            <div class="pulse-chip" title="CBOE Volatility Index (30D)">
-              <div>
-                <div class="micro-label">VIX</div>
-                <div class="metric-val">${effectiveVix !== null ? effectiveVix.toFixed(2) : "Snap"}</div>
-              </div>
-              ${vixSvg}
-            </div>
-          </div>
+          ${forecastHeroPill}
         </div>
 
         <div class="alloc-wrap">
-          <div class="alloc-strip" role="group" aria-label="Top holdings allocation strip">${allocStripHtml}</div>
+          <div class="alloc-strip" role="group" aria-label="Top holdings allocation">${allocStripHtml}</div>
           <div class="alloc-legend-mini">${allocMiniLegend}</div>
         </div>
 
-        <div class="hero-metrics-bar">
+        <div class="exec-hero-kpis">
           <div class="metric-cell">
-            <span class="micro-label">Cash</span>
+            <span class="micro-label">Cash &amp; Deployable</span>
             <span class="metric-val">${fmtMoney(data.portfolio.cash_base, ccy)}</span>
-            <span class="muted-sub">${fmtPct(data.portfolio.cash_pct)} of NAV</span>
+            <span class="muted-sub">${fmtPct(data.portfolio.cash_pct)} cash · +${fmtCompact(freedTotal, ccy)} via rotations</span>
           </div>
           <div class="metric-cell">
-            <span class="micro-label">Unrealized P&amp;L</span>
-            ${
-              muteVolNoise
-                ? `<span class="metric-val noise-muted">Muted</span><span class="muted-sub">High-vol focus mode</span>`
-                : `<span class="metric-val ${data.portfolio.total_unrealized_pnl_usd >= 0 ? "pos-ok" : "pos-bad"}">${data.portfolio.total_unrealized_pnl_usd >= 0 ? "+" : ""}${fmtMoney(data.portfolio.total_unrealized_pnl_usd, "USD", 0)}</span><span class="muted-sub">USD vs cost basis</span>`
-            }
+            <span class="micro-label">${esc(secondKpiLabel)}</span>
+            <span class="metric-val ${data.summary.us_situs_enabled ? "pos-bad" : ""}">${esc(secondKpiVal)}</span>
+            <span class="muted-sub">${esc(secondKpiSub)}</span>
           </div>
-          <div class="metric-cell">
-            <span class="micro-label">${esc(thirdHeroLabel)}</span>
-            <span class="metric-val ${data.summary.us_situs_enabled ? "pos-bad" : ""}">${esc(thirdHeroVal)}</span>
-            <span class="muted-sub">${esc(thirdHeroSub)}</span>
-          </div>
-          <div class="metric-cell">
-            <span class="micro-label">${esc(fourthHeroLabel)}</span>
-            <span class="metric-val">${esc(fourthHeroVal)}</span>
-            <span class="muted-sub">${esc(fourthHeroSub)}</span>
-          </div>
+          ${thirdKpiHtml}
         </div>
       </section>
-
-      ${themesStripHtml}
 
       <div class="hub-grid">
         <div class="card">
           <div class="section-head">
-            <h2 class="section-title">Priority Sells &amp; Tax Swaps</h2>
+            <h2 class="section-title">Recommended Actions</h2>
             <button type="button" class="small ghost" data-jump-tab="lab">Dip Queue &rarr;</button>
           </div>
-          ${priorityRotationHtml}
+          ${priorityActionHtml}
         </div>
 
         <div class="card">
           <div class="section-head">
-            <h2 class="section-title">Watchdog Alerts, Open Gates &amp; Catalysts</h2>
-            <div class="actions-row" style="gap:0.25rem">
-              ${unackedAlerts.length > 1 && !data.is_demo ? `<button type="button" class="small ghost" id="btn-ack-all-alerts">Ack All (${unackedAlerts.length})</button>` : ""}
-              <button type="button" class="small ghost" data-jump-tab="theses">Dossiers &rarr;</button>
-            </div>
+            <h2 class="section-title">Urgent Signals</h2>
+            <span class="muted-sub">Top high-priority items only</span>
           </div>
-          <div style="margin-bottom:0.5rem">${rosterPillHtml}</div>
-          <div class="action-queue">${queueHtml}</div>
+          <div class="action-queue">${urgentInboxHtml}</div>
+          <div class="signal-inbox-foot">
+            <span>${backgroundArchivedCount > 0 ? `${backgroundArchivedCount} background item${backgroundArchivedCount > 1 ? "s" : ""} kept off Overview` : "Routine filings stored in agent metadata"}</span>
+            <button type="button" class="small ghost" data-jump-tab="edgar">SEC &amp; Alerts &rarr;</button>
+          </div>
         </div>
       </div>
 
       <div class="hub-grid">
         <div class="card">
           <div class="section-head">
-            <h2 class="section-title">True Look-Through Top Exposure</h2>
-            <span class="muted-sub"><span class="swatch" style="display:inline-block;background:var(--viz-1)"></span> Direct · <span class="swatch" style="display:inline-block;background:var(--viz-3)"></span> Via ETF</span>
+            <h2 class="section-title">True Look-Through Exposure</h2>
+            <button type="button" class="small ghost" data-jump-tab="holdings">All Holdings &rarr;</button>
           </div>
           <div class="lt-list">${ltBarsHtml}</div>
         </div>
 
         <div class="card">
           <div class="section-head">
-            <h2 class="section-title">Risk Guardrails (Look-Through Audit)</h2>
-            <span class="muted-sub">Vertical marker denotes cap limit</span>
+            <h2 class="section-title">Risk Guardrails</h2>
+            <span class="muted-sub">${breachedCaps.length > 0 ? `${breachedCaps.length} breached` : "All passing"}</span>
           </div>
-          <div class="cap-list">${capHtml}</div>
+          ${capSectionHtml}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function buildSelectedForecastActions(data: DashboardPayload): Array<Record<string, unknown>> {
+  const rot = data.rotation_queue;
+  const benchTicker = data.profile.benchmark?.ticker ?? "VWRA";
+  const actions: Array<Record<string, unknown>> = [];
+
+  for (const sw of rot?.tax_swaps ?? []) {
+    const key = `swap:${sw.ticker}`;
+    if (!forecastDisabledRotations.has(key)) {
+      actions.push({ type: "tax_swap", ticker: sw.ticker, target_ticker: benchTicker, pct: 100 });
+    }
+  }
+  for (const ex of rot?.mandatory_exits ?? []) {
+    const key = `exit:${ex.ticker}`;
+    if (!forecastDisabledRotations.has(key)) {
+      actions.push({ type: "sell", ticker: ex.ticker, pct: 100 });
+    }
+  }
+  for (const ct of rot?.cap_trims ?? []) {
+    const key = `trim:${ct.cap_id}:${ct.ticker}`;
+    if (!forecastDisabledRotations.has(key) && ct.proceeds_base > 0) {
+      actions.push({ type: "sell", ticker: ct.ticker, amount_base: ct.proceeds_base });
+    }
+  }
+  for (const buy of forecastPlannedBuys) {
+    if (buy.amount_base > 0 && buy.ticker) {
+      actions.push({ type: "buy", ticker: buy.ticker, amount_base: buy.amount_base });
+    }
+  }
+  if (forecastParkCash) {
+    actions.push({ type: "park_cash_in_benchmark", pct: 100, keep_reserve: true });
+  }
+  return actions;
+}
+
+function renderForecast(data: DashboardPayload, canMessage: boolean): string {
+  const ccy = data.base_currency;
+  const fc = forecastResult ?? data.forecast ?? null;
+  const rot = data.rotation_queue;
+  const benchTicker = data.profile.benchmark?.ticker ?? "VWRA";
+
+  let freedSelected = 0;
+  for (const ex of rot?.mandatory_exits ?? []) {
+    if (!forecastDisabledRotations.has(`exit:${ex.ticker}`)) freedSelected += ex.proceeds_base;
+  }
+  for (const ct of rot?.cap_trims ?? []) {
+    if (!forecastDisabledRotations.has(`trim:${ct.cap_id}:${ct.ticker}`)) freedSelected += ct.proceeds_base;
+  }
+  const plannedBuysTotal = forecastPlannedBuys.reduce((s, b) => s + b.amount_base, 0);
+  const availCashPool = data.portfolio.cash_base + freedSelected;
+  const projectedLeftoverCash = Math.max(0, availCashPool - plannedBuysTotal);
+
+  const tickerOpts = Array.from(
+    new Set([
+      benchTicker,
+      ...data.theses.map((t) => t.ticker),
+      ...data.portfolio.positions.map((p) => p.ticker),
+    ]),
+  )
+    .sort()
+    .map((sym) => `<option value="${esc(sym)}">${esc(sym)}</option>`)
+    .join("");
+
+  const rotationChecks: string[] = [];
+  for (const sw of rot?.tax_swaps ?? []) {
+    const key = `swap:${sw.ticker}`;
+    const checked = !forecastDisabledRotations.has(key);
+    rotationChecks.push(`
+      <label class="action-check-row ${checked ? "is-checked" : ""}">
+        <span class="action-check-left">
+          <input type="checkbox" class="fc-rot-check" data-rot-key="${esc(key)}" ${checked ? "checked" : ""} />
+          <span>
+            <strong>Swap ${esc(sw.ticker)} &rarr; ${esc(sw.target_ticker)}</strong> (${fmtCompact(sw.proceeds_base, ccy)})
+            <div class="muted-sub">Saves ${fmtMoney(sw.estate_tax_saved_base, ccy)} estate tax</div>
+          </span>
+        </span>
+        <span class="status-tag"><span class="dot ok"></span>Tax Swap</span>
+      </label>
+    `);
+  }
+  for (const ex of rot?.mandatory_exits ?? []) {
+    const key = `exit:${ex.ticker}`;
+    const checked = !forecastDisabledRotations.has(key);
+    rotationChecks.push(`
+      <label class="action-check-row ${checked ? "is-checked" : ""}">
+        <span class="action-check-left">
+          <input type="checkbox" class="fc-rot-check" data-rot-key="${esc(key)}" ${checked ? "checked" : ""} />
+          <span>
+            <strong>Exit ${esc(ex.ticker)}</strong> (+${fmtCompact(ex.proceeds_base, ccy)} cash)
+            <div class="muted-sub">${esc(ex.reason)}</div>
+          </span>
+        </span>
+        <span class="status-tag"><span class="dot bad"></span>Exit</span>
+      </label>
+    `);
+  }
+  for (const ct of rot?.cap_trims ?? []) {
+    const key = `trim:${ct.cap_id}:${ct.ticker}`;
+    const checked = !forecastDisabledRotations.has(key);
+    rotationChecks.push(`
+      <label class="action-check-row ${checked ? "is-checked" : ""}">
+        <span class="action-check-left">
+          <input type="checkbox" class="fc-rot-check" data-rot-key="${esc(key)}" ${checked ? "checked" : ""} />
+          <span>
+            <strong>Trim ${esc(ct.ticker)}</strong> (+${fmtCompact(ct.proceeds_base, ccy)} cash)
+            <div class="muted-sub">${ct.current_pct.toFixed(1)}% &rarr; ${ct.cap_pct.toFixed(1)}% ${esc(ct.cap_label)}</div>
+          </span>
+        </span>
+        <span class="status-tag"><span class="dot warn"></span>Trim</span>
+      </label>
+    `);
+  }
+
+  const buyChipsHtml = forecastPlannedBuys.length
+    ? `<div class="buy-chip-list">${forecastPlannedBuys
+        .map(
+          (b) => `
+        <div class="buy-chip-row">
+          <span><strong>Buy ${esc(b.ticker)}</strong> · ${fmtMoney(b.amount_base, ccy)}</span>
+          <button type="button" class="small ghost fc-remove-buy" data-buy-id="${esc(b.id)}" aria-label="Remove buy ${esc(b.ticker)}">✕</button>
+        </div>
+      `,
+        )
+        .join("")}</div>`
+    : `<div class="muted-sub" style="margin-top:0.45rem">No new buys queued yet—add a buy above or toggle excess cash sweep into ${esc(benchTicker)}.</div>`;
+
+  const kpiHtml = fc
+    ? `
+      <div class="forecast-kpi-grid">
+        <div class="forecast-kpi-card">
+          <span class="micro-label">${fc.horizon_years}Y Base Wealth (P50)</span>
+          <span class="metric-val">${fmtCompact(fc.simulated.ending_p50_base, ccy)}</span>
+          <span class="${fc.deltas.p50_base >= 0 ? "pos-ok" : "pos-bad"}" style="font-size:0.74rem;font-weight:600">
+            ${fc.deltas.p50_base >= 0 ? "+" : ""}${fmtCompact(fc.deltas.p50_base, ccy)} vs do-nothing (${fc.simulated.expected_cagr_p50_pct.toFixed(1)}% CAGR)
+          </span>
+        </div>
+        <div class="forecast-kpi-card">
+          <span class="micro-label">${fc.horizon_years}Y Bear Downside (P10)</span>
+          <span class="metric-val">${fmtCompact(fc.simulated.ending_p10_base, ccy)}</span>
+          <span class="${fc.deltas.p10_base >= 0 ? "pos-ok" : "pos-bad"}" style="font-size:0.74rem;font-weight:600">
+            ${fc.deltas.p10_base >= 0 ? "+" : ""}${fmtCompact(fc.deltas.p10_base, ccy)} tail impact · ${fc.simulated.prob_beat_benchmark_pct.toFixed(0)}% beat ${esc(fc.benchmark_ticker)}
+          </span>
+        </div>
+        <div class="forecast-kpi-card">
+          <span class="micro-label">Estate Tax &amp; US-Situs</span>
+          <span class="metric-val pos-ok">${fc.deltas.estate_tax_saved_base > 0 ? `Saves ${fmtCompact(fc.deltas.estate_tax_saved_base, ccy)}` : fmtCompact(fc.simulated.estate_tax_base, ccy)}</span>
+          <span class="muted-sub">US-Situs ${fc.baseline.us_situs_portfolio_pct.toFixed(1)}% &rarr; ${fc.simulated.us_situs_portfolio_pct.toFixed(1)}%${fc.deltas.annual_wht_saved_base > 0 ? ` · +${fmtMoney(fc.deltas.annual_wht_saved_base, ccy)}/yr WHT` : ""}</span>
+        </div>
+        <div class="forecast-kpi-card">
+          <span class="micro-label">Risk Guardrails &amp; Sharpe</span>
+          <span class="metric-val">${fc.baseline.cap_breaches_count} &rarr; ${fc.simulated.cap_breaches_count} Breaches</span>
+          <span class="muted-sub">Vol ${fc.baseline.annual_vol_pct.toFixed(1)}% &rarr; ${fc.simulated.annual_vol_pct.toFixed(1)}% · Sharpe ${fc.baseline.expected_sharpe.toFixed(2)} &rarr; ${fc.simulated.expected_sharpe.toFixed(2)}</span>
+        </div>
+      </div>
+    `
+    : "";
+
+  const posRowsHtml = fc
+    ? fc.positions
+        .slice(0, 18)
+        .map((p) => {
+          const wtDelta = p.after_weight_pct - p.before_weight_pct;
+          const wtDeltaStr =
+            Math.abs(wtDelta) >= 0.1
+              ? ` <span class="${wtDelta > 0 ? "pos-ok" : "pos-bad"}">(${wtDelta > 0 ? "+" : ""}${wtDelta.toFixed(1)}%)</span>`
+              : "";
+          const rowClick = !p.is_cash ? `class="clickable-row" data-inspect-ticker="${esc(p.ticker)}"` : "";
+          return `
+            <tr ${rowClick}>
+              <th scope="row">
+                ${p.is_cash ? "Cash" : `<button type="button" class="ticker-link" data-inspect-ticker="${esc(p.ticker)}">${esc(p.ticker)}</button>`}
+                ${p.is_external ? `<span class="src-badge">External</span>` : ""}
+                ${qualityGradeBadge(p.quality_grade, true)}
+              </th>
+              <td class="num" data-label="Before → After">${p.before_weight_pct.toFixed(1)}% &rarr; <strong>${p.after_weight_pct.toFixed(1)}%</strong>${wtDeltaStr}</td>
+              <td class="num" data-label="Exp. CAGR">${p.expected_cagr_pct.toFixed(1)}%</td>
+              <td class="num" data-label="Risk Share">${p.marginal_risk_contrib_pct.toFixed(1)}%</td>
+              <td class="num" data-label="Corr Hurdle">${p.is_cash ? "—" : `${p.corr_adjusted_hurdle_pct.toFixed(1)}%`}</td>
+              <td class="num" data-label="¼-Kelly Guide">${p.is_cash ? "—" : `${p.quarter_kelly_weight_pct.toFixed(1)}%`}</td>
+            </tr>
+          `;
+        })
+        .join("")
+    : "";
+
+  return `
+    <div class="panel-body">
+      <div class="card">
+        <div class="forecast-toolbar">
+          <div>
+            <h2 class="section-title">Portfolio Forward Forecast &amp; Action Simulator</h2>
+            <div class="muted-sub">Toggle rotations and planned buys to project correlated Bear / Base / Bull wealth trajectories.</div>
+          </div>
+          <div class="actions-row">
+            <div class="seg-switch" role="group" aria-label="Forecast horizon">
+              ${[1, 3, 5]
+                .map(
+                  (y) =>
+                    `<button type="button" data-fc-horizon="${y}" aria-pressed="${forecastHorizon === y ? "true" : "false"}">${y}Y</button>`,
+                )
+                .join("")}
+            </div>
+            <div class="seg-switch" role="group" aria-label="Volatility stress">
+              <button type="button" data-fc-vol="1" aria-pressed="${forecastVolMult === 1 ? "true" : "false"}">Normal Vol</button>
+              <button type="button" data-fc-vol="1.25" aria-pressed="${forecastVolMult > 1 ? "true" : "false"}">Stress 1.25×</button>
+            </div>
+            ${
+              data.profile.external_exposure.enabled
+                ? `<label class="noise-toggle"><input type="checkbox" id="fc-include-ext" ${forecastIncludeExt ? "checked" : ""} /> External Wealth</label>`
+                : ""
+            }
+          </div>
+        </div>
+
+        ${forecastError ? `<div class="toast" style="margin-top:0.55rem">${esc(forecastError)}</div>` : ""}
+        ${fc?.cash_shortfall_base && fc.cash_shortfall_base > 0 ? `<div class="warn-box" style="margin-top:0.55rem">Planned buys exceed available cash + freed proceeds by ${fmtMoney(fc.cash_shortfall_base, ccy)}; excess buy orders were capped at available cash.</div>` : ""}
+
+        <div style="margin-top:0.75rem">
+          ${forecastBusy ? `<div class="muted-sub" style="padding:0.4rem 0">Running correlated Monte Carlo simulation...</div>` : ""}
+          ${fc ? renderForecastFanSvg(fc, ccy) : `<div class="muted-sub">Click Simulate Plan below to project your portfolio.</div>`}
+        </div>
+
+        <div style="margin-top:0.75rem">${kpiHtml}</div>
+
+        ${
+          fc && fc.deltas.cured_caps.length > 0
+            ? `<div class="muted-sub" style="margin-top:0.55rem"><strong class="pos-ok">Risk caps cured:</strong> ${esc(fc.deltas.cured_caps.join(" · "))}</div>`
+            : ""
+        }
+      </div>
+
+      <div class="hub-grid">
+        <div class="card">
+          <div class="section-head">
+            <h2 class="section-title">1. Toggle Rotations &amp; Swaps</h2>
+            <div class="actions-row" style="gap:0.25rem">
+              <button type="button" class="small ghost" id="btn-fc-select-all">Select All</button>
+              <button type="button" class="small ghost" id="btn-fc-clear-all">Clear All</button>
+            </div>
+          </div>
+          <div class="action-check-list">
+            ${rotationChecks.length > 0 ? rotationChecks.join("") : `<div class="muted-sub">No recommended rotations or swaps currently pending.</div>`}
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="section-head">
+            <h2 class="section-title">2. Deploy Cash &amp; Planned Buys</h2>
+            ${canMessage ? `<button type="button" class="small" id="btn-fc-ask-agent">Optimize with Agent</button>` : ""}
+          </div>
+          <div class="cash-pool-bar">
+            <span>Cash + Freed: <strong>${fmtMoney(availCashPool, ccy)}</strong></span>
+            <span>Queued Buys: <strong>${fmtMoney(plannedBuysTotal, ccy)}</strong></span>
+            <span>Remaining: <strong class="${projectedLeftoverCash > 0 ? "pos-ok" : ""}">${fmtMoney(projectedLeftoverCash, ccy)}</strong></span>
+          </div>
+          <form id="fc-add-buy-form" class="buy-builder-form">
+            <label>Ticker
+              <input id="fc-buy-ticker" list="fc-ticker-opts" type="text" value="${esc(forecastBuyTicker)}" placeholder="e.g. NVDA" required />
+              <datalist id="fc-ticker-opts">${tickerOpts}</datalist>
+            </label>
+            <label>Amount (${esc(ccy)})
+              <input id="fc-buy-amount" type="number" min="100" step="500" value="${forecastBuyAmount}" required />
+            </label>
+            <button type="submit" class="primary small">+ Add Buy</button>
+          </form>
+          <div class="preset-row" style="margin-top:0.4rem">
+            ${[15000, 25000, 50000].map((amt) => `<button type="button" class="small ghost fc-preset-amt" data-amt="${amt}">${fmtCompact(amt, ccy)}</button>`).join("")}
+            ${projectedLeftoverCash >= 500 ? `<button type="button" class="small ghost fc-preset-amt" data-amt="${Math.round(projectedLeftoverCash)}">All Left (${fmtCompact(projectedLeftoverCash, ccy)})</button>` : ""}
+          </div>
+          ${buyChipsHtml}
+          <label class="bt-check-label" style="margin-top:0.55rem">
+            <input type="checkbox" id="fc-park-cash" ${forecastParkCash ? "checked" : ""} />
+            Auto-sweep leftover cash above reserve into ${esc(benchTicker)}
+          </label>
         </div>
       </div>
 
-      ${simSection}
+      ${
+        fc
+          ? `
+        <div class="card">
+          <div class="section-head">
+            <div>
+              <h2 class="section-title">Post-Action Allocation, Risk Contribution &amp; Sizing Guide</h2>
+              <div class="muted-sub">Marginal risk share shows which holdings drive portfolio volatility; ¼-Kelly &amp; correlation-adjusted hurdles penalize crowded clusters.</div>
+            </div>
+          </div>
+          <div tabindex="0" role="region" aria-labelledby="cap-fc-pos" class="table-wrapper">
+            <table>
+              <caption id="cap-fc-pos">Simulated Holdings &amp; Risk Contribution (${fc.positions.length} rows)</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Holding</th>
+                  <th scope="col" class="num">Weight Before &rarr; After</th>
+                  <th scope="col" class="num">Exp. CAGR</th>
+                  <th scope="col" class="num">Risk Share</th>
+                  <th scope="col" class="num">Corr Hurdle</th>
+                  <th scope="col" class="num">¼-Kelly</th>
+                </tr>
+              </thead>
+              <tbody>${posRowsHtml}</tbody>
+            </table>
+          </div>
+          <div class="muted-sub" style="margin-top:0.5rem">${esc(fc.methodology_note)}</div>
+        </div>
+      `
+          : ""
+      }
     </div>
   `;
 }
@@ -2335,6 +2755,7 @@ function renderHoldings(data: DashboardPayload): string {
   const ccy = data.base_currency;
   const showSitus = data.summary.us_situs_enabled;
   const q = searchQuery.trim().toUpperCase();
+  const thesisByTicker = new Map(data.theses.map((t) => [t.ticker.toUpperCase(), t]));
 
   const sortArrow = (k: SortKey) => (sortKey === k ? (sortAsc ? " ▲" : " ▼") : "");
   const ariaSort = (k: SortKey) => (sortKey === k ? (sortAsc ? "ascending" : "descending") : "none");
@@ -2352,12 +2773,14 @@ function renderHoldings(data: DashboardPayload): string {
 
   const posRows = filteredPositions.length
     ? filteredPositions
-        .map(
-          (p) => `
+        .map((p) => {
+          const grade = thesisByTicker.get(p.ticker.toUpperCase())?.fundamentals_summary?.latest_ratios.quality_grade;
+          return `
           <tr class="clickable-row" data-inspect-ticker="${esc(p.ticker)}">
             <th scope="row">
               <button type="button" class="ticker-link" data-inspect-ticker="${esc(p.ticker)}">${esc(p.ticker)}</button>
-              ${p.stale ? '<span class="status-tag"><span class="dot warn"></span>STALE</span>' : ""}
+              ${qualityGradeBadge(grade, true)}
+              ${p.stale ? '<span class="status-tag"><span class="dot warn"></span>Stale</span>' : ""}
               ${showSitus ? `<div class="muted-sub">${p.us_situs ? "US-Situs" : "Exempt"} · ${esc(p.domicile)}</div>` : `<div class="muted-sub">${esc(p.asset_type)}</div>`}
             </th>
             <td class="num" data-label="Price">
@@ -2370,8 +2793,8 @@ function renderHoldings(data: DashboardPayload): string {
             <td class="num" data-label="Wt %"><strong>${fmtPct(p.weight_nav_pct, 2)}</strong></td>
             <td class="num" data-label="P&L %">${fmtDeltaText(p.pnl_pct, "", true)}</td>
           </tr>
-        `,
-        )
+        `;
+        })
         .join("")
     : `<tr><td colspan="7">No positions match "${esc(searchQuery)}".</td></tr>`;
 
@@ -2398,7 +2821,7 @@ function renderHoldings(data: DashboardPayload): string {
       ? `
         <div tabindex="0" role="region" aria-labelledby="cap-pos" class="table-wrapper">
           <table>
-            <caption id="cap-pos">Positions Desk (${filteredPositions.length} shown · click any row to inspect dossier)</caption>
+            <caption id="cap-pos">Positions (${filteredPositions.length} shown · click any row for full research dossier)</caption>
             <thead>
               <tr>
                 <th scope="col" aria-sort="${ariaSort("ticker")}"><button type="button" class="sort-btn" data-sort="ticker">Ticker${sortArrow("ticker")}</button></th>
@@ -2432,6 +2855,66 @@ function renderHoldings(data: DashboardPayload): string {
         </div>
       `;
 
+  const ext = data.profile.external_exposure;
+  const reserve = data.profile.liquidity_reserve;
+  const showSim = ext.enabled || reserve.enabled;
+  const sim = computeSimulatorMetrics(data);
+  const extMax = Math.max(500000, Math.ceil((Math.max(simExtBase, 1) * 2) / 50000) * 50000);
+  const resMax = Math.max(200000, Math.ceil((Math.max(simReserveBase, 1) * 2) / 25000) * 25000);
+  const hasPaired = Boolean(ext.enabled && ext.paired_tickers && ext.paired_tickers.length > 0);
+  const extPresets = [0, 100000, Math.round(extMax * 0.4), Math.round(extMax * 0.7)].filter((v, i, a) => a.indexOf(v) === i);
+  const resPresets = [0, 30000, 100000, Math.round(resMax * 0.75)].filter((v, i, a) => a.indexOf(v) === i);
+
+  const stressHtml = showSim
+    ? `
+      <details class="holdings-stress-disclosure">
+        <summary>
+          <span>Outside Wealth &amp; Cash Reserve Assumptions</span>
+          <span class="muted-sub">${ext.enabled ? `${esc(ext.label)} ${fmtCompact(simExtBase, ccy)}` : ""}${ext.enabled && reserve.enabled ? " · " : ""}${reserve.enabled ? `Reserve ${fmtCompact(simReserveBase, ccy)}` : ""}</span>
+        </summary>
+        <div style="margin-top:0.75rem">
+          <div class="sim-grid">
+            ${
+              ext.enabled
+                ? `
+              <div class="sim-field">
+                <label for="sim-ext"><span>${esc(ext.label)}</span><span id="sim-ext-lbl">${fmtMoney(simExtBase, ccy)}</span></label>
+                <input id="sim-ext" type="range" min="0" max="${extMax}" step="${Math.round(extMax / 40)}" value="${simExtBase}" />
+                <div class="preset-row">${extPresets.map((v) => `<button type="button" class="small" data-preset-ext="${v}">${fmtCompact(v, ccy)}</button>`).join("")}</div>
+              </div>
+            `
+                : ""
+            }
+            ${
+              reserve.enabled
+                ? `
+              <div class="sim-field">
+                <label for="sim-res"><span>${esc(reserve.label)}</span><span id="sim-res-lbl">${fmtMoney(simReserveBase, ccy)}</span></label>
+                <input id="sim-res" type="range" min="0" max="${resMax}" step="${Math.round(resMax / 40)}" value="${simReserveBase}" />
+                <div class="preset-row">${resPresets.map((v) => `<button type="button" class="small" data-preset-res="${v}">${fmtCompact(v, ccy)}</button>`).join("")}</div>
+              </div>
+            `
+                : ""
+            }
+          </div>
+          <div id="sim-results" class="sim-results">
+            ${ext.enabled ? `<div class="metric-cell"><span class="micro-label">${esc(ext.ticker || "External")} % Wealth</span><span class="metric-val">${fmtPct(sim.extPct)}</span></div>` : ""}
+            ${hasPaired ? `<div class="metric-cell"><span class="micro-label">${esc(data.summary.paired_label)}</span><span class="metric-val">${fmtPct(sim.pairedPct)}</span></div>` : ""}
+            <div class="metric-cell"><span class="micro-label">Portfolio Cash Left</span><span class="metric-val ${sim.cashSurplusBase < 0 ? "pos-bad" : ""}">${fmtMoney(sim.cashSurplusBase, ccy)}</span></div>
+            ${
+              data.summary.us_situs_enabled
+                ? `<div class="metric-cell"><span class="micro-label">Est. US Estate Tax</span><span class="metric-val pos-bad">${fmtMoney(sim.estateTaxBase, ccy)}</span></div>`
+                : `<div class="metric-cell"><span class="micro-label">Net Investable</span><span class="metric-val">${fmtMoney(sim.netInvestableBase, ccy)}</span></div>`
+            }
+          </div>
+          <div class="actions-row" style="margin-top:0.65rem;justify-content:flex-end">
+            <button type="button" class="primary small" id="btn-save-ext" ${data.is_demo ? "disabled" : ""}>Save Assumptions</button>
+          </div>
+        </div>
+      </details>
+    `
+    : "";
+
   return `
     <div class="panel-body">
       <div class="desk-toolbar">
@@ -2439,9 +2922,10 @@ function renderHoldings(data: DashboardPayload): string {
           <button type="button" data-holdings-mode="positions" aria-pressed="${holdingsMode === "positions" ? "true" : "false"}">Positions (${data.portfolio.positions.length})</button>
           <button type="button" data-holdings-mode="lookthrough" aria-pressed="${holdingsMode === "lookthrough" ? "true" : "false"}">Look-Through (${data.lookthrough.length})</button>
         </div>
-        <span class="muted-sub">Click any row or press / to jump to a ticker</span>
+        <span class="muted-sub">Click any row or press / to inspect a company dossier</span>
       </div>
       ${tableHtml}
+      ${stressHtml}
     </div>
   `;
 }
@@ -2552,16 +3036,21 @@ function renderTheses(data: DashboardPayload, canMessage: boolean): string {
             ? `<ul class="takeaway-list">${lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>`
             : `<div class="muted-sub">${esc(t.rejection_reason || t.latest_decision || "Open dossier to add 3-line executive takeaway.")}</div>`;
 
+          const qGrade = t.fundamentals_summary?.latest_ratios.quality_grade;
+
           return `
             <article class="thesis-card">
               <div class="thesis-head">
                 <div>
-                  <button type="button" class="ticker-link" data-inspect-ticker="${esc(t.ticker)}">${esc(t.ticker)}</button>
+                  <div class="actions-row" style="gap:0.35rem">
+                    <button type="button" class="ticker-link" data-inspect-ticker="${esc(t.ticker)}">${esc(t.ticker)}</button>
+                    ${qualityGradeBadge(qGrade)}
+                  </div>
                   ${t.role ? `<div class="muted-sub">${esc(t.role)}</div>` : ""}
                 </div>
                 <div class="actions-row" style="gap:4px">
                   ${actionVerdictPill(t.action_verdict)}
-                  ${t.gated ? `<span class="status-tag"><span class="dot warn"></span>GATED</span>` : verdictTag(t.verdict)}
+                  ${t.gated ? `<span class="status-tag"><span class="dot warn"></span>Gated</span>` : verdictTag(t.verdict)}
                 </div>
               </div>
               <div class="thesis-price-row">
@@ -2574,7 +3063,7 @@ function renderTheses(data: DashboardPayload, canMessage: boolean): string {
                     ${fmtDeltaText(t.change_1d_pct, "1D", true)}
                     ${t.max_weight_pct !== null && t.tier !== "passed" ? `<span class="muted-sub">· Cap ${t.max_weight_pct}%</span>` : ""}
                     ${t.intel_summary?.implied_move_pct ? `<span class="muted-sub">· ±${t.intel_summary.implied_move_pct.toFixed(1)}% IV</span>` : ""}
-                    ${(t.softening_warnings?.length ?? 0) > 0 ? `<span class="auto-badge warn">SOFTENING</span>` : ""}
+                    ${(t.softening_warnings?.length ?? 0) > 0 ? `<span class="auto-badge warn">Softening</span>` : ""}
                   </div>
                 </div>
                 ${renderSparklineSvg(t.sparkline, { width: 84, height: 26, positive: t.change_1m_pct !== null ? t.change_1m_pct >= 0 : null, fillArea: true, label: `${t.ticker} 30-day trend` })}
@@ -2585,7 +3074,7 @@ function renderTheses(data: DashboardPayload, canMessage: boolean): string {
               ${renderProvenanceFooter(t)}
               <div class="actions-row" style="justify-content:space-between;margin-top:auto">
                 <button type="button" class="small" data-inspect-ticker="${esc(t.ticker)}">Open Dossier</button>
-                ${canMessage ? `<button type="button" class="small ghost ask-refine" data-ticker="${esc(t.ticker)}">Refine / Challenge</button>` : ""}
+                ${canMessage ? `<button type="button" class="small ghost ask-deep-research" data-ticker="${esc(t.ticker)}">Deep Research</button>` : ""}
               </div>
             </article>
           `;
@@ -2593,8 +3082,35 @@ function renderTheses(data: DashboardPayload, canMessage: boolean): string {
         .join("")
     : `<div class="card empty-state">No dossiers match the active tier and filter.</div>`;
 
+  const themes = data.themes ?? [];
+  const themesSectionHtml =
+    themes.length > 0
+      ? `
+      <div class="card">
+        <div class="section-head" style="margin-bottom:0.4rem">
+          <h2 class="section-title">Shared Research Themes</h2>
+          <span class="muted-sub">Cross-stock macro &amp; industry debates</span>
+        </div>
+        <div class="theme-strip">
+          ${themes
+            .map(
+              (th) => `
+            <button type="button" class="theme-pill" data-inspect-theme="${esc(th.slug)}">
+              <span>${esc(th.title)}</span>
+              <span class="src-badge">${esc(th.relationship_mode.replace(/_/g, " "))}</span>
+              <span class="muted-sub">${th.exposures.length} stocks</span>
+            </button>
+          `,
+            )
+            .join("")}
+        </div>
+      </div>
+    `
+      : "";
+
   return `
     <div class="panel-body">
+      ${themesSectionHtml}
       <div class="filter-stack">
         <div class="seg-switch" role="group" aria-label="Filter dossiers by tier">
           <button type="button" data-tier-filter="active" aria-pressed="${thesisTier === "active" ? "true" : "false"}">Active (${roster.active}/${roster.cap})</button>
@@ -2616,22 +3132,65 @@ function renderTheses(data: DashboardPayload, canMessage: boolean): string {
 }
 
 function renderEdgar(data: DashboardPayload, canOpenLinks: boolean): string {
-  const redFlagRows = (data.sec_red_flags ?? [])
-    .map((rf) => {
-      const safeUrl = rf.url && rf.url.startsWith("https://www.sec.gov/") ? rf.url : "";
-      return `
-        <div class="timeline-item">
-          <div>
-            <span class="status-tag"><span class="dot ${rf.severity === "high" ? "bad" : "warn"}"></span>SEC ${esc(rf.code)}</span>
-            <button type="button" class="ticker-link" data-inspect-ticker="${esc(rf.ticker)}" style="margin-left:0.25rem">${esc(rf.ticker)}</button>
-            <strong>${esc(rf.form)}</strong>
-            <div class="muted-sub">${esc(rf.filingDate)} · ${esc(rf.label)}</div>
-          </div>
-          ${canOpenLinks && safeUrl ? `<button type="button" class="small open-sec" data-url="${esc(safeUrl)}">Open SEC</button>` : ""}
+  const unackAlerts = (data.alerts ?? []).filter((a) => !a.acknowledged);
+  const urgentAlerts = unackAlerts.filter((a) => !isRoutineNoiseAlert(a) && a.severity === "high");
+  const backgroundAlerts = unackAlerts.filter((a) => isRoutineNoiseAlert(a) || a.severity !== "high");
+
+  const renderAlertRow = (a: WatchdogAlert) => `
+    <div class="alert-row">
+      <button type="button" class="alert-row-main" ${a.ticker ? `data-inspect-ticker="${esc(a.ticker)}"` : a.theme_slug ? `data-inspect-theme="${esc(a.theme_slug)}"` : ""}>
+        <span class="queue-title">${esc(a.title)}</span>
+        <span class="queue-sub">${esc(a.detected_at.slice(0, 10))}${a.detail ? ` · ${esc(a.detail)}` : ""}</span>
+      </button>
+      <div class="alert-right">
+        <span class="status-tag ${a.severity === "info" ? "quiet" : ""}"><span class="dot ${a.severity === "high" ? "bad" : a.severity === "medium" ? "warn" : ""}"></span>${esc(a.severity.toUpperCase())}</span>
+        ${!data.is_demo ? `<button type="button" class="small ghost btn-ack-alert" data-alert-id="${esc(a.id)}">Done</button>` : ""}
+      </div>
+    </div>
+  `;
+
+  const watchdogArchiveCard = `
+    <div class="card">
+      <div class="section-head">
+        <div>
+          <h2 class="section-title">Watchdog Signal Log</h2>
+          <div class="muted-sub">High-priority deltas surface on Overview; routine/background events stay archived here for agent context.</div>
         </div>
-      `;
-    })
-    .join("");
+        <div class="actions-row" style="gap:0.3rem">
+          ${unackAlerts.length > 0 && !data.is_demo ? `<button type="button" class="small" id="btn-ack-all-alerts">Clear All (${unackAlerts.length})</button>` : ""}
+          <button type="button" class="small" id="btn-run-watchdog-edgar" ${busyMessage || data.is_demo ? "disabled" : ""}>Run Watchdog</button>
+        </div>
+      </div>
+      ${
+        urgentAlerts.length > 0
+          ? `<div class="micro-label" style="margin-bottom:0.25rem">High Priority (${urgentAlerts.length})</div>${urgentAlerts.map(renderAlertRow).join("")}`
+          : `<div class="muted-sub" style="padding:0.3rem 0">No unacknowledged high-priority alerts.</div>`
+      }
+      ${
+        backgroundAlerts.length > 0
+          ? `<details class="cap-pass-disclosure"><summary>Show ${backgroundAlerts.length} routine &amp; medium background alert${backgroundAlerts.length > 1 ? "s" : ""}</summary><div style="margin-top:0.35rem">${backgroundAlerts.slice(0, 40).map(renderAlertRow).join("")}</div></details>`
+          : ""
+      }
+    </div>
+  `;
+
+  const materialRedFlags = (data.sec_red_flags ?? []).filter((rf) => rf.severity !== "info");
+  const infoRedFlags = (data.sec_red_flags ?? []).filter((rf) => rf.severity === "info");
+
+  const renderRfRow = (rf: SecRedFlag) => {
+    const safeUrl = rf.url && rf.url.startsWith("https://www.sec.gov/") ? rf.url : "";
+    return `
+      <div class="timeline-item">
+        <div>
+          <span class="status-tag ${rf.severity === "info" ? "quiet" : ""}"><span class="dot ${rf.severity === "high" ? "bad" : rf.severity === "medium" ? "warn" : ""}"></span>${esc(rf.code)}</span>
+          <button type="button" class="ticker-link" data-inspect-ticker="${esc(rf.ticker)}" style="margin-left:0.25rem">${esc(rf.ticker)}</button>
+          <strong>${esc(rf.form)}</strong>
+          <div class="muted-sub">${esc(rf.filingDate)} · ${esc(rf.label)}</div>
+        </div>
+        ${canOpenLinks && safeUrl ? `<button type="button" class="small open-sec" data-url="${esc(safeUrl)}">SEC ↗</button>` : ""}
+      </div>
+    `;
+  };
 
   const gateRows = data.edgar.gate_evaluations
     .map(
@@ -2661,17 +3220,16 @@ function renderEdgar(data: DashboardPayload, canOpenLinks: boolean): string {
               </div>
               <div class="actions-row">
                 <span class="status-tag ${countdown.cls === "muted" ? "quiet" : ""}"><span class="dot ${countdown.cls}"></span>${esc(countdown.label)}</span>
-                <span class="status-tag ${c.urgency === "low" ? "quiet" : ""}"><span class="dot ${c.urgency === "high" ? "bad" : c.urgency === "medium" ? "warn" : ""}"></span>${esc(c.urgency.toUpperCase())}</span>
               </div>
             </div>
           `;
         })
         .join("")
-    : `<div class="muted-sub">No catalyst events tracked yet. Add milestones via <code>manage_catalysts</code>.</div>`;
+    : `<div class="muted-sub">No catalyst events tracked yet.</div>`;
 
   const filingsEntries = Object.entries(data.edgar.filings_by_ticker || {});
   const filingsHtml = filingsEntries.length
-    ? `<div class="hub-grid">${filingsEntries
+    ? `<details class="holdings-stress-disclosure"><summary><span>Recent SEC Filings by Ticker (${filingsEntries.length} companies)</span><span class="muted-sub">Expand raw filing index</span></summary><div class="hub-grid" style="margin-top:0.7rem">${filingsEntries
         .map(([sym, rows]) => {
           const items = rows
             .slice(0, 4)
@@ -2679,7 +3237,7 @@ function renderEdgar(data: DashboardPayload, canOpenLinks: boolean): string {
               const safeUrl = r.url.startsWith("https://www.sec.gov/") ? r.url : "";
               const linkBtn =
                 canOpenLinks && safeUrl
-                  ? `<button type="button" class="small open-sec" data-url="${esc(safeUrl)}">Open SEC</button>`
+                  ? `<button type="button" class="small open-sec" data-url="${esc(safeUrl)}">SEC ↗</button>`
                   : `<span class="muted-sub">${esc(r.accession)}</span>`;
               return `
                 <div class="filing-item">
@@ -2691,25 +3249,28 @@ function renderEdgar(data: DashboardPayload, canOpenLinks: boolean): string {
             .join("");
           return `<div class="card"><div class="section-head"><button type="button" class="ticker-link" data-inspect-ticker="${esc(sym)}">${esc(sym)}</button><span class="muted-sub">${rows.length} recent</span></div>${items}</div>`;
         })
-        .join("")}</div>`
+        .join("")}</div></details>`
     : `<div class="card empty-state">Click "Poll SEC EDGAR Live" to fetch recent 10-K, 10-Q, 8-K, 20-F, 6-K, and DEF 14A filings.</div>`;
 
   return `
     <div class="panel-body">
+      ${watchdogArchiveCard}
       <div class="card">
         <div class="section-head">
           <div>
-            <h2 class="section-title">Catalyst Timeline &amp; SEC Filing Gates</h2>
+            <h2 class="section-title">SEC Filing Gates, Material Events &amp; Catalysts</h2>
             <div class="muted-sub">${data.edgar.checked_at ? `Last SEC check: ${esc(data.edgar.checked_at)}` : "SEC filings not polled yet"}</div>
           </div>
-          <div class="actions-row">
-            <button type="button" class="small" id="btn-run-watchdog-edgar" ${busyMessage || data.is_demo ? "disabled" : ""}>Run Watchdog</button>
-            <button type="button" class="primary small" id="btn-poll-edgar" ${busyMessage || data.is_demo ? "disabled" : ""}>Poll SEC EDGAR Live</button>
-          </div>
+          <button type="button" class="primary small" id="btn-poll-edgar" ${busyMessage || data.is_demo ? "disabled" : ""}>Poll SEC EDGAR</button>
         </div>
-        ${redFlagRows}
+        ${materialRedFlags.length > 0 ? materialRedFlags.slice(0, 12).map(renderRfRow).join("") : ""}
         ${gateRows}
         <div style="margin-top:0.35rem">${catRows}</div>
+        ${
+          infoRedFlags.length > 0
+            ? `<details class="cap-pass-disclosure"><summary>Show ${infoRedFlags.length} routine 8-K:5.02 governance/comp notices (agent metadata)</summary><div style="margin-top:0.35rem">${infoRedFlags.slice(0, 20).map(renderRfRow).join("")}</div></details>`
+            : ""
+        }
       </div>
       ${filingsHtml}
     </div>
@@ -3182,6 +3743,7 @@ function renderValuationSection(
         ${rdcf.multiple_expansion_cagr_pct !== null && rdcf.multiple_expansion_cagr_pct !== undefined ? `<span>Multiple: <strong>${fmtSignedPct(rdcf.multiple_expansion_cagr_pct, 1)}</strong></span>` : ""}
         ${rdcf.margin_expansion_cagr_pct !== null && rdcf.margin_expansion_cagr_pct !== undefined ? `<span>Margin: <strong>${fmtSignedPct(rdcf.margin_expansion_cagr_pct, 1)}</strong></span>` : ""}
         ${rdcf.residual_revenue_cagr_pct !== null && rdcf.residual_revenue_cagr_pct !== undefined ? `<span>Residual Rev: <strong>${fmtSignedPct(rdcf.residual_revenue_cagr_pct, 1)}</strong></span>` : ""}
+        ${rdcf.consensus_rev_growth_pct !== null && rdcf.consensus_rev_growth_pct !== undefined ? `<span>Street NTM Rev: <strong>${rdcf.consensus_rev_growth_pct.toFixed(1)}%</strong>${rdcf.expectations_gap_vs_consensus_pct !== null && rdcf.expectations_gap_vs_consensus_pct !== undefined ? ` (${fmtSignedPct(rdcf.expectations_gap_vs_consensus_pct, 1)} gap)` : ""}</span>` : ""}
         ${rdcf.constant_mult_margin_rev_cagr_pct !== null && rdcf.constant_mult_margin_rev_cagr_pct !== undefined ? `<span>Const-Mult Baseline: <strong>${fmtPct(rdcf.constant_mult_margin_rev_cagr_pct, 1)}</strong></span>` : ""}
         ${rdcf.net_cash_b !== null && rdcf.net_cash_b !== undefined ? `<span>Net Cash: <strong>${fmtMoney(rdcf.net_cash_b, currency, 2)}B</strong></span>` : ""}
         ${rdcf.annual_dilution_pct ? `<span>Dilution: <strong>${fmtSignedPct(rdcf.annual_dilution_pct, 1)}/yr</strong></span>` : ""}
@@ -3462,17 +4024,32 @@ function renderFundamentalsAndBandsSection(
 
   const ratios = fundamentals?.latest_ratios ?? summary?.latest_ratios;
   if (ratios) {
+    const qFlags = ratios.quality_flags ?? [];
+    if (ratios.quality_grade || qFlags.length > 0) {
+      parts.push(`
+        <div class="drawer-card-block">
+          <div class="hypothesis-head">
+            <span class="micro-label">Capital Quality &amp; Forensic Screen</span>
+            ${qualityGradeBadge(ratios.quality_grade)}
+          </div>
+          <div class="rdcf-grid">
+            ${ratios.roic_pct != null ? `<div class="metric-cell"><span class="micro-label">ROIC</span><span class="metric-val">${ratios.roic_pct.toFixed(1)}%</span>${ratios.incremental_roic_pct != null ? `<span class="muted-sub">Incr. ${ratios.incremental_roic_pct.toFixed(1)}%</span>` : ""}</div>` : ""}
+            ${ratios.owner_earnings_margin_pct != null ? `<div class="metric-cell"><span class="micro-label">Owner Earn (FCF-SBC)</span><span class="metric-val">${ratios.owner_earnings_margin_pct.toFixed(1)}%</span>${ratios.fcf_margin_pct != null ? `<span class="muted-sub">Headline FCF ${ratios.fcf_margin_pct.toFixed(1)}%</span>` : ""}</div>` : ""}
+            ${ratios.accruals_ratio_pct != null ? `<div class="metric-cell"><span class="micro-label">Sloan Accruals</span><span class="metric-val ${ratios.accruals_ratio_pct > 4 ? "pos-warn" : "pos-ok"}">${ratios.accruals_ratio_pct > 0 ? "+" : ""}${ratios.accruals_ratio_pct.toFixed(1)}%</span><span class="muted-sub">Lower = cash-backed</span></div>` : ""}
+            ${ratios.sbc_pct_rev != null ? `<div class="metric-cell"><span class="micro-label">SBC / Revenue</span><span class="metric-val ${ratios.sbc_pct_rev >= 8 ? "pos-bad" : ""}">${ratios.sbc_pct_rev.toFixed(1)}%</span>${ratios.diluted_shares_yoy_pct != null ? `<span class="muted-sub">Shares ${fmtSignedPct(ratios.diluted_shares_yoy_pct, 1)} YoY</span>` : ""}</div>` : ""}
+          </div>
+          ${qFlags.length > 0 ? `<div class="warn-box">${qFlags.map((f) => `<div>• ${esc(f)}</div>`).join("")}</div>` : ""}
+        </div>
+      `);
+    }
     const rChips: string[] = [];
     if (ratios.gross_margin_pct !== null && ratios.gross_margin_pct !== undefined) rChips.push(`GM ${ratios.gross_margin_pct.toFixed(1)}%`);
     if (ratios.operating_margin_pct !== null && ratios.operating_margin_pct !== undefined) rChips.push(`OM ${ratios.operating_margin_pct.toFixed(1)}%`);
     if (ratios.ocf_to_ni_pct !== null && ratios.ocf_to_ni_pct !== undefined) rChips.push(`OCF/NI ${ratios.ocf_to_ni_pct.toFixed(0)}%`);
     if (ratios.fcf_margin_pct !== null && ratios.fcf_margin_pct !== undefined) rChips.push(`FCF ${ratios.fcf_margin_pct.toFixed(1)}%`);
+    if (ratios.owner_earnings_margin_pct !== null && ratios.owner_earnings_margin_pct !== undefined) rChips.push(`Owner Earn ${ratios.owner_earnings_margin_pct.toFixed(1)}%`);
     if (ratios.dso_days !== null && ratios.dso_days !== undefined) rChips.push(`DSO ${ratios.dso_days.toFixed(0)}d`);
-    if (ratios.sbc_pct_rev !== null && ratios.sbc_pct_rev !== undefined) rChips.push(`SBC ${ratios.sbc_pct_rev.toFixed(1)}%`);
     if (ratios.net_cash_b !== null && ratios.net_cash_b !== undefined) rChips.push(`Net Cash $${ratios.net_cash_b.toFixed(2)}B`);
-    if (ratios.diluted_shares_yoy_pct !== null && ratios.diluted_shares_yoy_pct !== undefined) {
-      rChips.push(`Shares YoY ${fmtSignedPct(ratios.diluted_shares_yoy_pct, 1)}`);
-    }
     if (rChips.length > 0) {
       parts.push(`<div class="chip-row">${rChips.map((c) => `<span class="mono-chip">${esc(c)}</span>`).join("")}</div>`);
     }
@@ -3823,7 +4400,6 @@ function renderInspectorDialog(ticker: string, preserveOpenKeys?: Set<string> | 
   const isSecOpen = (key: string, defaultOpen: boolean): boolean =>
     preserveOpenKeys ? preserveOpenKeys.has(key) : defaultOpen;
 
-  const valuationDefaultOpen = Boolean(thesis?.scenario_summary || thesis?.reverse_dcf || detail?.model);
   const prov = thesis?.provenance;
   const sourcesHtml = (prov?.sources ?? [])
     .map((s) => {
@@ -3859,353 +4435,360 @@ function renderInspectorDialog(ticker: string, preserveOpenKeys?: Set<string> | 
     ? renderSafeMarkdown(detail.memo_md, canOpenLinks)
     : inspectorLoading
       ? `<div class="muted-sub">Loading primary-source research memo...</div>`
-      : `<div class="muted-sub">No <code>dossiers/${esc(sym)}/memo.md</code> stored yet. Ask the agent to write a primary-source underwriting memo via <code>upsert_dossier</code>.</div>`;
+      : `<div class="empty-state">
+          <div style="margin-bottom:0.55rem">No primary-source deep research memo stored yet for <strong>${esc(sym)}</strong>.</div>
+          ${canMessage ? `<button type="button" class="primary small" id="btn-launch-deep-memo">Launch 3-Lens Deep Research Memo</button>` : ""}
+        </div>`;
 
-  const refineBarHtml =
-    canMessage && inspectorRefineOpen
-      ? `
-      <div class="refine-bar" role="region" aria-label="Refine or challenge state">
-        <div class="refine-bar-row">
-          <div class="actions-row" style="gap:0.3rem">
-            <span class="muted-sub">Agent:</span>
-            <button type="button" class="small" data-refine-kind="hypotheses">Challenge Hypotheses</button>
-            <button type="button" class="small" data-refine-kind="valuation">Update Valuation Drivers</button>
-            <button type="button" class="small" data-refine-kind="triggers">Revise Re-Entry / Triggers</button>
-          </div>
-          <div class="seg-switch" role="group" aria-label="Agent dispatch target">
-            <button type="button" data-send-mode="background" aria-pressed="${inspectorSendMode === "background" ? "true" : "false"}" title="Launches a background side-agent without interrupting your active chat">Background</button>
-            <button type="button" data-send-mode="here" aria-pressed="${inspectorSendMode === "here" ? "true" : "false"}" title="Sends the prompt directly into this active conversation">Discuss Here</button>
-          </div>
+  const qGrade = detail?.fundamentals?.latest_ratios.quality_grade ?? thesis?.fundamentals_summary?.latest_ratios.quality_grade;
+  const ratiosSnap = detail?.fundamentals?.latest_ratios ?? thesis?.fundamentals_summary?.latest_ratios;
+  const consensusBlock = detail?.intel?.consensus
+    ? `
+      <div class="drawer-card-block">
+        <div class="hypothesis-head">
+          <span class="micro-label">Street Consensus Snapshot</span>
+          <span class="muted-sub">${esc(detail.intel.consensus.as_of || "")}${detail.intel.consensus.analyst_count ? ` · ${detail.intel.consensus.analyst_count} analysts` : ""}</span>
+        </div>
+        <div class="rdcf-grid">
+          ${detail.intel.consensus.ntm_rev_growth_pct != null ? `<div class="metric-cell"><span class="micro-label">NTM Rev Growth</span><span class="metric-val">${detail.intel.consensus.ntm_rev_growth_pct.toFixed(1)}%</span></div>` : ""}
+          ${detail.intel.consensus.ntm_eps != null ? `<div class="metric-cell"><span class="micro-label">NTM EPS</span><span class="metric-val">${fmtMoney(detail.intel.consensus.ntm_eps, currency, 2)}</span></div>` : ""}
+          ${detail.intel.consensus.eps_revision_90d_pct != null ? `<div class="metric-cell"><span class="micro-label">90D EPS Revision</span><span class="metric-val ${detail.intel.consensus.eps_revision_90d_pct >= 0 ? "pos-ok" : "pos-bad"}">${fmtSignedPct(detail.intel.consensus.eps_revision_90d_pct, 1)}</span></div>` : ""}
+          ${detail.intel.consensus.target_price_mean != null ? `<div class="metric-cell"><span class="micro-label">Mean Target</span><span class="metric-val">${fmtMoney(detail.intel.consensus.target_price_mean, currency, 2)}</span></div>` : ""}
         </div>
       </div>
     `
-      : "";
+    : "";
+
+  const summaryTabHtml = `
+    <div class="drawer-section">
+      <div class="hero-top" style="align-items:center">
+        <div>
+          <div class="micro-label">Latest Price (${esc(currency)})</div>
+          <div class="actions-row" style="align-items:baseline;gap:0.45rem">
+            <div class="hero-nav" style="font-size:1.42rem">${price !== null ? fmtMoney(price, currency, price < 10 ? 4 : 2) : "N/A"}</div>
+            ${renderExtendedPriceTag(regPrice, extPrice, mktState, currency)}
+          </div>
+          <div class="actions-row" style="margin-top:4px">${fmtDeltaTag(ch1d, "1D", true)} ${fmtDeltaTag(ch1m, "1M")}</div>
+        </div>
+        ${renderSparklineSvg(sparkline, { width: 142, height: 46, positive: ch1m !== null ? ch1m >= 0 : null, fillArea: true, label: `${sym} 30-day area chart` })}
+      </div>
+      ${rangeMin !== null && rangeMax !== null ? `<div class="muted-sub">30D Range: ${fmtMoney(rangeMin, currency, 2)} – ${fmtMoney(rangeMax, currency, 2)}</div>` : ""}
+      ${
+        thesis?.scenario_summary
+          ? `
+        <div class="thesis-kpi-strip">
+          <div class="thesis-kpi-main">
+            <span class="micro-label">5Y Exp. After-Tax CAGR</span>
+            <strong>${thesis.scenario_summary.expected_after_tax_cagr_pct.toFixed(1)}%</strong>
+            <span class="muted-sub">vs ${thesis.scenario_summary.tax_info.hurdle_cagr_pct.toFixed(1)}% hurdle (${thesis.scenario_summary.tax_info.total_tax_drag_pct.toFixed(2)}% tax)</span>
+          </div>
+          <span class="delta-text ${thesis.scenario_summary.spread_vs_hurdle_pct >= 0 ? "pos-ok" : "pos-bad"}">${fmtSignedPct(thesis.scenario_summary.spread_vs_hurdle_pct, 1)}</span>
+        </div>
+      `
+          : ""
+      }
+      ${execTakeaway.length > 0 ? `<ul class="takeaway-list">${execTakeaway.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}
+      ${
+        ratiosSnap && (ratiosSnap.roic_pct != null || ratiosSnap.owner_earnings_margin_pct != null)
+          ? `
+        <div class="chip-row" style="padding-top:0.35rem;border-top:1px solid var(--border-color)">
+          ${qualityGradeBadge(qGrade)}
+          ${ratiosSnap.roic_pct != null ? `<span class="mono-chip">ROIC ${ratiosSnap.roic_pct.toFixed(1)}%</span>` : ""}
+          ${ratiosSnap.owner_earnings_margin_pct != null ? `<span class="mono-chip">Owner Earn ${ratiosSnap.owner_earnings_margin_pct.toFixed(1)}%</span>` : ""}
+          ${ratiosSnap.accruals_ratio_pct != null ? `<span class="mono-chip">Accruals ${ratiosSnap.accruals_ratio_pct > 0 ? "+" : ""}${ratiosSnap.accruals_ratio_pct.toFixed(1)}%</span>` : ""}
+          ${ratiosSnap.sbc_pct_rev != null ? `<span class="mono-chip">SBC ${ratiosSnap.sbc_pct_rev.toFixed(1)}%</span>` : ""}
+        </div>
+      `
+          : ""
+      }
+      ${
+        thesis?.tier === "passed" && (thesis.rejection_reason || thesis.reentry_trigger)
+          ? `
+        <div class="reentry-box ${thesis.reentry_alert ? "triggered" : ""}">
+          ${thesis.rejection_reason ? `<div><strong>Passed Reason:</strong> ${esc(thesis.rejection_reason)}</div>` : ""}
+          ${thesis.reentry_trigger ? `<div><strong>Re-Entry Trigger:</strong> ${esc(thesis.reentry_trigger)}${thesis.reentry_price !== null ? ` (<= ${fmtMoney(thesis.reentry_price, currency, 2)})` : ""}</div>` : ""}
+        </div>
+      `
+          : ""
+      }
+      ${
+        pos || lt
+          ? `
+        <div class="drawer-stat-grid" style="padding-top:0.35rem;border-top:1px solid var(--border-color)">
+          ${pos ? `<div class="metric-cell"><span class="micro-label">Shares / Avg Cost</span><span class="metric-val">${pos.qty.toLocaleString("en-US")} @ ${fmtMoney(pos.avg_cost, currency, 2)}</span></div>` : ""}
+          ${pos ? `<div class="metric-cell"><span class="micro-label">Position Value</span><span class="metric-val">${fmtMoney(pos.mv_base, ccy)} (${fmtPct(pos.weight_nav_pct)})</span></div>` : ""}
+          ${lt ? `<div class="metric-cell"><span class="micro-label">Direct + ETF Overlap</span><span class="metric-val">${fmtMoney(lt.direct_usd, "USD", 0)} + ${fmtMoney(lt.via_etfs_usd, "USD", 0)}</span></div>` : ""}
+          ${lt ? `<div class="metric-cell"><span class="micro-label">Total Look-Through</span><span class="metric-val">${fmtMoney(lt.total_base, ccy)} (${fmtPct(lt.pct_nav, 2)})</span></div>` : ""}
+        </div>
+      `
+          : ""
+      }
+    </div>
+
+    <div class="drawer-card-block">
+      <div class="hypothesis-head">
+        <span class="micro-label">4-Check Dip Readiness &amp; Tranche Plan</span>
+        <span class="status-tag"><span class="dot ${checkDotClass(thesis?.dip_triage?.readiness ?? "")}"></span>${esc((thesis?.dip_triage?.readiness ?? "—").replace(/_/g, " "))}</span>
+      </div>
+      ${renderDipTriageSection(thesis, currency, ccy)}
+    </div>
+
+    <div class="drawer-trust-bar ${prov?.needs_retest ? "needs-retest" : ""}">
+      <div class="drawer-trust-top">
+        <span>
+          <strong>Provenance</strong> ·
+          ${prov?.last_audited_date ? `Audited ${esc(prov.last_audited_date)}` : "Not audited yet"}
+          ${prov?.price_at_audit !== null && prov?.price_at_audit !== undefined ? ` @ ${fmtMoney(prov.price_at_audit, currency, 2)}` : ""}
+          ${prov?.price_drift_pct !== null && prov?.price_drift_pct !== undefined ? ` (${fmtSignedPct(prov.price_drift_pct, 1)} drift)` : ""}
+        </span>
+        ${prov?.needs_retest ? `<span class="retest-stamp"><span class="dot warn"></span>Needs Re-Test</span>` : `<span class="muted-sub">Fresh</span>`}
+      </div>
+      ${prov?.needs_retest && prov.retest_reasons.length > 0 ? `<div class="pos-warn">${esc(prov.retest_reasons.join(" · "))}</div>` : ""}
+      ${sourcesHtml ? `<div class="src-badges">${sourcesHtml}</div>` : ""}
+    </div>
+  `;
+
+  const valuationTabHtml = `
+    <div style="display:flex;flex-direction:column;gap:0.75rem">
+      ${renderValuationSection(thesis, detail, currency, state.is_demo)}
+      ${consensusBlock}
+      ${renderFundamentalsAndBandsSection(detail?.fundamentals, thesis?.fundamentals_summary, bands)}
+    </div>
+  `;
+
+  const signalsTabHtml = `
+    <section class="drawer-accordion" id="drawer-accordion" aria-label="Signals, hypotheses and audit controls">
+      <details class="drawer-disclosure" data-sec-key="triggers" ${isSecOpen("triggers", true) ? "open" : ""}>
+        <summary>
+          <span class="disc-title">Trigger Zones &amp; Falsifiable Hypotheses</span>
+          <span class="disc-meta">${thesis?.hypotheses?.length ?? 0} claims</span>
+        </summary>
+        <div class="disc-body">
+          ${thesis ? renderTriggerRuler(price, thesis.buy_zone_low, thesis.buy_zone_high, thesis.trim_zone, currency) : ""}
+          <div class="drawer-edit-grid">
+            <label>Buy Low <input type="number" step="any" id="ins-buy-low" value="${thesis?.buy_zone_low ?? ""}" ${state.is_demo ? "disabled" : ""} /></label>
+            <label>Buy High <input type="number" step="any" id="ins-buy-high" value="${thesis?.buy_zone_high ?? ""}" ${state.is_demo ? "disabled" : ""} /></label>
+            <label>Trim Target <input type="number" step="any" id="ins-trim" value="${thesis?.trim_zone ?? ""}" ${state.is_demo ? "disabled" : ""} /></label>
+            <label style="flex-direction:row;align-items:center;gap:6px;padding-top:16px">
+              <input type="checkbox" id="ins-gated" ${thesis?.gated ? "checked" : ""} ${state.is_demo ? "disabled" : ""} /> Gated
+            </label>
+          </div>
+          ${
+            !state.is_demo
+              ? `<label class="rationale-label">Rationale (logged as rule_change)
+                  <input type="text" id="ins-trigger-rationale" maxlength="300" placeholder="Reason for changing triggers or gate state..." />
+                </label>`
+              : ""
+          }
+          ${
+            pendingUngateConfirm
+              ? `<div class="confirm-gate-box" role="alert">
+                  <div><strong>High-Vol Ungate Check (VIX ${(state.vix ?? 0).toFixed(1)}):</strong> You are removing the binary gate on ${esc(sym)} during elevated volatility. Confirm the underlying catalyst or filing has cleared and record your rationale above.</div>
+                  <div class="actions-row">
+                    <button type="button" class="small primary" id="btn-confirm-ungate">Confirm Remove Gate &amp; Save</button>
+                    <button type="button" class="small ghost" id="btn-cancel-ungate">Cancel</button>
+                  </div>
+                </div>`
+              : ""
+          }
+          <div class="actions-row">
+            <button type="button" class="primary small" id="btn-save-inspector-trigger" ${state.is_demo ? "disabled" : ""}>Save Trigger Targets</button>
+          </div>
+          ${thesis?.kill_switches.length ? `<div><div class="micro-label" style="margin-bottom:3px">Hard Kill-Switches</div><ul class="drawer-list">${thesis.kill_switches.map((k) => `<li>${esc(k)}</li>`).join("")}</ul></div>` : ""}
+          <div class="micro-label" style="margin-top:4px">Falsifiable Hypotheses (${thesis?.hypotheses?.length ?? 0})</div>
+          ${
+            thesis?.softening_warnings && thesis.softening_warnings.length > 0
+              ? `<div class="warn-box"><span class="micro-label pos-warn">Softening Warning</span>${thesis.softening_warnings.map((w) => `<div>• ${esc(w)}</div>`).join("")}</div>`
+              : ""
+          }
+          ${
+            thesis?.hypotheses && thesis.hypotheses.length > 0
+              ? `<div class="hypothesis-list">
+                  ${thesis.hypotheses
+                    .map((h) => {
+                      const safeSrc = h.source_url && h.source_url.startsWith("https://") ? h.source_url : "";
+                      const autoBadge =
+                        h.auto_eval?.passed === true
+                          ? `<span class="auto-badge ok" title="${esc(h.auto_eval.detail)}">Verified</span>`
+                          : h.auto_eval?.passed === false
+                            ? `<span class="auto-badge bad" title="${esc(h.auto_eval.detail)}">Breached</span>`
+                            : "";
+                      const softenBadge = h.observed_breach_softened
+                        ? `<span class="auto-badge warn">Softened</span>`
+                        : "";
+                      return `
+                        <div class="hypothesis-item">
+                          <div class="hypothesis-head">
+                            <span>${hypothesisStateBadge(h.status)} ${autoBadge} ${softenBadge} · <span class="muted-sub">${esc(h.id)} (${esc(h.confidence)})</span></span>
+                            ${h.last_tested ? `<span class="muted-sub">${esc(h.last_tested)}</span>` : ""}
+                          </div>
+                          <div>${esc(h.claim)}</div>
+                          ${h.metric ? `<div class="muted-sub">Metric: ${esc(h.metric)}</div>` : ""}
+                          ${h.auto_eval?.detail ? `<div class="muted-sub">Auto-Eval (${esc(h.auto_eval.source)}): ${esc(h.auto_eval.detail)}</div>` : ""}
+                          ${h.evidence ? `<div class="muted-sub">Evidence: ${esc(h.evidence)}</div>` : ""}
+                          ${canOpenLinks && safeSrc ? `<div><button type="button" class="small ghost open-ext-link" data-url="${esc(safeSrc)}">Source &rarr;</button></div>` : ""}
+                        </div>
+                      `;
+                    })
+                    .join("")}
+                </div>`
+              : `<div class="muted-sub">No falsifiable claims recorded yet.</div>`
+          }
+          ${
+            !state.is_demo
+              ? `
+            <details class="add-hyp-details">
+              <summary>Add / Update Hypothesis</summary>
+              <div class="add-hyp-form">
+                <div class="add-hyp-grid">
+                  <label>ID (slug) <input type="text" id="hyp-id" placeholder="e.g. cloud-margin-floor" /></label>
+                  <label>Confidence
+                    <select id="hyp-conf">
+                      <option value="high">high</option>
+                      <option value="medium" selected>medium</option>
+                      <option value="low">low</option>
+                    </select>
+                  </label>
+                  <label>Status
+                    <select id="hyp-status">
+                      <option value="untested" selected>untested</option>
+                      <option value="supported">supported</option>
+                      <option value="weakened">weakened</option>
+                      <option value="falsified">falsified</option>
+                    </select>
+                  </label>
+                  <label>Metric <input type="text" id="hyp-metric" placeholder="e.g. Owner Earn >= 18%" /></label>
+                </div>
+                <label>Falsifiable Claim <input type="text" id="hyp-claim" placeholder="Specific statement that evidence can disprove..." /></label>
+                <label>Evidence / Citation <input type="text" id="hyp-evidence" placeholder="10-Q note, filing figure, or observation..." /></label>
+                <label>Source URL (https:// optional) <input type="url" id="hyp-url" placeholder="https://www.sec.gov/..." /></label>
+                <div class="actions-row">
+                  <button type="button" class="small primary" id="btn-save-hypothesis">Save Hypothesis</button>
+                </div>
+              </div>
+            </details>
+          `
+              : ""
+          }
+        </div>
+      </details>
+
+      <details class="drawer-disclosure" data-sec-key="insiders" ${isSecOpen("insiders", false) ? "open" : ""}>
+        <summary>
+          <span class="disc-title">Form 4 Insider Flows (90D / 12M)</span>
+          <span class="disc-meta">${thesis?.insiders_summary?.flags?.length ? esc(thesis.insiders_summary.flags[0]) : thesis?.has_insiders ? "Synced" : "None"}</span>
+        </summary>
+        <div class="disc-body">${renderInsidersSection(detail?.insiders, thesis?.insiders_summary, canOpenLinks)}</div>
+      </details>
+
+      <details class="drawer-disclosure" data-sec-key="themes" ${isSecOpen("themes", Boolean(prov?.theme_updated_after_audit)) ? "open" : ""}>
+        <summary>
+          <span class="disc-title">Linked Shared Themes</span>
+          <span class="disc-meta">${tickerThemesCount} linked</span>
+        </summary>
+        <div class="disc-body">${renderLinkedThemesSection(sym, thesis, detail, state.themes ?? [])}</div>
+      </details>
+
+      <details class="drawer-disclosure" data-sec-key="intel" ${isSecOpen("intel", tickerRedFlags.some((r) => r.severity === "high")) ? "open" : ""}>
+        <summary>
+          <span class="disc-title">Broker Intel &amp; SEC Filings</span>
+          <span class="disc-meta">${filings.length} SEC${detail?.intel || thesis?.has_intel ? " · Intel" : ""}</span>
+        </summary>
+        <div class="disc-body">
+          ${
+            tickerRedFlags.filter((r) => r.severity !== "info").length > 0
+              ? `<div class="warn-box"><span class="micro-label pos-warn">Material SEC Events</span>${tickerRedFlags
+                  .filter((r) => r.severity !== "info")
+                  .map((rf) => `<div><strong>${esc(rf.filingDate)} ${esc(rf.form)} [${esc(rf.code)}]</strong> · ${esc(rf.label)}</div>`)
+                  .join("")}</div>`
+              : ""
+          }
+          ${renderIntelSection(detail?.intel, thesis?.intel_summary, detail?.intel_history, filings, currency, canOpenLinks)}
+        </div>
+      </details>
+
+      <details class="drawer-disclosure" data-sec-key="audit" ${isSecOpen("audit", false) ? "open" : ""}>
+        <summary>
+          <span class="disc-title">Steelman Bear Case &amp; Audit Ledger</span>
+          <span class="disc-meta">${recentAuditEntries.length} entries</span>
+        </summary>
+        <div class="disc-body">
+          ${thesis?.bear_case_summary ? `<div class="bear-box"><div class="micro-label">Steelman Bear Case</div><div>${esc(thesis.bear_case_summary)}</div></div>` : ""}
+          ${
+            recentAuditEntries.length > 0
+              ? `<div class="test-ledger-list">
+                  ${recentAuditEntries
+                    .slice(0, 8)
+                    .map(
+                      (rec) => `
+                    <div class="test-ledger-item">
+                      <div class="hypothesis-head">
+                        <span>${rec.event_type === "rule_change" ? `<span class="auto-badge warn">Rule Change</span>` : verdictTag(rec.verdict)} ${rec.kill_switch_triggered ? `<span class="status-tag"><span class="dot bad"></span>Kill-Switch</span>` : ""}</span>
+                        <span class="muted-sub">${esc(rec.tested_at)}${rec.price_at_test !== null && rec.price_at_test !== undefined ? ` · ${fmtMoney(rec.price_at_test, rec.currency || currency, 2)}` : ""}</span>
+                      </div>
+                      <div>${esc(rec.summary)}</div>
+                    </div>
+                  `,
+                    )
+                    .join("")}
+                </div>`
+              : `<div class="muted-sub">No systematic tests or rule changes logged yet.</div>`
+          }
+        </div>
+      </details>
+    </section>
+  `;
+
+  const activeDrawerContent =
+    inspectorTab === "memo"
+      ? memoHtml
+      : inspectorTab === "valuation"
+        ? valuationTabHtml
+        : inspectorTab === "signals"
+          ? signalsTabHtml
+          : summaryTabHtml;
 
   dlg.innerHTML = `
     <div class="drawer-head">
       <div>
         <h1 id="inspector-title">${esc(sym)} · ${esc(titleName)}</h1>
-        <div class="actions-row" style="margin-top:4px">
+        <div class="actions-row" style="margin-top:4px;gap:0.35rem">
           ${thesis ? `<span class="src-badge">${esc(thesis.tier || "active")}</span>` : ""}
           ${thesis ? actionVerdictPill(thesis.action_verdict) : ""}
+          ${qualityGradeBadge(qGrade)}
           ${verdictTag(thesis?.verdict)}
-          ${thesis ? statusChip(thesis.status) : ""}
-          ${state.summary.us_situs_enabled && (pos || thesis) ? `<span class="status-tag"><span class="dot ${(pos?.us_situs ?? thesis?.us_situs) ? "warn" : "ok"}"></span>${(pos?.us_situs ?? thesis?.us_situs) ? "US-Situs" : "Exempt"}</span>` : ""}
+          ${state.summary.us_situs_enabled && (pos || thesis) ? `<span class="muted-sub" style="font-size:0.7rem">${(pos?.us_situs ?? thesis?.us_situs) ? "US-Situs" : "Exempt"}</span>` : ""}
         </div>
       </div>
       <button type="button" class="small" id="btn-close-inspector" autofocus aria-label="Close inspector">✕ Close</button>
     </div>
 
-    <div class="drawer-body">
-      <div class="drawer-section">
-        <div class="hero-top" style="align-items:center">
-          <div>
-            <div class="micro-label">Latest Price (${esc(currency)})</div>
-            <div class="actions-row" style="align-items:baseline;gap:0.45rem">
-              <div class="hero-nav" style="font-size:1.42rem">${price !== null ? fmtMoney(price, currency, price < 10 ? 4 : 2) : "N/A"}</div>
-              ${renderExtendedPriceTag(regPrice, extPrice, mktState, currency)}
-            </div>
-            <div class="actions-row" style="margin-top:4px">${fmtDeltaTag(ch1d, "1D", true)} ${fmtDeltaTag(ch1m, "1M")}</div>
-          </div>
-          ${renderSparklineSvg(sparkline, { width: 142, height: 46, positive: ch1m !== null ? ch1m >= 0 : null, fillArea: true, label: `${sym} 30-day area chart` })}
-        </div>
-        ${rangeMin !== null && rangeMax !== null ? `<div class="muted-sub">30D Range: ${fmtMoney(rangeMin, currency, 2)} – ${fmtMoney(rangeMax, currency, 2)}</div>` : ""}
-        ${
-          thesis?.scenario_summary
-            ? `
-          <div class="thesis-kpi-strip">
-            <div class="thesis-kpi-main">
-              <span class="micro-label">5Y Exp. After-Tax CAGR</span>
-              <strong>${thesis.scenario_summary.expected_after_tax_cagr_pct.toFixed(1)}%</strong>
-              <span class="muted-sub">vs ${thesis.scenario_summary.tax_info.hurdle_cagr_pct.toFixed(1)}% hurdle (${thesis.scenario_summary.tax_info.total_tax_drag_pct.toFixed(2)}% tax drag)</span>
-            </div>
-            <span class="delta-text ${thesis.scenario_summary.spread_vs_hurdle_pct >= 0 ? "pos-ok" : "pos-bad"}">${fmtSignedPct(thesis.scenario_summary.spread_vs_hurdle_pct, 1)}</span>
-          </div>
-        `
-            : ""
-        }
-        ${execTakeaway.length > 0 ? `<ul class="takeaway-list">${execTakeaway.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}
-        ${
-          thesis?.tier === "passed" && (thesis.rejection_reason || thesis.reentry_trigger)
-            ? `
-          <div class="reentry-box ${thesis.reentry_alert ? "triggered" : ""}">
-            ${thesis.rejection_reason ? `<div><strong>Passed Reason:</strong> ${esc(thesis.rejection_reason)}</div>` : ""}
-            ${thesis.reentry_trigger ? `<div><strong>Re-Entry Trigger:</strong> ${esc(thesis.reentry_trigger)}${thesis.reentry_price !== null ? ` (<= ${fmtMoney(thesis.reentry_price, currency, 2)})` : ""}</div>` : ""}
-          </div>
-        `
-            : ""
-        }
-        ${
-          pos || lt
-            ? `
-          <div class="drawer-stat-grid" style="padding-top:0.35rem;border-top:1px solid var(--border-color)">
-            ${pos ? `<div class="metric-cell"><span class="micro-label">Shares / Avg Cost</span><span class="metric-val">${pos.qty.toLocaleString("en-US")} @ ${fmtMoney(pos.avg_cost, currency, 2)}</span></div>` : ""}
-            ${pos ? `<div class="metric-cell"><span class="micro-label">Position Value</span><span class="metric-val">${fmtMoney(pos.mv_base, ccy)} (${fmtPct(pos.weight_nav_pct)})</span></div>` : ""}
-            ${lt ? `<div class="metric-cell"><span class="micro-label">Direct + ETF Overlap</span><span class="metric-val">${fmtMoney(lt.direct_usd, "USD", 0)} + ${fmtMoney(lt.via_etfs_usd, "USD", 0)}</span></div>` : ""}
-            ${lt ? `<div class="metric-cell"><span class="micro-label">Total Look-Through</span><span class="metric-val">${fmtMoney(lt.total_base, ccy)} (${fmtPct(lt.pct_nav, 2)})</span></div>` : ""}
-          </div>
-        `
-            : ""
-        }
-      </div>
-
-      <div class="drawer-trust-bar ${prov?.needs_retest ? "needs-retest" : ""}">
-        <div class="drawer-trust-top">
-          <span>
-            <strong>Provenance</strong> ·
-            ${prov?.last_audited_date ? `Audited ${esc(prov.last_audited_date)}` : "Not audited yet"}
-            ${prov?.price_at_audit !== null && prov?.price_at_audit !== undefined ? ` @ ${fmtMoney(prov.price_at_audit, currency, 2)}` : ""}
-            ${prov?.price_drift_pct !== null && prov?.price_drift_pct !== undefined ? ` (${fmtSignedPct(prov.price_drift_pct, 1)} drift)` : ""}
-          </span>
-          ${prov?.needs_retest ? `<span class="retest-stamp"><span class="dot warn"></span>Needs Re-Test</span>` : `<span class="muted-sub">Fresh</span>`}
-        </div>
-        ${prov?.needs_retest && prov.retest_reasons.length > 0 ? `<div class="pos-warn">${esc(prov.retest_reasons.join(" · "))}</div>` : ""}
-        ${sourcesHtml ? `<div class="src-badges">${sourcesHtml}</div>` : ""}
-      </div>
-
-      <div class="drawer-accordion-head">
-        <span class="micro-label">Progressive-Disclosure Dossier</span>
-        <button type="button" class="small ghost" id="btn-toggle-all-disc" commandfor="drawer-accordion" command="--toggle-all" aria-expanded="false">
-          <span class="expand">Expand all</span>
-          <span class="collapse">Collapse all</span>
-        </button>
-      </div>
-
-      <section class="drawer-accordion" id="drawer-accordion" aria-label="Dossier analysis sections">
-        <details class="drawer-disclosure" data-sec-key="valuation" ${isSecOpen("valuation", valuationDefaultOpen) ? "open" : ""}>
-          <summary>
-            <span class="disc-title">Valuation: Reverse DCF &amp; Bear/Base/Bull Scenarios</span>
-            <span class="disc-meta">${thesis?.scenario_summary ? `${thesis.scenario_summary.expected_after_tax_cagr_pct.toFixed(1)}% CAGR` : "Unmodeled"}</span>
-          </summary>
-          <div class="disc-body">
-            ${renderValuationSection(thesis, detail, currency, state.is_demo)}
-          </div>
-        </details>
-
-        <details class="drawer-disclosure" data-sec-key="fundamentals" ${isSecOpen("fundamentals", false) ? "open" : ""}>
-          <summary>
-            <span class="disc-title">XBRL Financials &amp; 5Y Valuation Bands</span>
-            <span class="disc-meta">${detail?.fundamentals?.quarterly?.length ? `${detail.fundamentals.quarterly.length}Q XBRL` : thesis?.has_fundamentals ? "Synced" : "None"}${bands?.pe?.current ? ` · ${bands.pe.current.toFixed(1)}x P/E` : ""}</span>
-          </summary>
-          <div class="disc-body">
-            ${renderFundamentalsAndBandsSection(detail?.fundamentals, thesis?.fundamentals_summary, bands)}
-          </div>
-        </details>
-
-        <details class="drawer-disclosure" data-sec-key="insiders" ${isSecOpen("insiders", false) ? "open" : ""}>
-          <summary>
-            <span class="disc-title">Form 4 Insider Flows (90D / 12M)</span>
-            <span class="disc-meta">${thesis?.insiders_summary?.flags?.length ? esc(thesis.insiders_summary.flags[0]) : thesis?.has_insiders ? "Synced" : "None"}</span>
-          </summary>
-          <div class="disc-body">
-            ${renderInsidersSection(detail?.insiders, thesis?.insiders_summary, canOpenLinks)}
-          </div>
-        </details>
-
-        <details class="drawer-disclosure" data-sec-key="themes" ${isSecOpen("themes", Boolean(prov?.theme_updated_after_audit)) ? "open" : ""}>
-          <summary>
-            <span class="disc-title">Linked Shared Themes</span>
-            <span class="disc-meta">${tickerThemesCount} linked${prov?.theme_updated_after_audit ? " · Updated" : ""}</span>
-          </summary>
-          <div class="disc-body">
-            ${renderLinkedThemesSection(sym, thesis, detail, state.themes ?? [])}
-          </div>
-        </details>
-
-        <details class="drawer-disclosure" data-sec-key="triage" ${isSecOpen("triage", false) ? "open" : ""}>
-          <summary>
-            <span class="disc-title">4-Check Dip Triage &amp; Tranche Plan</span>
-            <span class="disc-meta">${thesis?.dip_triage ? esc(thesis.dip_triage.readiness.replace(/_/g, " ")) : "—"}</span>
-          </summary>
-          <div class="disc-body">
-            ${renderDipTriageSection(thesis, currency, ccy)}
-          </div>
-        </details>
-
-        <details class="drawer-disclosure" data-sec-key="memo" ${isSecOpen("memo", false) ? "open" : ""}>
-          <summary>
-            <span class="disc-title">Full Primary-Source Research Memo</span>
-            <span class="disc-meta">${detail?.memo_md ? `${Math.max(1, Math.round(detail.memo_md.length / 1000))}k chars` : thesis?.has_memo ? "Loading..." : "None"}</span>
-          </summary>
-          <div class="disc-body">
-            ${memoHtml}
-          </div>
-        </details>
-
-        <details class="drawer-disclosure" data-sec-key="triggers" ${isSecOpen("triggers", false) ? "open" : ""}>
-          <summary>
-            <span class="disc-title">Trigger Zones &amp; Falsifiable Hypotheses</span>
-            <span class="disc-meta">${thesis?.hypotheses?.length ?? 0} claims</span>
-          </summary>
-          <div class="disc-body">
-            ${thesis ? renderTriggerRuler(price, thesis.buy_zone_low, thesis.buy_zone_high, thesis.trim_zone, currency) : ""}
-            <div class="drawer-edit-grid">
-              <label>Buy Low <input type="number" step="any" id="ins-buy-low" value="${thesis?.buy_zone_low ?? ""}" ${state.is_demo ? "disabled" : ""} /></label>
-              <label>Buy High <input type="number" step="any" id="ins-buy-high" value="${thesis?.buy_zone_high ?? ""}" ${state.is_demo ? "disabled" : ""} /></label>
-              <label>Trim Target <input type="number" step="any" id="ins-trim" value="${thesis?.trim_zone ?? ""}" ${state.is_demo ? "disabled" : ""} /></label>
-              <label style="flex-direction:row;align-items:center;gap:6px;padding-top:16px">
-                <input type="checkbox" id="ins-gated" ${thesis?.gated ? "checked" : ""} ${state.is_demo ? "disabled" : ""} /> Gated
-              </label>
-            </div>
-            ${
-              !state.is_demo
-                ? `<label class="rationale-label">Rationale (logged as rule_change)
-                    <input type="text" id="ins-trigger-rationale" maxlength="300" placeholder="Reason for changing triggers or gate state..." />
-                  </label>`
-                : ""
-            }
-            ${
-              pendingUngateConfirm
-                ? `<div class="confirm-gate-box" role="alert">
-                    <div><strong>High-Vol Ungate Check (VIX ${(state.vix ?? 0).toFixed(1)}):</strong> You are removing the binary gate on ${esc(sym)} during elevated volatility. Confirm the underlying catalyst or filing has cleared and record your rationale above.</div>
-                    <div class="actions-row">
-                      <button type="button" class="small primary" id="btn-confirm-ungate">Confirm Remove Gate &amp; Save</button>
-                      <button type="button" class="small ghost" id="btn-cancel-ungate">Cancel</button>
-                    </div>
-                  </div>`
-                : ""
-            }
-            <div class="actions-row">
-              <button type="button" class="primary small" id="btn-save-inspector-trigger" ${state.is_demo ? "disabled" : ""}>Save Trigger Targets</button>
-            </div>
-            ${thesis?.kill_switches.length ? `<div><div class="micro-label" style="margin-bottom:3px">Hard Kill-Switches</div><ul class="drawer-list">${thesis.kill_switches.map((k) => `<li>${esc(k)}</li>`).join("")}</ul></div>` : ""}
-            <div class="micro-label" style="margin-top:4px">Falsifiable Hypotheses (${thesis?.hypotheses?.length ?? 0})</div>
-            ${
-              thesis?.softening_warnings && thesis.softening_warnings.length > 0
-                ? `<div class="warn-box"><span class="micro-label pos-warn">Softening Warning</span>${thesis.softening_warnings.map((w) => `<div>• ${esc(w)}</div>`).join("")}</div>`
-                : ""
-            }
-            ${
-              thesis?.hypotheses && thesis.hypotheses.length > 0
-                ? `<div class="hypothesis-list">
-                    ${thesis.hypotheses
-                      .map((h) => {
-                        const safeSrc = h.source_url && h.source_url.startsWith("https://") ? h.source_url : "";
-                        const autoBadge =
-                          h.auto_eval?.passed === true
-                            ? `<span class="auto-badge ok" title="${esc(h.auto_eval.detail)}">AUTO-VERIFIED</span>`
-                            : h.auto_eval?.passed === false
-                              ? `<span class="auto-badge bad" title="${esc(h.auto_eval.detail)}">AUTO-BREACHED</span>`
-                              : "";
-                        const softenBadge = h.observed_breach_softened
-                          ? `<span class="auto-badge warn">SOFTENING WARNING</span>`
-                          : "";
-                        return `
-                          <div class="hypothesis-item">
-                            <div class="hypothesis-head">
-                              <span>${hypothesisStateBadge(h.status)} ${autoBadge} ${softenBadge} · <span class="muted-sub">${esc(h.id)} (${esc(h.confidence)})</span></span>
-                              ${h.last_tested ? `<span class="muted-sub">${esc(h.last_tested)}</span>` : ""}
-                            </div>
-                            <div>${esc(h.claim)}</div>
-                            ${h.metric ? `<div class="muted-sub">Metric: ${esc(h.metric)}</div>` : ""}
-                            ${h.auto_eval?.detail ? `<div class="muted-sub">Auto-Eval (${esc(h.auto_eval.source)}): ${esc(h.auto_eval.detail)}</div>` : ""}
-                            ${h.evidence ? `<div class="muted-sub">Evidence: ${esc(h.evidence)}</div>` : ""}
-                            ${canOpenLinks && safeSrc ? `<div><button type="button" class="small ghost open-ext-link" data-url="${esc(safeSrc)}">Source &rarr;</button></div>` : ""}
-                          </div>
-                        `;
-                      })
-                      .join("")}
-                  </div>`
-                : `<div class="muted-sub">No falsifiable claims recorded yet.</div>`
-            }
-            ${
-              !state.is_demo
-                ? `
-              <details class="add-hyp-details">
-                <summary>Add / Update Hypothesis</summary>
-                <div class="add-hyp-form">
-                  <div class="add-hyp-grid">
-                    <label>ID (slug) <input type="text" id="hyp-id" placeholder="e.g. cloud-margin-floor" /></label>
-                    <label>Confidence
-                      <select id="hyp-conf">
-                        <option value="high">high</option>
-                        <option value="medium" selected>medium</option>
-                        <option value="low">low</option>
-                      </select>
-                    </label>
-                    <label>Status
-                      <select id="hyp-status">
-                        <option value="untested" selected>untested</option>
-                        <option value="supported">supported</option>
-                        <option value="weakened">weakened</option>
-                        <option value="falsified">falsified</option>
-                      </select>
-                    </label>
-                    <label>Metric <input type="text" id="hyp-metric" placeholder="e.g. YoY rev > 20%" /></label>
-                  </div>
-                  <label>Falsifiable Claim <input type="text" id="hyp-claim" placeholder="Specific statement that evidence can disprove..." /></label>
-                  <label>Evidence / Citation <input type="text" id="hyp-evidence" placeholder="10-Q note, filing figure, or observation..." /></label>
-                  <label>Source URL (https:// optional) <input type="url" id="hyp-url" placeholder="https://www.sec.gov/..." /></label>
-                  <div class="actions-row">
-                    <button type="button" class="small primary" id="btn-save-hypothesis">Save Hypothesis</button>
-                  </div>
-                </div>
-              </details>
-            `
-                : ""
-            }
-          </div>
-        </details>
-
-        <details class="drawer-disclosure" data-sec-key="intel" ${isSecOpen("intel", tickerRedFlags.length > 0) ? "open" : ""}>
-          <summary>
-            <span class="disc-title">IBKR &amp; SEC Intelligence</span>
-            <span class="disc-meta">${filings.length} SEC${tickerRedFlags.length > 0 ? ` · ${tickerRedFlags.length} Flag` : ""}${detail?.intel || thesis?.has_intel ? " · Intel" : ""}</span>
-          </summary>
-          <div class="disc-body">
-            ${
-              tickerRedFlags.length > 0
-                ? `<div class="warn-box"><span class="micro-label pos-warn">SEC Filing Red Flags</span>${tickerRedFlags.map((rf) => `<div><strong>${esc(rf.filingDate)} ${esc(rf.form)} [${esc(rf.code)}]</strong> · ${esc(rf.label)}</div>`).join("")}</div>`
-                : ""
-            }
-            ${renderIntelSection(detail?.intel, thesis?.intel_summary, detail?.intel_history, filings, currency, canOpenLinks)}
-          </div>
-        </details>
-
-        <details class="drawer-disclosure" data-sec-key="audit" ${isSecOpen("audit", false) ? "open" : ""}>
-          <summary>
-            <span class="disc-title">Test &amp; Rule-Change Audit Ledger</span>
-            <span class="disc-meta">${recentAuditEntries.length} entries</span>
-          </summary>
-          <div class="disc-body">
-            ${
-              thesis?.bear_case_summary
-                ? `<div class="bear-box"><div class="micro-label">Steelman Bear Case</div><div>${esc(thesis.bear_case_summary)}</div></div>`
-                : ""
-            }
-            ${
-              recentAuditEntries.length > 0
-                ? `<div class="test-ledger-list">
-                    ${recentAuditEntries
-                      .slice(0, 8)
-                      .map(
-                        (rec) => `
-                      <div class="test-ledger-item">
-                        <div class="hypothesis-head">
-                          <span>${rec.event_type === "rule_change" ? `<span class="auto-badge warn">RULE CHANGE</span>` : verdictTag(rec.verdict)} ${rec.kill_switch_triggered ? `<span class="status-tag"><span class="dot bad"></span>KILL-SWITCH</span>` : ""}</span>
-                          <span class="muted-sub">${esc(rec.tested_at)}${rec.price_at_test !== null && rec.price_at_test !== undefined ? ` · ${fmtMoney(rec.price_at_test, rec.currency || currency, 2)}` : ""}</span>
-                        </div>
-                        <div>${esc(rec.summary)}</div>
-                      </div>
-                    `,
-                      )
-                      .join("")}
-                  </div>`
-                : `<div class="muted-sub">No systematic tests or rule changes logged yet in <code>test_log.jsonl</code>.</div>`
-            }
-          </div>
-        </details>
-      </section>
+    <div class="drawer-subtabs" role="tablist" aria-label="Dossier sections">
+      <button type="button" role="tab" data-inspector-tab="summary" aria-selected="${inspectorTab === "summary" ? "true" : "false"}">Summary</button>
+      <button type="button" role="tab" data-inspector-tab="memo" aria-selected="${inspectorTab === "memo" ? "true" : "false"}">Deep Memo${detail?.memo_md ? "" : thesis?.has_memo ? " ·" : ""}</button>
+      <button type="button" role="tab" data-inspector-tab="valuation" aria-selected="${inspectorTab === "valuation" ? "true" : "false"}">Valuation &amp; Quality</button>
+      <button type="button" role="tab" data-inspector-tab="signals" aria-selected="${inspectorTab === "signals" ? "true" : "false"}">Signals &amp; Audit</button>
     </div>
 
-    ${refineBarHtml}
+    <div class="drawer-body">
+      ${activeDrawerContent}
+    </div>
 
     <div class="drawer-foot">
       <div class="actions-row" style="gap:0.35rem">
-        ${canMessage ? `<button type="button" class="small" id="btn-toggle-refine" aria-expanded="${inspectorRefineOpen ? "true" : "false"}">Refine / Challenge</button>` : `<span class="muted-sub">Esc to dismiss</span>`}
-        ${canMessage ? `<button type="button" class="small ghost" id="btn-inspector-discuss-here" title="Bring this ticker into the active chat conversation">Discuss Here</button>` : ""}
+        ${
+          canMessage
+            ? `
+          <div class="seg-switch" role="group" aria-label="Agent dispatch target">
+            <button type="button" data-send-mode="background" aria-pressed="${inspectorSendMode === "background" ? "true" : "false"}" title="Runs in a side agent so your current chat stays uninterrupted">Side Agent</button>
+            <button type="button" data-send-mode="here" aria-pressed="${inspectorSendMode === "here" ? "true" : "false"}" title="Brings this research into the active chat">This Chat</button>
+          </div>
+          <button type="button" class="small" id="btn-inspector-redteam" title="Quickly re-verify hypotheses against live SEC, XBRL, and Form 4 signals">Systematic Test</button>
+        `
+            : `<span class="muted-sub">Esc to dismiss</span>`
+        }
       </div>
-      ${canMessage ? `<button type="button" class="primary small" id="btn-inspector-redteam" title="Runs systematic test in background without interrupting your active chat">Run Systematic Test</button>` : ""}
+      ${canMessage ? `<button type="button" class="primary small" id="btn-inspector-deep-research" title="Runs a full 3-lens institutional deep dive and updates memo.md, model.json, and hypotheses">Deep Research</button>` : ""}
     </div>
   `;
 
@@ -4420,16 +5003,30 @@ function bindInspectorEvents(dlg: HTMLDialogElement, sym: string, detail: Dossie
     });
   });
 
-  dlg.querySelector<HTMLButtonElement>("#btn-inspector-discuss-here")?.addEventListener("click", async () => {
-    await sendAgentPrompt(
-      `Let's review ${sym} here in this conversation: summarize the current dossier, latest XBRL/SEC signals, Reverse DCF hurdle spread, and key open risks before taking any action.`,
-      { mode: "here", label: `discuss ${sym}`, ticker: sym },
-    );
+  dlg.querySelectorAll<HTMLButtonElement>("[data-inspector-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const next = (btn.dataset.inspectorTab as InspectorTabId | undefined) ?? "summary";
+      if (next !== inspectorTab) {
+        const openKeys = captureOpenDisclosures(dlg);
+        inspectorTab = next;
+        renderInspectorDialog(sym, openKeys);
+      }
+    });
+  });
+
+  const deepResearchPrompt = `Run a full 3-lens institutional deep research dive on ${sym}: (1) Business quality, moat, supply chain, XBRL Owner Earnings (FCF-SBC), ROIC, and Sloan Accruals (sync_fundamentals_xbrl + sync_insiders_form4 + check_sec_edgar); (2) Reverse DCF market-implied expectations vs Street consensus and Mauboussin base rates; (3) Steelman bear case and machine-checkable falsifiable hypotheses. Persist the full memo.md, 5Y model.json, and updated thesis via upsert_dossier and log the scored test via record_thesis_test.`;
+
+  dlg.querySelector<HTMLButtonElement>("#btn-inspector-deep-research")?.addEventListener("click", async () => {
+    await sendAgentPrompt(deepResearchPrompt, { mode: inspectorSendMode, label: "deep research", ticker: sym });
+  });
+
+  dlg.querySelector<HTMLButtonElement>("#btn-launch-deep-memo")?.addEventListener("click", async () => {
+    await sendAgentPrompt(deepResearchPrompt, { mode: inspectorSendMode, label: "deep research", ticker: sym });
   });
 
   dlg.querySelector<HTMLButtonElement>("#btn-inspector-redteam")?.addEventListener("click", async () => {
     await sendAgentPrompt(
-      `Run a systematic Red-Team thesis test for ${sym}: verify falsifiable hypotheses against live market data, SEC filings (check_sec_edgar), XBRL fundamentals, and Form 4 insider flows, steelman the bear case, check hard kill-switches, and persist the scored result using record_thesis_test.`,
+      `Run a systematic Red-Team thesis test for ${sym}: verify falsifiable hypotheses against live market data, SEC filings (check_sec_edgar), XBRL Owner Earnings & ROIC fundamentals, and Form 4 insider flows, steelman the bear case, check hard kill-switches, and persist the scored result using record_thesis_test.`,
       { mode: inspectorSendMode, label: "systematic test", ticker: sym },
     );
   });
@@ -4486,6 +5083,9 @@ function openInspector(ticker: string): void {
   const dlg = document.getElementById("stock-inspector") as HTMLDialogElement | null;
   if (!dlg) return;
   const sym = ticker.toUpperCase();
+  if (inspectorTicker !== sym) {
+    inspectorTab = "summary";
+  }
   inspectorTicker = sym;
   inspectorThemeSlug = null;
   inspectorRefineOpen = false;
@@ -4873,11 +5473,13 @@ function renderPanelsOnly(): void {
   const canMessage = Boolean(hostCaps?.message);
   const canOpenLinks = Boolean(hostCaps?.openLinks);
   const ov = document.getElementById("panel-overview");
+  const fc = document.getElementById("panel-forecast");
   const ho = document.getElementById("panel-holdings");
   const th = document.getElementById("panel-theses");
   const ed = document.getElementById("panel-edgar");
   const la = document.getElementById("panel-lab");
   if (ov) ov.innerHTML = renderOverview(state);
+  if (fc) fc.innerHTML = renderForecast(state, canMessage);
   if (ho) ho.innerHTML = renderHoldings(state);
   if (th) th.innerHTML = renderTheses(state, canMessage);
   if (ed) ed.innerHTML = renderEdgar(state, canOpenLinks);
@@ -4908,7 +5510,7 @@ function render(): void {
               <path d="M78 40 H96 V58" stroke="currentColor" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
             <div class="brand-text">
-              <div class="brand-title-row"><h1>Investment OS</h1><span class="ver-badge">v0.5</span><span class="status-tag"><span class="dot"></span>Setup</span></div>
+              <div class="brand-title-row"><h1>Investment OS</h1><span class="ver-badge">v0.6</span><span class="status-tag"><span class="dot"></span>Setup</span></div>
               <div class="meta-line">Local data vault ready</div>
             </div>
           </div>
@@ -4954,7 +5556,7 @@ function render(): void {
           <div class="brand-text">
             <div class="brand-title-row">
               <h1>Investment OS</h1>
-              <span class="ver-badge">v0.5</span>
+              <span class="ver-badge">v0.6</span>
               <span class="status-tag"><span class="dot ${statusDotCls}"></span>${statusLbl}</span>
             </div>
             <div class="meta-line">Base ${esc(state.base_currency)} · ${esc(state.generated_at)}</div>
@@ -4978,6 +5580,9 @@ function render(): void {
       <div class="tab-panels">
         <div role="tabpanel" id="panel-overview" data-panel="overview" aria-labelledby="tab-overview" ${activeTab === "overview" ? 'tabindex="0"' : 'hidden="until-found"'}>
           ${renderOverview(state)}
+        </div>
+        <div role="tabpanel" id="panel-forecast" data-panel="forecast" aria-labelledby="tab-forecast" ${activeTab === "forecast" ? 'tabindex="0"' : 'hidden="until-found"'}>
+          ${renderForecast(state, canMessage)}
         </div>
         <div role="tabpanel" id="panel-holdings" data-panel="holdings" aria-labelledby="tab-holdings" ${activeTab === "holdings" ? 'tabindex="0"' : 'hidden="until-found"'}>
           ${renderHoldings(state)}
@@ -5123,6 +5728,40 @@ function bindChromeEvents(root: HTMLElement): void {
       }
     }
   });
+}
+
+async function runInteractiveForecast(): Promise<void> {
+  if (!state || !hostCaps?.serverTools) return;
+  forecastBusy = true;
+  forecastError = "";
+  renderPanelsOnly();
+  try {
+    const actions = buildSelectedForecastActions(state);
+    const res = await app.callServerTool({
+      name: "app_simulate_forecast",
+      arguments: {
+        horizon_years: forecastHorizon,
+        include_external_wealth: state.profile.external_exposure.enabled ? forecastIncludeExt : false,
+        apply_recommended_rotations: false,
+        actions,
+        regime_vol_multiplier: forecastVolMult,
+        simulations: 1500,
+        demo: state.is_demo,
+      },
+    });
+    forecastBusy = false;
+    if (res.isError) {
+      forecastError = res.content?.find((c) => c.type === "text")?.text ?? "Forecast simulation failed.";
+    } else if (res.structuredContent && typeof res.structuredContent === "object") {
+      forecastResult = res.structuredContent as unknown as PortfolioForecastResult;
+    } else {
+      forecastError = "Forecast returned no structured result.";
+    }
+  } catch (err) {
+    forecastBusy = false;
+    forecastError = `Forecast error: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  renderPanelsOnly();
 }
 
 async function runDeterministicBacktestFromForm(root: HTMLElement): Promise<void> {
@@ -5361,16 +6000,115 @@ function bindPanelEvents(root: HTMLElement): void {
     );
   });
 
-  root.querySelectorAll<HTMLButtonElement>(".ask-refine").forEach((btn) => {
+  root.querySelectorAll<HTMLButtonElement>(".ask-deep-research").forEach((btn) => {
     btn.addEventListener("click", async (e) => {
       e.stopPropagation();
       const sym = btn.dataset.ticker;
       if (!sym) return;
       await sendAgentPrompt(
-        `Refine and challenge my ${sym} dossier: stress-test the falsifiable hypotheses, verify Reverse DCF & Bear/Base/Bull 5Y drivers against live prices and SEC filings, and update via upsert_dossier or record_thesis_test.`,
-        { mode: "background", label: "refine dossier", ticker: sym },
+        `Run a full 3-lens institutional deep research dive on ${sym}: (1) Business quality, moat, supply chain, XBRL Owner Earnings (FCF-SBC), ROIC, and Sloan Accruals; (2) Reverse DCF market-implied expectations vs Street consensus and base rates; (3) Steelman bear case and machine-checkable falsifiable hypotheses. Persist memo.md, model.json, and thesis updates via upsert_dossier and record_thesis_test.`,
+        { mode: "background", label: "deep research", ticker: sym },
       );
     });
+  });
+
+  // Forecast & Action Simulator bindings
+  root.querySelectorAll<HTMLButtonElement>("[data-fc-horizon]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const next = Number(btn.dataset.fcHorizon) || 5;
+      if (next !== forecastHorizon) {
+        forecastHorizon = next;
+        void runInteractiveForecast();
+      }
+    });
+  });
+
+  root.querySelectorAll<HTMLButtonElement>("[data-fc-vol]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const next = Number(btn.dataset.fcVol) || 1.0;
+      if (next !== forecastVolMult) {
+        forecastVolMult = next;
+        void runInteractiveForecast();
+      }
+    });
+  });
+
+  root.querySelector<HTMLInputElement>("#fc-include-ext")?.addEventListener("change", (e) => {
+    forecastIncludeExt = Boolean((e.currentTarget as HTMLInputElement).checked);
+    void runInteractiveForecast();
+  });
+
+  root.querySelector<HTMLInputElement>("#fc-park-cash")?.addEventListener("change", (e) => {
+    forecastParkCash = Boolean((e.currentTarget as HTMLInputElement).checked);
+    void runInteractiveForecast();
+  });
+
+  root.querySelectorAll<HTMLInputElement>(".fc-rot-check").forEach((chk) => {
+    chk.addEventListener("change", () => {
+      const key = chk.dataset.rotKey;
+      if (!key) return;
+      if (chk.checked) forecastDisabledRotations.delete(key);
+      else forecastDisabledRotations.add(key);
+      void runInteractiveForecast();
+    });
+  });
+
+  root.querySelector<HTMLButtonElement>("#btn-fc-select-all")?.addEventListener("click", () => {
+    forecastDisabledRotations.clear();
+    void runInteractiveForecast();
+  });
+
+  root.querySelector<HTMLButtonElement>("#btn-fc-clear-all")?.addEventListener("click", () => {
+    if (!state) return;
+    const rot = state.rotation_queue;
+    for (const sw of rot?.tax_swaps ?? []) forecastDisabledRotations.add(`swap:${sw.ticker}`);
+    for (const ex of rot?.mandatory_exits ?? []) forecastDisabledRotations.add(`exit:${ex.ticker}`);
+    for (const ct of rot?.cap_trims ?? []) forecastDisabledRotations.add(`trim:${ct.cap_id}:${ct.ticker}`);
+    forecastPlannedBuys = [];
+    forecastParkCash = false;
+    void runInteractiveForecast();
+  });
+
+  root.querySelectorAll<HTMLButtonElement>(".fc-preset-amt").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const amt = Number(btn.dataset.amt) || 0;
+      if (amt > 0) {
+        forecastBuyAmount = amt;
+        const amtInput = root.querySelector<HTMLInputElement>("#fc-buy-amount");
+        if (amtInput) amtInput.value = String(amt);
+      }
+    });
+  });
+
+  root.querySelector<HTMLFormElement>("#fc-add-buy-form")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const symEl = root.querySelector<HTMLInputElement>("#fc-buy-ticker");
+    const amtEl = root.querySelector<HTMLInputElement>("#fc-buy-amount");
+    const sym = (symEl?.value ?? forecastBuyTicker).trim().toUpperCase();
+    const amt = Math.round(Number(amtEl?.value ?? forecastBuyAmount));
+    if (!sym || !Number.isFinite(amt) || amt <= 0) return;
+    forecastBuyTicker = sym;
+    forecastBuyAmount = amt;
+    forecastPlannedBuys.push({ id: `buy-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, ticker: sym, amount_base: amt });
+    void runInteractiveForecast();
+  });
+
+  root.querySelectorAll<HTMLButtonElement>(".fc-remove-buy").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.buyId;
+      if (!id) return;
+      forecastPlannedBuys = forecastPlannedBuys.filter((b) => b.id !== id);
+      void runInteractiveForecast();
+    });
+  });
+
+  root.querySelector<HTMLButtonElement>("#btn-fc-ask-agent")?.addEventListener("click", async () => {
+    if (!state) return;
+    const actions = buildSelectedForecastActions(state);
+    await sendAgentPrompt(
+      `Optimize my ${forecastHorizon}-year forward portfolio action plan using simulate_portfolio_forecast (currently modeling ${actions.length} actions across swaps/exits/trims/buys, external wealth=${forecastIncludeExt}, vol_mult=${forecastVolMult}). Evaluate marginal risk contributions, correlation-adjusted hurdles, Quarter-Kelly sizing, and cross-border estate tax savings, and recommend an optimal strictly read-only staged execution sequence.`,
+      { mode: "here", label: "optimize forecast plan", ticker: "portfolio" },
+    );
   });
 
   root.querySelector<HTMLButtonElement>("#btn-run-watchdog-edgar")?.addEventListener("click", async () => {

@@ -407,6 +407,20 @@ export function computeScenarioSummary(
     }
   }
 
+  // SOTA Quality Guardrail: SBC-adjusted Owner Earnings divergence vs headline FCF
+  const fcfMarginXbrl = opts?.fundamentals?.latest_ratios.fcf_margin_pct;
+  const oeMarginXbrl = opts?.fundamentals?.latest_ratios.owner_earnings_margin_pct;
+  if (
+    isSingleStock &&
+    typeof fcfMarginXbrl === "number" &&
+    typeof oeMarginXbrl === "number" &&
+    fcfMarginXbrl - oeMarginXbrl >= 8
+  ) {
+    valuationWarnings.push(
+      `Headline FCF margin (${round(fcfMarginXbrl, 1)}%) exceeds SBC-adjusted Owner Earnings (${round(oeMarginXbrl, 1)}%) by ${round(fcfMarginXbrl - oeMarginXbrl, 1)}pp; verify dilution drag.`,
+    );
+  }
+
   return {
     horizon_years: horizon,
     price_used: round(price, 4),
@@ -448,6 +462,8 @@ export interface ReverseDcfSummary {
   implied_revenue_cagr_pct: number | null;
   base_revenue_cagr_pct: number | null;
   revenue_cagr_gap_pct: number | null;
+  consensus_rev_growth_pct?: number | null;
+  expectations_gap_vs_consensus_pct?: number | null;
   target_margin_pct: number | null;
   metric_basis_note: string | null;
   linked_hypothesis_ids: string[];
@@ -458,6 +474,7 @@ export function computeReverseDcf(
   price: number | null,
   model: DossierModel | null | undefined,
   taxInfo: AfterTaxHurdleInfo,
+  opts?: { consensusRevGrowthPct?: number | null },
 ): ReverseDcfSummary | null {
   if (price === null || !Number.isFinite(price) || price <= 0 || !model?.reverse_dcf) {
     return null;
@@ -528,6 +545,17 @@ export function computeReverseDcf(
     }
   }
 
+  const consensusRevGrowth =
+    opts?.consensusRevGrowthPct !== null &&
+    opts?.consensusRevGrowthPct !== undefined &&
+    Number.isFinite(opts.consensusRevGrowthPct)
+      ? round(opts.consensusRevGrowthPct, 2)
+      : null;
+  const expectationsGapVsConsensus =
+    consensusRevGrowth !== null && impliedRevCagrPct !== null
+      ? round(consensusRevGrowth - impliedRevCagrPct, 2)
+      : null;
+
   return {
     basis: rd.basis,
     horizon_years: horizon,
@@ -552,6 +580,8 @@ export function computeReverseDcf(
     implied_revenue_cagr_pct: impliedRevCagrPct,
     base_revenue_cagr_pct: rd.base_revenue_cagr_pct ?? null,
     revenue_cagr_gap_pct: revCagrGapPct,
+    consensus_rev_growth_pct: consensusRevGrowth,
+    expectations_gap_vs_consensus_pct: expectationsGapVsConsensus,
     target_margin_pct: rd.target_margin_pct ?? null,
     metric_basis_note: rd.metric_basis_note ?? null,
     linked_hypothesis_ids: rd.linked_hypothesis_ids ?? [],
@@ -786,6 +816,10 @@ export function evaluateHypothesisRule(
         if (metric === "gross_margin_pct" && ttmRev && ttmRev > 0 && ttmGp !== null) observed = round((ttmGp / ttmRev) * 100, 2);
         else if (metric === "operating_margin_pct" && ttmRev && ttmRev > 0 && ttmOp !== null) observed = round((ttmOp / ttmRev) * 100, 2);
         else if (metric === "fcf_margin_pct" && ttmRev && ttmRev > 0 && ttmFcf !== null) observed = round((ttmFcf / ttmRev) * 100, 2);
+        else if (metric === "owner_earnings_margin_pct" && ttmRev && ttmRev > 0 && ttmFcf !== null) {
+          const oe = ttmSbc !== null ? ttmFcf - ttmSbc : ttmFcf;
+          observed = round((oe / ttmRev) * 100, 2);
+        }
         else if (metric === "ocf_to_ni_pct" && ttmNi && ttmNi > 0 && ttmOcf !== null) observed = round((ttmOcf / ttmNi) * 100, 2);
         else if (metric === "sbc_pct_rev" && ttmRev && ttmRev > 0 && ttmSbc !== null) observed = round((ttmSbc / ttmRev) * 100, 2);
         else if (metric === "revenue_b" && ttmRev !== null) observed = round(ttmRev / 1000, 3);

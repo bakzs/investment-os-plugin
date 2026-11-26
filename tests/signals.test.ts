@@ -174,6 +174,22 @@ function buildMockCompanyFacts(): SecCompanyFactsPayload {
             ],
           },
         },
+        Assets: {
+          units: {
+            USD: [
+              { end: "2025-12-31", val: 80_000_000_000, form: "10-K", filed: "2026-02-20", accn: "0001234567-26-000005" },
+              { end: "2026-03-31", val: 85_000_000_000, form: "10-Q", filed: "2026-05-01", accn: "0001234567-26-000015" },
+            ],
+          },
+        },
+        StockholdersEquity: {
+          units: {
+            USD: [
+              { end: "2025-12-31", val: 55_000_000_000, form: "10-K", filed: "2026-02-20", accn: "0001234567-26-000005" },
+              { end: "2026-03-31", val: 60_000_000_000, form: "10-Q", filed: "2026-05-01", accn: "0001234567-26-000015" },
+            ],
+          },
+        },
       },
     },
   };
@@ -208,8 +224,16 @@ test("XBRL parseCompanyFactsToFundamentals derives YTD-differenced quarters, Q4,
   assert.equal(qLatest.dso_days, 59.5);
   // DIO = (2,100 / 4,200) * 91.25 = 45.6 days
   assert.equal(qLatest.dio_days, 45.6);
-  // Net cash = (25B - 10B) = 15B
+  // Net cash = (25B - 10B) = 15B; Owner Earnings = 3,800 - 700 = 3,100M (22.14% margin)
   assert.equal(qLatest.net_cash_b, 15);
+  assert.equal(qLatest.owner_earnings_m, 3100);
+  assert.equal(qLatest.owner_earnings_margin_pct, 22.14);
+  // Invested Capital = Equity 60B + Debt 10B - Cash 25B = 45B
+  assert.equal(qLatest.invested_capital_m, 45000);
+  // Sloan Accruals = (NI 4,000 - OCF 4,800) / Assets 85,000 = -0.94% (annualized or single-quarter negative accruals -> high cash quality!)
+  assert.ok(qLatest.accruals_ratio_pct !== null && qLatest.accruals_ratio_pct !== undefined && qLatest.accruals_ratio_pct < 0);
+  assert.ok(result.latest_ratios.roic_pct !== null && result.latest_ratios.roic_pct !== undefined && result.latest_ratios.roic_pct > 25);
+  assert.equal(result.latest_ratios.quality_grade, "A");
 
   // Q4 (2025-12-31) derived via FY - 9M YTD: Rev 13,000M, OCF 4,500M, CapEx 900M -> FCF 3,600M
   const q4 = result.quarterly[1];
@@ -384,7 +408,9 @@ test("EDGAR retains 4 periodic + 10 event filings separately, evaluates SEC gate
           ? "4.01,5.02"
           : i === 3
             ? "1.02,3.02"
-            : "2.02",
+            : i === 4
+              ? "2.06"
+              : "2.02",
     );
   }
   // Periodic filings deeper in the submissions feed
@@ -433,18 +459,21 @@ test("EDGAR retains 4 periodic + 10 event filings separately, evaluates SEC gate
   assert.equal(gateEvals[0]?.cleared, true);
   assert.equal(gateEvals[0]?.latest_matching_date, "2026-10-28");
 
-  // Forensic red flag extraction: NT 10-Q + 8-K items 4.02, 4.01, 5.02, 1.02, 3.02
+  // Forensic red flag extraction: NT 10-Q + 8-K items 4.02, 4.01, 2.06, 5.02, 1.02, 3.02 (3-tier severity)
   const flags = extractSecRedFlags({ ACME: retained });
   const codes = flags.map((f) => f.code);
   assert.ok(codes.includes("NT 10-Q"));
   assert.ok(codes.includes("8-K:4.02"));
   assert.ok(codes.includes("8-K:4.01"));
+  assert.ok(codes.includes("8-K:2.06"));
   assert.ok(codes.includes("8-K:5.02"));
   assert.ok(codes.includes("8-K:1.02"));
   assert.ok(codes.includes("8-K:3.02"));
   assert.equal(flags.find((f) => f.code === "8-K:4.02")?.severity, "high");
+  assert.equal(flags.find((f) => f.code === "8-K:2.06")?.severity, "high");
   assert.equal(flags.find((f) => f.code === "NT 10-Q")?.severity, "high");
-  assert.equal(flags.find((f) => f.code === "8-K:5.02")?.severity, "medium");
+  assert.equal(flags.find((f) => f.code === "8-K:1.02")?.severity, "medium");
+  assert.equal(flags.find((f) => f.code === "8-K:5.02")?.severity, "info");
 });
 
 test("Form 4 XML parser separates discretionary buys/sells from 10b5-1 plans and flags C-suite clusters + incremental sync", async () => {
