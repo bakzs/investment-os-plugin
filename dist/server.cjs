@@ -41941,7 +41941,9 @@ function deriveLatestRatios(quarterly, annual, overrides) {
   let ttmFcfPerShare = null;
   let ttmOwnerEarningsPerShare = null;
   let ttmRevPerShare = null;
+  let ttmFcfMarginPct = latest?.fcf_margin_pct ?? null;
   let ttmOwnerEarningsMarginPct = latest?.owner_earnings_margin_pct ?? null;
+  let ttmOcfToNiPct = latest?.ocf_to_ni_pct ?? null;
   let ttmRoicPct = latest?.roic_pct ?? null;
   let ttmAccrualsPct = latest?.accruals_ratio_pct ?? null;
   if (quarterly.length >= 4) {
@@ -41959,13 +41961,19 @@ function deriveLatestRatios(quarterly, annual, overrides) {
     const ttmOp = q4.every((q) => typeof q.operating_income_m === "number") ? q4.reduce((acc, q) => acc + (q.operating_income_m ?? 0), 0) : null;
     const ttmNi = q4.every((q) => typeof q.net_income_m === "number") ? q4.reduce((acc, q) => acc + (q.net_income_m ?? 0), 0) : null;
     const ttmOcf = q4.every((q) => typeof q.ocf_m === "number") ? q4.reduce((acc, q) => acc + (q.ocf_m ?? 0), 0) : null;
-    if (shares && shares > 0 && ttmFcf !== null) {
-      ttmFcfPerShare = round3(ttmFcf / shares, 2);
+    if (ttmFcf !== null) {
       const ttmOe = ttmSbc !== null ? ttmFcf - ttmSbc : ttmFcf;
-      ttmOwnerEarningsPerShare = round3(ttmOe / shares, 2);
+      if (shares && shares > 0) {
+        ttmFcfPerShare = round3(ttmFcf / shares, 2);
+        ttmOwnerEarningsPerShare = round3(ttmOe / shares, 2);
+      }
       if (ttmRev && ttmRev > 0) {
+        ttmFcfMarginPct = round3(ttmFcf / ttmRev * 100, 2);
         ttmOwnerEarningsMarginPct = round3(ttmOe / ttmRev * 100, 2);
       }
+    }
+    if (ttmOcf !== null && ttmNi !== null && ttmNi > 0) {
+      ttmOcfToNiPct = round3(ttmOcf / ttmNi * 100, 2);
     }
     if (shares && shares > 0 && ttmRev !== null) {
       ttmRevPerShare = round3(ttmRev / shares, 2);
@@ -42015,12 +42023,11 @@ function deriveLatestRatios(quarterly, annual, overrides) {
     else if (ttmOwnerEarningsMarginPct >= 8) qualityScore += 1;
     else if (ttmOwnerEarningsMarginPct < 0) qualityFlags.push(`Negative SBC-adjusted Owner Earnings (${ttmOwnerEarningsMarginPct.toFixed(1)}%)`);
   }
-  const ocfNi = latest?.ocf_to_ni_pct ?? null;
-  if (ocfNi !== null) {
+  if (ttmOcfToNiPct !== null) {
     qualityChecks += 1;
-    if (ocfNi >= 100) qualityScore += 2;
-    else if (ocfNi >= 80) qualityScore += 1;
-    else qualityFlags.push(`Weak cash conversion (OCF/NI ${ocfNi.toFixed(0)}% < 80%)`);
+    if (ttmOcfToNiPct >= 100) qualityScore += 2;
+    else if (ttmOcfToNiPct >= 80) qualityScore += 1;
+    else qualityFlags.push(`Weak cash conversion (TTM OCF/NI ${ttmOcfToNiPct.toFixed(0)}% < 80%)`);
   }
   if (ttmAccrualsPct !== null) {
     qualityChecks += 1;
@@ -42037,7 +42044,7 @@ function deriveLatestRatios(quarterly, annual, overrides) {
     qualityFlags.push(`Share dilution (+${dilutedSharesYoyPct.toFixed(1)}% YoY)`);
   }
   let qualityGrade = null;
-  if (qualityChecks >= 2) {
+  if (qualityChecks >= 3 || qualityChecks >= 2 && ttmRoicPct !== null) {
     const pct = qualityScore / (qualityChecks * 2);
     qualityGrade = pct >= 0.78 ? "A" : pct >= 0.52 ? "B" : pct >= 0.28 ? "C" : "D";
   }
@@ -42046,8 +42053,8 @@ function deriveLatestRatios(quarterly, annual, overrides) {
     operating_margin_pct: latest?.operating_margin_pct ?? null,
     dso_days: latest?.dso_days ?? null,
     dio_days: latest?.dio_days ?? null,
-    ocf_to_ni_pct: latest?.ocf_to_ni_pct ?? null,
-    fcf_margin_pct: latest?.fcf_margin_pct ?? null,
+    ocf_to_ni_pct: ttmOcfToNiPct,
+    fcf_margin_pct: ttmFcfMarginPct,
     owner_earnings_margin_pct: ttmOwnerEarningsMarginPct,
     sbc_pct_rev: latest?.sbc_pct_rev ?? null,
     roic_pct: ttmRoicPct,

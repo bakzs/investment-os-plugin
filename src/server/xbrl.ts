@@ -549,7 +549,9 @@ function deriveLatestRatios(
   let ttmFcfPerShare: number | null = null;
   let ttmOwnerEarningsPerShare: number | null = null;
   let ttmRevPerShare: number | null = null;
+  let ttmFcfMarginPct: number | null = latest?.fcf_margin_pct ?? null;
   let ttmOwnerEarningsMarginPct: number | null = latest?.owner_earnings_margin_pct ?? null;
+  let ttmOcfToNiPct: number | null = latest?.ocf_to_ni_pct ?? null;
   let ttmRoicPct: number | null = latest?.roic_pct ?? null;
   let ttmAccrualsPct: number | null = latest?.accruals_ratio_pct ?? null;
 
@@ -583,13 +585,19 @@ function deriveLatestRatios(
       ? q4.reduce((acc, q) => acc + (q.ocf_m ?? 0), 0)
       : null;
 
-    if (shares && shares > 0 && ttmFcf !== null) {
-      ttmFcfPerShare = round(ttmFcf / shares, 2);
+    if (ttmFcf !== null) {
       const ttmOe = ttmSbc !== null ? ttmFcf - ttmSbc : ttmFcf;
-      ttmOwnerEarningsPerShare = round(ttmOe / shares, 2);
+      if (shares && shares > 0) {
+        ttmFcfPerShare = round(ttmFcf / shares, 2);
+        ttmOwnerEarningsPerShare = round(ttmOe / shares, 2);
+      }
       if (ttmRev && ttmRev > 0) {
+        ttmFcfMarginPct = round((ttmFcf / ttmRev) * 100, 2);
         ttmOwnerEarningsMarginPct = round((ttmOe / ttmRev) * 100, 2);
       }
+    }
+    if (ttmOcf !== null && ttmNi !== null && ttmNi > 0) {
+      ttmOcfToNiPct = round((ttmOcf / ttmNi) * 100, 2);
     }
     if (shares && shares > 0 && ttmRev !== null) {
       ttmRevPerShare = round(ttmRev / shares, 2);
@@ -648,12 +656,11 @@ function deriveLatestRatios(
     else if (ttmOwnerEarningsMarginPct >= 8) qualityScore += 1;
     else if (ttmOwnerEarningsMarginPct < 0) qualityFlags.push(`Negative SBC-adjusted Owner Earnings (${ttmOwnerEarningsMarginPct.toFixed(1)}%)`);
   }
-  const ocfNi = latest?.ocf_to_ni_pct ?? null;
-  if (ocfNi !== null) {
+  if (ttmOcfToNiPct !== null) {
     qualityChecks += 1;
-    if (ocfNi >= 100) qualityScore += 2;
-    else if (ocfNi >= 80) qualityScore += 1;
-    else qualityFlags.push(`Weak cash conversion (OCF/NI ${ocfNi.toFixed(0)}% < 80%)`);
+    if (ttmOcfToNiPct >= 100) qualityScore += 2;
+    else if (ttmOcfToNiPct >= 80) qualityScore += 1;
+    else qualityFlags.push(`Weak cash conversion (TTM OCF/NI ${ttmOcfToNiPct.toFixed(0)}% < 80%)`);
   }
   if (ttmAccrualsPct !== null) {
     qualityChecks += 1;
@@ -671,7 +678,7 @@ function deriveLatestRatios(
   }
 
   let qualityGrade: "A" | "B" | "C" | "D" | null = null;
-  if (qualityChecks >= 2) {
+  if (qualityChecks >= 3 || (qualityChecks >= 2 && ttmRoicPct !== null)) {
     const pct = qualityScore / (qualityChecks * 2);
     qualityGrade = pct >= 0.78 ? "A" : pct >= 0.52 ? "B" : pct >= 0.28 ? "C" : "D";
   }
@@ -681,8 +688,8 @@ function deriveLatestRatios(
     operating_margin_pct: latest?.operating_margin_pct ?? null,
     dso_days: latest?.dso_days ?? null,
     dio_days: latest?.dio_days ?? null,
-    ocf_to_ni_pct: latest?.ocf_to_ni_pct ?? null,
-    fcf_margin_pct: latest?.fcf_margin_pct ?? null,
+    ocf_to_ni_pct: ttmOcfToNiPct,
+    fcf_margin_pct: ttmFcfMarginPct,
     owner_earnings_margin_pct: ttmOwnerEarningsMarginPct,
     sbc_pct_rev: latest?.sbc_pct_rev ?? null,
     roic_pct: ttmRoicPct,
