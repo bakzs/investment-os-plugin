@@ -3346,6 +3346,48 @@ dialog#stock-inspector {
   align-items: center;
 }
 
+/* v0.8 Walk-Forward Eval & SOTP Workbench */
+.quant-eval-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 0.6rem;
+}
+
+.quant-winner-row {
+  background: color-mix(in oklab, var(--ok) 6%, transparent);
+}
+
+.sotp-empty-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  padding: 0.52rem 0.72rem;
+  border-radius: 7px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-color);
+}
+
+.sotp-sliders-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(195px, 1fr));
+  gap: 0.52rem 0.75rem;
+}
+
+.sotp-sliders-grid .sim-field label {
+  font-size: 0.71rem;
+  gap: 0.35rem;
+}
+
+.sotp-total-row th,
+.sotp-total-row td {
+  border-top: 1.5px solid var(--control-border);
+  background: var(--bg-inset);
+  font-weight: 600;
+}
+
 @container (width < 560px) {
   .buy-builder-form {
     grid-template-columns: 1fr;
@@ -3367,6 +3409,7 @@ dialog#stock-inspector {
   .rotation-row-btn,
   .warn-box,
   .auto-badge,
+  .sotp-empty-bar,
   .confirm-gate-box,
   .funding-strip,
   .brier-strip,

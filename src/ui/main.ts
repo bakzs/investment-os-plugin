@@ -632,6 +632,8 @@ interface ThesisRow {
   } | null;
   valuation_bands?: ValuationBands | null;
   intel_summary?: ThesisIntelSummary | null;
+  has_sotp?: boolean;
+  sotp_summary?: SotpValuationSummary | null;
 }
 
 interface ScenarioCaseInput {
@@ -642,16 +644,120 @@ interface ScenarioCaseInput {
   summary: string;
 }
 
+interface ScenarioTriple {
+  bear: number;
+  base: number;
+  bull: number;
+}
+
+interface FundamentalSegment {
+  id: string;
+  name: string;
+  kind: "unit_economics" | "cagr_margin" | "milestone_option";
+  valuation_metric: "owner_earnings" | "ebit" | "fcf" | "revenue" | "ev_direct";
+  unit_label?: string;
+  units?: ScenarioTriple;
+  rev_per_unit_label?: string;
+  rev_per_unit?: ScenarioTriple;
+  rev_multiplier_to_b?: number;
+  current_rev_b?: number;
+  rev_cagr_pct?: ScenarioTriple;
+  margin_pct?: ScenarioTriple;
+  capex_or_sbc_drag_b?: ScenarioTriple;
+  exit_multiple?: ScenarioTriple;
+  milestone_label?: string;
+  success_prob?: ScenarioTriple;
+  success_ev_b?: ScenarioTriple;
+  notes?: string;
+}
+
+interface VariantPerceptionItem {
+  id: string;
+  kpi: string;
+  consensus_view: string;
+  my_view: string;
+  edge_rationale?: string;
+  linked_hypothesis_id?: string | null;
+}
+
+interface FundamentalModel {
+  base_shares_m: number;
+  annual_dilution_pct: number;
+  projected_net_cash_b?: ScenarioTriple;
+  net_cash_b?: number;
+  scenario_probabilities: ScenarioTriple;
+  derive_scenarios_from_sotp: boolean;
+  segments: FundamentalSegment[];
+  variant_perception: VariantPerceptionItem[];
+  methodology_note?: string;
+}
+
+interface SotpSegmentCaseEval {
+  rev_T_b: number;
+  metric_T_b: number;
+  ev_b: number;
+  ev_share_pct: number;
+}
+
+interface SotpSegmentSummary {
+  id: string;
+  name: string;
+  kind: FundamentalSegment["kind"];
+  valuation_metric: FundamentalSegment["valuation_metric"];
+  notes?: string;
+  bear: SotpSegmentCaseEval;
+  base: SotpSegmentCaseEval;
+  bull: SotpSegmentCaseEval;
+}
+
+interface SotpCaseTotal {
+  label: "bear" | "base" | "bull";
+  probability: number;
+  total_rev_T_b: number;
+  total_metric_T_b: number;
+  total_ev_b: number;
+  projected_net_cash_b: number;
+  equity_value_b: number;
+  terminal_shares_m: number;
+  target_price: number;
+  implied_gross_cagr_pct: number | null;
+  implied_after_tax_cagr_pct: number | null;
+}
+
+interface SotpValuationSummary {
+  horizon_years: number;
+  base_shares_m: number;
+  annual_dilution_pct: number;
+  terminal_shares_m: number;
+  segments: SotpSegmentSummary[];
+  totals: {
+    bear: SotpCaseTotal;
+    base: SotpCaseTotal;
+    bull: SotpCaseTotal;
+  };
+  derived_scenarios: {
+    bear: ScenarioCaseInput;
+    base: ScenarioCaseInput;
+    bull: ScenarioCaseInput;
+  };
+  variant_perception: VariantPerceptionItem[];
+  sotp_warnings: string[];
+  methodology_note: string | null;
+}
+
 interface DossierModel {
   as_of?: string;
   horizon_years: number;
   dividend_yield_pct: number;
+  accumulating?: boolean;
+  dividend_wht_pct?: number | null;
   reverse_dcf?: Record<string, unknown> | null;
   scenarios?: {
     bear: ScenarioCaseInput;
     base: ScenarioCaseInput;
     bull: ScenarioCaseInput;
   } | null;
+  fundamental_model?: FundamentalModel | null;
   tranches?: Array<{ label: string; price: number; pct_of_add: number; note?: string }>;
 }
 
@@ -706,6 +812,7 @@ interface DossierDetail {
   intel_history?: IntelHistoryEntry[];
   valuation_bands?: ValuationBands | null;
   linked_themes?: ThemeObject[];
+  sotp_summary?: SotpValuationSummary | null;
   thesis: ThesisRow | null;
 }
 
@@ -785,6 +892,16 @@ interface BrierCalibrationSummary {
   tiers: BrierCalibrationTier[];
 }
 
+interface FundamentalAccuracySummary {
+  spearman_rank_ic: number | null;
+  ic_t_stat: number | null;
+  ic_sample_count: number;
+  modeled_tests_matured: number;
+  inside_band_count: number;
+  inside_band_rate_pct: number | null;
+  note: string;
+}
+
 interface ForwardScorecardResult {
   benchmark_symbol: string;
   total_tests: number;
@@ -795,6 +912,7 @@ interface ForwardScorecardResult {
   by_verdict: VerdictScorecardSummary[];
   horizon_buckets?: ScorecardHorizonBucket[];
   brier_calibration?: BrierCalibrationSummary;
+  fundamental_accuracy?: FundamentalAccuracySummary;
 }
 
 interface PaPerformanceState {
@@ -885,6 +1003,60 @@ interface BacktestResult {
   equity_curve: BacktestEquityPoint[];
 }
 
+interface CovarianceEvalRow {
+  method: "sample_cov" | "fixed_025_shrink" | "analytical_lw";
+  label: string;
+  realized_to_predicted_vol_ratio: number;
+  qlike_loss: number;
+  vol_rmse_pct: number;
+  is_winner: boolean;
+}
+
+interface TailEvalRow {
+  engine: "block_bootstrap" | "student_t_df6" | "gaussian_normal";
+  label: string;
+  breaches: number;
+  total_windows: number;
+  var95_breach_rate_pct: number;
+  kupiec_pof_pvalue: number;
+  kupiec_calibrated: boolean;
+  mean_pinball_loss_pct: number;
+  coverage_80_pct: number;
+  cvar95_shortfall_ratio: number;
+  is_winner: boolean;
+}
+
+interface AllocationHorseRaceRow {
+  strategy: "current_weights" | "hrp_lw" | "inv_vol" | "equal_weight";
+  label: string;
+  oos_cagr_pct: number;
+  oos_vol_pct: number;
+  oos_max_dd_pct: number;
+  oos_sharpe: number;
+  oos_cvar95_weekly_pct: number;
+  annual_turnover_pct: number;
+}
+
+interface QuantWalkForwardEvalResult {
+  status: "CALIBRATED" | "WARN" | "INSUFFICIENT_HISTORY";
+  horizon_weeks: number;
+  tx_cost_bps: number;
+  include_external_wealth: boolean;
+  assets_included: string[];
+  assets_excluded: string[];
+  aligned_weeks: number;
+  warmup_weeks: number;
+  windows_evaluated: number;
+  date_range: { start: string; end: string } | null;
+  avg_lw_lambda: number | null;
+  avg_auto_block_length: number | null;
+  covariance_eval: CovarianceEvalRow[];
+  tail_eval: TailEvalRow[];
+  allocation_horse_race: AllocationHorseRaceRow[];
+  findings: string[];
+  methodology_note: string;
+}
+
 interface DashboardLabSection {
   benchmark_summary: AfterTaxHurdleInfo;
   active_count: number;
@@ -898,6 +1070,7 @@ interface DashboardLabSection {
   pa_performance: PaPerformanceState | null;
   last_backtest_tickers: string[];
   latest_backtest: BacktestResult | null;
+  latest_quant_eval?: QuantWalkForwardEvalResult | null;
 }
 
 interface CatalystRow {
@@ -1028,6 +1201,9 @@ interface PortfolioForecastResult {
   simulation_engine_requested?: "block_bootstrap" | "student_t";
   simulation_engine_used?: "block_bootstrap" | "student_t";
   block_length_weeks?: number;
+  block_length_mode?: "politis_white_auto" | "manual";
+  lw_shrinkage_lambda?: number;
+  lw_shrinkage_method?: "analytical_lw" | "fallback_fixed";
   aligned_history_weeks?: number;
   simulations: number;
   rf_pct: number;
@@ -1209,6 +1385,11 @@ const forecastDisabledRotations = new Set<string>();
 let forecastPlannedBuys: Array<{ id: string; ticker: string; amount_base: number }> = [];
 let forecastBuyTicker = "";
 let forecastBuyAmount = 25000;
+let quantEvalResult: QuantWalkForwardEvalResult | null = null;
+let quantEvalBusy = false;
+let quantEvalError: string | null = null;
+let quantEvalHorizonWeeks: 13 | 26 = 13;
+const sotpDraftModel = new Map<string, FundamentalModel>();
 let hasInitializedFromResult = false;
 let svgIdSeq = 0;
 let supportsDisplayTransitionCache: boolean | undefined;
@@ -1401,8 +1582,8 @@ function verdictTag(verdict: string | null | undefined): string {
 
 function checkDotClass(status: string): "ok" | "warn" | "bad" | "" {
   const s = status.toUpperCase();
-  if (s === "PASS" || s === "READY" || s === "REENTRY_ALERT" || s === "CORE_ANCHOR" || s === "CONFIRMED") return "ok";
-  if (s === "WARN" || s === "BLOCKED" || s === "GATED" || s === "ELEVATED" || s === "HIGH_VOL") return "warn";
+  if (s === "PASS" || s === "READY" || s === "REENTRY_ALERT" || s === "CORE_ANCHOR" || s === "CONFIRMED" || s === "CALIBRATED") return "ok";
+  if (s === "WARN" || s === "BLOCKED" || s === "GATED" || s === "ELEVATED" || s === "HIGH_VOL" || s === "INSUFFICIENT_HISTORY") return "warn";
   if (s === "FAIL" || s === "CAP_BLOCKED" || s === "STRESS" || s === "FALSIFIED") return "bad";
   return "";
 }
@@ -1974,6 +2155,9 @@ function ingestPayload(payload: unknown): void {
   }
   if (p.lab?.latest_backtest && !backtestResult) {
     backtestResult = p.lab.latest_backtest;
+  }
+  if (p.lab?.latest_quant_eval && !quantEvalResult) {
+    quantEvalResult = p.lab.latest_quant_eval;
   }
   if (p.forecast) {
     if (!forecastResult || firstLoad) {
@@ -2749,6 +2933,23 @@ function renderForecast(data: DashboardPayload, canMessage: boolean): string {
         .join("")
     : "";
 
+  const fcBadges: string[] = [];
+  if (fc) {
+    if (fc.lw_shrinkage_method === "fallback_fixed") {
+      const lam = typeof fc.lw_shrinkage_lambda === "number" ? fc.lw_shrinkage_lambda : 0.25;
+      fcBadges.push(`<span class="src-badge" title="Constant-correlation covariance shrinkage fallback">Fixed λ=${lam.toFixed(2)}</span>`);
+    } else if (typeof fc.lw_shrinkage_lambda === "number") {
+      fcBadges.push(`<span class="src-badge" title="Analytical Ledoit-Wolf constant-correlation shrinkage">LW λ*=${fc.lw_shrinkage_lambda.toFixed(2)}</span>`);
+    }
+    if (typeof fc.block_length_weeks === "number") {
+      if (fc.block_length_mode === "politis_white_auto") {
+        fcBadges.push(`<span class="src-badge" title="Politis-White automatic stationary bootstrap block length">Auto L*=${fc.block_length_weeks}w</span>`);
+      } else if (fc.block_length_mode === "manual") {
+        fcBadges.push(`<span class="src-badge" title="Manual block bootstrap length">Manual L=${fc.block_length_weeks}w</span>`);
+      }
+    }
+  }
+
   return `
     <div class="panel-body">
       <div class="card">
@@ -2756,6 +2957,7 @@ function renderForecast(data: DashboardPayload, canMessage: boolean): string {
           <div>
             <h2 class="section-title">Portfolio Forward Forecast &amp; Action Simulator</h2>
             <div class="muted-sub">Toggle Bayesian return shrinkage, empirical crash bootstrap, rotations, and buys to compare trajectories.</div>
+            ${fcBadges.length > 0 ? `<div class="src-badges" style="margin-top:0.35rem">${fcBadges.join("")}</div>` : ""}
           </div>
           <div class="actions-row" style="flex-wrap:wrap">
             <div class="seg-switch" role="group" aria-label="Expected return model">
@@ -3593,6 +3795,144 @@ function renderBacktestOutput(res: BacktestResult): string {
   `;
 }
 
+function renderQuantEvalCard(data: DashboardPayload): string {
+  const evalRes = quantEvalResult ?? data.lab?.latest_quant_eval ?? null;
+  const bodyHtml = evalRes
+    ? `
+      <div class="quant-eval-stack">
+        <div class="brier-strip" style="margin-bottom:0">
+          <span class="status-tag"><span class="dot ${checkDotClass(evalRes.status)}"></span>${esc(evalRes.status)}</span>
+          <span>Windows: <strong>${evalRes.windows_evaluated}</strong> (${evalRes.aligned_weeks}w)</span>
+          ${evalRes.date_range ? `<span>Range: <strong>${esc(evalRes.date_range.start)} &rarr; ${esc(evalRes.date_range.end)}</strong></span>` : ""}
+          <span>Avg LW λ*: <strong>${evalRes.avg_lw_lambda !== null ? evalRes.avg_lw_lambda.toFixed(2) : "—"}</strong></span>
+          <span>Avg Auto L*: <strong>${evalRes.avg_auto_block_length !== null ? `${evalRes.avg_auto_block_length.toFixed(1)}w` : "—"}</strong></span>
+        </div>
+        ${evalRes.findings.length > 0 ? `<ul class="drawer-list">${evalRes.findings.map((f) => `<li>${esc(f)}</li>`).join("")}</ul>` : ""}
+        <div>
+          <div class="micro-label" style="margin-bottom:0.25rem">1. Covariance Calibration</div>
+          <div class="compact-table-wrap">
+            <table class="compact-table">
+              <thead>
+                <tr>
+                  <th scope="col">Method</th>
+                  <th scope="col" class="num">Vol Ratio (Target 1.00)</th>
+                  <th scope="col" class="num">QLIKE Loss</th>
+                  <th scope="col" class="num">Vol RMSE</th>
+                  <th scope="col">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${evalRes.covariance_eval
+                  .map(
+                    (r) => `
+                  <tr class="${r.is_winner ? "quant-winner-row" : ""}">
+                    <th scope="row">${esc(r.label)}</th>
+                    <td class="num">${r.realized_to_predicted_vol_ratio.toFixed(2)}x</td>
+                    <td class="num">${r.qlike_loss.toFixed(4)}</td>
+                    <td class="num">${fmtPct(r.vol_rmse_pct, 2)}</td>
+                    <td>${r.is_winner ? `<span class="auto-badge ok">Winner</span>` : `<span class="muted-sub">—</span>`}</td>
+                  </tr>
+                `,
+                  )
+                  .join("")}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div>
+          <div class="micro-label" style="margin-bottom:0.25rem">2. Tail-Risk Calibration</div>
+          <div class="compact-table-wrap">
+            <table class="compact-table">
+              <thead>
+                <tr>
+                  <th scope="col">Engine</th>
+                  <th scope="col" class="num">5% VaR Breaches</th>
+                  <th scope="col" class="num">Kupiec p-val</th>
+                  <th scope="col" class="num">Pinball Loss</th>
+                  <th scope="col" class="num">80% Coverage</th>
+                  <th scope="col">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${evalRes.tail_eval
+                  .map(
+                    (r) => `
+                  <tr class="${r.is_winner ? "quant-winner-row" : ""}">
+                    <th scope="row">${esc(r.label)}</th>
+                    <td class="num">${r.breaches}/${r.total_windows} (${r.var95_breach_rate_pct.toFixed(1)}%)</td>
+                    <td class="num ${r.kupiec_calibrated ? "pos-ok" : "pos-warn"}">${r.kupiec_pof_pvalue.toFixed(3)}</td>
+                    <td class="num">${r.mean_pinball_loss_pct.toFixed(3)}%</td>
+                    <td class="num">${r.coverage_80_pct.toFixed(1)}%</td>
+                    <td>${r.is_winner ? `<span class="auto-badge ok">Winner</span>` : r.kupiec_calibrated ? `<span class="src-badge">Calibrated</span>` : `<span class="auto-badge warn">Reject</span>`}</td>
+                  </tr>
+                `,
+                  )
+                  .join("")}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div>
+          <div class="micro-label" style="margin-bottom:0.25rem">3. Allocation Horse Race (OOS Net of Tx)</div>
+          <div class="compact-table-wrap">
+            <table class="compact-table">
+              <thead>
+                <tr>
+                  <th scope="col">Strategy</th>
+                  <th scope="col" class="num">OOS CAGR</th>
+                  <th scope="col" class="num">Vol</th>
+                  <th scope="col" class="num">Max DD</th>
+                  <th scope="col" class="num">Sharpe</th>
+                  <th scope="col" class="num">Wk CVaR 95%</th>
+                  <th scope="col" class="num">Turnover</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${evalRes.allocation_horse_race
+                  .map(
+                    (r) => `
+                  <tr>
+                    <th scope="row">${esc(r.label)}</th>
+                    <td class="num">${fmtSignedPct(r.oos_cagr_pct, 2)}</td>
+                    <td class="num">${fmtPct(r.oos_vol_pct, 2)}</td>
+                    <td class="num">${fmtPct(r.oos_max_dd_pct, 2)}</td>
+                    <td class="num"><strong>${r.oos_sharpe.toFixed(2)}</strong></td>
+                    <td class="num">${fmtPct(r.oos_cvar95_weekly_pct, 2)}</td>
+                    <td class="num">${r.annual_turnover_pct.toFixed(0)}%/yr</td>
+                  </tr>
+                `,
+                  )
+                  .join("")}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="muted-sub">${esc(evalRes.methodology_note)}</div>
+      </div>
+    `
+    : `<div class="muted-sub" style="margin-top:0.5rem">Run an expanding-window walk-forward evaluation to test covariance shrinkage, tail engines, and HRP vs Current Weights out of sample.</div>`;
+
+  return `
+    <div class="card">
+      <div class="section-head">
+        <div>
+          <h2 class="section-title">Walk-Forward Model Calibration &amp; Horse Race</h2>
+          <div class="muted-sub">Zero-lookahead expanding-window validation across Ledoit-Wolf shrinkage, tail bootstrap vs Student-t, and HRP sizing.</div>
+        </div>
+        <div class="actions-row">
+          <div class="seg-switch" role="group" aria-label="Evaluation horizon">
+            <button type="button" data-qe-horizon="13" aria-pressed="${quantEvalHorizonWeeks === 13 ? "true" : "false"}">13w Qtr</button>
+            <button type="button" data-qe-horizon="26" aria-pressed="${quantEvalHorizonWeeks === 26 ? "true" : "false"}">26w Semi</button>
+          </div>
+          <button type="button" class="primary small" id="btn-run-quant-eval" ${quantEvalBusy ? "disabled" : ""}>${quantEvalBusy ? "Evaluating..." : "Run Walk-Forward Eval"}</button>
+        </div>
+      </div>
+      ${quantEvalError ? `<div class="toast" style="margin-top:0.55rem">${esc(quantEvalError)}</div>` : ""}
+      ${bodyHtml}
+    </div>
+  `;
+}
+
 function renderLab(data: DashboardPayload): string {
   const ccy = data.base_currency;
   const lab = data.lab;
@@ -3729,21 +4069,37 @@ function renderLab(data: DashboardPayload): string {
       : "";
 
   const brier = scorecard?.brier_calibration;
-  const brierHtml = brier
-    ? `
+  const fa = scorecard?.fundamental_accuracy;
+  const brierHtml =
+    brier || fa
+      ? `
       <div class="brier-strip">
-        <span class="micro-label">Hypothesis Brier Calibration</span>
-        <span>Resolved: <strong>${brier.resolved_total}</strong></span>
-        <span>Overall Brier: <strong>${brier.overall_brier_score !== null ? brier.overall_brier_score.toFixed(3) : "—"}</strong></span>
-        ${brier.tiers
-          .map(
-            (t) =>
-              `<span><strong>${esc(t.confidence.toUpperCase())}</strong> (${Math.round(t.predicted_prob * 100)}% pred): ${t.empirical_rate_pct !== null ? `${t.empirical_rate_pct.toFixed(0)}%` : "—"} (${t.supported_count}/${t.resolved_count})</span>`,
-          )
-          .join("")}
+        ${
+          brier
+            ? `
+          <span class="micro-label">Hypothesis Brier Calibration</span>
+          <span>Resolved: <strong>${brier.resolved_total}</strong></span>
+          <span>Overall Brier: <strong>${brier.overall_brier_score !== null ? brier.overall_brier_score.toFixed(3) : "—"}</strong></span>
+          ${brier.tiers
+            .map(
+              (t) =>
+                `<span><strong>${esc(t.confidence.toUpperCase())}</strong> (${Math.round(t.predicted_prob * 100)}% pred): ${t.empirical_rate_pct !== null ? `${t.empirical_rate_pct.toFixed(0)}%` : "—"} (${t.supported_count}/${t.resolved_count})</span>`,
+            )
+            .join("")}
+        `
+            : ""
+        }
+        ${
+          fa
+            ? `
+          <span title="${esc(fa.note)}">Rank IC: <strong class="${fa.spearman_rank_ic !== null ? (fa.spearman_rank_ic >= 0 ? "pos-ok" : "pos-bad") : ""}">${fa.spearman_rank_ic !== null ? fa.spearman_rank_ic.toFixed(2) : "n&lt;4"}</strong>${fa.spearman_rank_ic !== null && fa.ic_t_stat !== null ? ` (t=${fa.ic_t_stat.toFixed(2)}, n=${fa.ic_sample_count})` : ` (${fa.ic_sample_count}m)`}</span>
+          <span>Band Hit: <strong>${fa.inside_band_rate_pct !== null ? `${fa.inside_band_rate_pct.toFixed(0)}%` : "—"}</strong> (${fa.inside_band_count}/${fa.modeled_tests_matured})</span>
+        `
+            : ""
+        }
       </div>
     `
-    : "";
+      : "";
 
   const scorecardEntries = (scorecard?.entries ?? []).filter((e) => !q || e.ticker.includes(q));
   const scorecardRows = scorecardEntries.length
@@ -3821,6 +4177,8 @@ function renderLab(data: DashboardPayload): string {
         ${activeRes ? renderBacktestOutput(activeRes) : `<div class="muted-sub" style="margin-top:0.55rem">Select any Active, Bench, Passed, or custom ticker and run a deterministic historical impact test.</div>`}
       </div>
 
+      ${renderQuantEvalCard(data)}
+
       <div class="card">
         <div class="section-head">
           <div>
@@ -3881,12 +4239,478 @@ function renderLab(data: DashboardPayload): string {
   `;
 }
 
-function renderValuationSection(
+type SotpSliderField = "units" | "rev_cagr_pct" | "success_prob" | "margin_pct" | "exit_multiple";
+
+interface SotpSliderSpec {
+  segId: string;
+  field: SotpSliderField;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  value: number;
+}
+
+interface SotpClientEval {
+  sotp: SotpValuationSummary;
+  expected_price_5y: number;
+  expected_after_tax_cagr_pct: number | null;
+  spread_vs_hurdle_pct: number | null;
+}
+
+function roundNum(value: number, digits = 2): number {
+  const p = 10 ** digits;
+  return Math.round((value + Number.EPSILON) * p) / p;
+}
+
+function resolveClientTaxInfo(
+  data: DashboardPayload,
+  thesis: ThesisRow | undefined,
+  model: DossierModel | null | undefined,
+): { hurdle_cagr_pct: number; total_tax_drag_pct: number; accumulating: boolean } {
+  const ti = thesis?.scenario_summary?.tax_info;
+  if (ti) {
+    return {
+      hurdle_cagr_pct: ti.hurdle_cagr_pct,
+      total_tax_drag_pct: ti.total_tax_drag_pct,
+      accumulating: Boolean(ti.accumulating || model?.accumulating),
+    };
+  }
+  const bench = data.profile.benchmark;
+  const hurdle = data.lab?.benchmark_summary.hurdle_cagr_pct ?? ((bench?.expected_cagr_pct ?? 8) + (bench?.alpha_buffer_pct ?? 2.5));
+  const usSitus = Boolean(thesis?.us_situs);
+  const accumulating = Boolean(model?.accumulating);
+  const divYield = !accumulating && model && Number.isFinite(model.dividend_yield_pct) && model.dividend_yield_pct > 0 ? model.dividend_yield_pct : 0;
+  const whtPct = model?.dividend_wht_pct ?? (usSitus ? data.profile.tax_profile.us_dividend_wht_pct : data.profile.tax_profile.ucits_dividend_wht_pct);
+  const divDrag = accumulating ? 0 : roundNum((divYield * whtPct) / 100, 2);
+  let estDrag = 0;
+  if (data.profile.tax_profile.nra_us_estate_tax_enabled && usSitus) {
+    if (bench?.estate_tax_annual_drag_pct !== null && bench?.estate_tax_annual_drag_pct !== undefined) {
+      estDrag = bench.estate_tax_annual_drag_pct;
+    } else if ((bench?.estate_tax_drag_mode ?? "hedge") === "hedge") {
+      estDrag = Math.max(0, bench?.estate_tax_hedge_bps ?? 35) / 100;
+    } else {
+      const rate = Math.min(0.4, Math.max(0, (data.summary.estate_tax_marginal_pct || 34) / 100));
+      const yrs = Math.max(1, bench?.estate_tax_amortize_years ?? 20);
+      estDrag = (1 - Math.pow(1 - rate, 1 / yrs)) * 100;
+    }
+  }
+  return { hurdle_cagr_pct: hurdle, total_tax_drag_pct: roundNum(divDrag + estDrag, 2), accumulating };
+}
+
+function computeSotpClient(
+  price: number | null,
+  model: DossierModel,
+  taxInfo: { hurdle_cagr_pct: number; total_tax_drag_pct: number; accumulating?: boolean },
+): SotpClientEval | null {
+  const fm = model.fundamental_model;
+  if (!fm || !Array.isArray(fm.segments) || fm.segments.length === 0 || !Number.isFinite(fm.base_shares_m) || fm.base_shares_m <= 0) {
+    return null;
+  }
+  const horizonYears = Math.max(1, model.horizon_years || 5);
+  const annualDilPct = Number.isFinite(fm.annual_dilution_pct) ? fm.annual_dilution_pct : 0;
+  const terminalSharesRaw = fm.base_shares_m * Math.pow(1 + annualDilPct / 100, horizonYears);
+  if (!Number.isFinite(terminalSharesRaw) || terminalSharesRaw <= 0) return null;
+
+  const fin = (v: number | null | undefined, fb = 0) => (typeof v === "number" && Number.isFinite(v) ? v : fb);
+  const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+  const rawP = fm.scenario_probabilities;
+  const pSum = Math.max(0, fin(rawP?.bear, 0.25)) + Math.max(0, fin(rawP?.base, 0.5)) + Math.max(0, fin(rawP?.bull, 0.25));
+  const probs =
+    pSum <= 0
+      ? { bear: 0.25, base: 0.5, bull: 0.25 }
+      : (() => {
+          const bear = roundNum(Math.max(0, fin(rawP?.bear, 0.25)) / pSum, 4);
+          const base = roundNum(Math.max(0, fin(rawP?.base, 0.5)) / pSum, 4);
+          return { bear, base, bull: roundNum(clamp(1 - bear - base, 0, 1), 4) };
+        })();
+
+  const isAcc = Boolean(model.accumulating || taxInfo.accumulating);
+  const rawDiv = !isAcc && Number.isFinite(model.dividend_yield_pct) && model.dividend_yield_pct > 0 ? model.dividend_yield_pct : 0;
+  const hasPrice = price !== null && Number.isFinite(price) && price > 0;
+  const keys = ["bear", "base", "bull"] as const;
+  const titles = { bear: "Bear", base: "Base", bull: "Bull" } as const;
+
+  const rawBySeg = fm.segments.map((seg) => {
+    const evals = { bear: { revTB: 0, metricTB: 0, evB: 0 }, base: { revTB: 0, metricTB: 0, evB: 0 }, bull: { revTB: 0, metricTB: 0, evB: 0 } };
+    const vm = seg.valuation_metric ?? "owner_earnings";
+    const revMult = typeof seg.rev_multiplier_to_b === "number" && seg.rev_multiplier_to_b > 0 ? seg.rev_multiplier_to_b : 0.001;
+    for (const c of keys) {
+      if (seg.kind === "milestone_option") {
+        evals[c] = { revTB: 0, metricTB: 0, evB: clamp(fin(seg.success_prob?.[c], 0), 0, 1) * Math.max(0, fin(seg.success_ev_b?.[c], 0)) };
+      } else {
+        const revTB =
+          seg.kind === "unit_economics"
+            ? Math.max(0, fin(seg.units?.[c], 0) * fin(seg.rev_per_unit?.[c], 0) * revMult)
+            : Math.max(0, Math.max(0, fin(seg.current_rev_b, 0)) * Math.pow(Math.max(0.01, 1 + fin(seg.rev_cagr_pct?.[c], 0) / 100), horizonYears));
+        const metricTB = vm === "revenue" ? revTB : revTB * (fin(seg.margin_pct?.[c], 0) / 100) - fin(seg.capex_or_sbc_drag_b?.[c], 0);
+        const evB = vm === "ev_direct" ? Math.max(0, revTB) : Math.max(0, metricTB * fin(seg.exit_multiple?.[c], 0));
+        evals[c] = { revTB, metricTB, evB };
+      }
+    }
+    return { seg, evals };
+  });
+
+  const rdcfNetCash = typeof model.reverse_dcf?.net_cash_b === "number" ? model.reverse_dcf.net_cash_b : undefined;
+  const rawTotals = {
+    bear: { rev: 0, metric: 0, ev: 0, netCash: 0, equity: 0, targetPrice: 0 },
+    base: { rev: 0, metric: 0, ev: 0, netCash: 0, equity: 0, targetPrice: 0 },
+    bull: { rev: 0, metric: 0, ev: 0, netCash: 0, equity: 0, targetPrice: 0 },
+  };
+  for (const c of keys) {
+    let rev = 0;
+    let metric = 0;
+    let ev = 0;
+    for (const item of rawBySeg) {
+      rev += item.evals[c].revTB;
+      metric += item.evals[c].metricTB;
+      ev += item.evals[c].evB;
+    }
+    const netCash = fin(fm.projected_net_cash_b?.[c] ?? fm.net_cash_b ?? rdcfNetCash, 0);
+    const equity = Math.max(0, ev + netCash);
+    rawTotals[c] = { rev, metric, ev, netCash, equity, targetPrice: (equity * 1000) / terminalSharesRaw };
+  }
+
+  const segSummaries: SotpSegmentSummary[] = rawBySeg.map(({ seg, evals }) => {
+    const mk = (c: "bear" | "base" | "bull"): SotpSegmentCaseEval => ({
+      rev_T_b: roundNum(evals[c].revTB, 2),
+      metric_T_b: roundNum(evals[c].metricTB, 2),
+      ev_b: roundNum(evals[c].evB, 2),
+      ev_share_pct: rawTotals[c].ev > 0 ? roundNum((evals[c].evB / rawTotals[c].ev) * 100, 2) : 0,
+    });
+    return {
+      id: seg.id,
+      name: seg.name,
+      kind: seg.kind,
+      valuation_metric: seg.valuation_metric ?? "owner_earnings",
+      ...(seg.notes !== undefined ? { notes: seg.notes } : {}),
+      bear: mk("bear"),
+      base: mk("base"),
+      bull: mk("bull"),
+    };
+  });
+
+  const termSharesRnd = roundNum(terminalSharesRaw, 2);
+  const mkTot = (c: "bear" | "base" | "bull"): SotpCaseTotal => {
+    const t = rawTotals[c];
+    let gross: number | null = null;
+    let afterTax: number | null = null;
+    if (hasPrice && price) {
+      const ratio = t.targetPrice / price;
+      const pxCagr = ratio > 0 ? (Math.pow(ratio, 1 / horizonYears) - 1) * 100 : -95;
+      gross = roundNum(pxCagr + rawDiv, 2);
+      afterTax = roundNum(gross - taxInfo.total_tax_drag_pct, 2);
+    }
+    return {
+      label: c,
+      probability: probs[c],
+      total_rev_T_b: roundNum(t.rev, 2),
+      total_metric_T_b: roundNum(t.metric, 2),
+      total_ev_b: roundNum(t.ev, 2),
+      projected_net_cash_b: roundNum(t.netCash, 2),
+      equity_value_b: roundNum(t.equity, 2),
+      terminal_shares_m: termSharesRnd,
+      target_price: roundNum(t.targetPrice, 2),
+      implied_gross_cagr_pct: gross,
+      implied_after_tax_cagr_pct: afterTax,
+    };
+  };
+
+  const totals = { bear: mkTot("bear"), base: mkTot("base"), bull: mkTot("bull") };
+  const mkScen = (c: "bear" | "base" | "bull"): ScenarioCaseInput => {
+    const t = rawTotals[c];
+    const k = segSummaries.length;
+    const prefix = `SOTP ${titles[c]}: $${t.ev.toFixed(1)}B EV across ${k} ${k === 1 ? "segment" : "segments"}`;
+    let summary = prefix;
+    if (t.ev > 0 && k > 0) {
+      const top = segSummaries.reduce((best, cur) => (cur[c].ev_b > best[c].ev_b ? cur : best), segSummaries[0]!);
+      summary = `${prefix} (top: ${top.name} ${roundNum(top[c].ev_share_pct, 1)}%)`;
+    }
+    return {
+      probability: probs[c],
+      target_price_5y: roundNum(t.targetPrice, 2),
+      multiple: t.metric > 0 && t.ev >= 0 ? roundNum(t.ev / t.metric, 2) : null,
+      metric_cagr_pct: null,
+      summary,
+    };
+  };
+
+  const probNorm = probs.bear + probs.base + probs.bull || 1;
+  let expPx = 0;
+  let expTermAt = 0;
+  for (const c of keys) {
+    const w = probs[c] / probNorm;
+    const px = totals[c].target_price;
+    expPx += w * px;
+    if (hasPrice && price) {
+      const ratio = px / price;
+      const pxCagr = ratio > 0 ? (Math.pow(ratio, 1 / horizonYears) - 1) * 100 : -95;
+      const afterTax = roundNum(roundNum(pxCagr + rawDiv, 2) - taxInfo.total_tax_drag_pct, 2);
+      expTermAt += w * price * Math.pow(Math.max(0.01, 1 + afterTax / 100), horizonYears);
+    }
+  }
+  const expAtCagr =
+    hasPrice && price ? roundNum((Math.pow(Math.max(0.0001, expTermAt / price), 1 / horizonYears) - 1) * 100, 2) : null;
+
+  return {
+    sotp: {
+      horizon_years: horizonYears,
+      base_shares_m: roundNum(fm.base_shares_m, 4),
+      annual_dilution_pct: roundNum(annualDilPct, 2),
+      terminal_shares_m: termSharesRnd,
+      segments: segSummaries,
+      totals,
+      derived_scenarios: { bear: mkScen("bear"), base: mkScen("base"), bull: mkScen("bull") },
+      variant_perception: fm.variant_perception ?? [],
+      sotp_warnings: [],
+      methodology_note: fm.methodology_note ?? null,
+    },
+    expected_price_5y: roundNum(expPx, 2),
+    expected_after_tax_cagr_pct: expAtCagr,
+    spread_vs_hurdle_pct: expAtCagr !== null ? roundNum(expAtCagr - taxInfo.hurdle_cagr_pct, 2) : null,
+  };
+}
+
+function formatSliderValue(field: SotpSliderField, val: number): string {
+  if (field === "success_prob") return `${Math.round(val * 100)}%`;
+  if (field === "rev_cagr_pct" || field === "margin_pct") return `${val.toFixed(1)}%`;
+  if (field === "exit_multiple") return `${val.toFixed(1)}x`;
+  return val.toLocaleString("en-US", { maximumFractionDigits: 1 });
+}
+
+function buildSotpSliders(fm: FundamentalModel): SotpSliderSpec[] {
+  const sliders: SotpSliderSpec[] = [];
+  for (const seg of fm.segments.slice(0, 6)) {
+    if (seg.kind === "unit_economics" && seg.units) {
+      const v = seg.units.base;
+      const lo = Math.min(v, Math.max(0, Math.floor(Math.min(seg.units.bear * 0.7, v * 0.5))));
+      const hi = Math.max(v, Math.ceil(Math.max(seg.units.bull * 1.3, v * 1.5, 10)));
+      const span = Math.max(1, hi - lo);
+      const step = span <= 5 ? 0.1 : span <= 30 ? 0.5 : span <= 150 ? 1 : span <= 1000 ? 5 : Math.max(1, Math.round(span / 80));
+      sliders.push({ segId: seg.id, field: "units", label: `${seg.name} (${seg.unit_label || "Units"})`, min: lo, max: hi, step, value: v });
+    } else if (seg.kind === "cagr_margin" && seg.rev_cagr_pct) {
+      const v = seg.rev_cagr_pct.base;
+      const lo = Math.min(v, -10, Math.floor(seg.rev_cagr_pct.bear - 5));
+      const hi = Math.max(v, 35, Math.ceil(seg.rev_cagr_pct.bull + 8));
+      sliders.push({ segId: seg.id, field: "rev_cagr_pct", label: `${seg.name} Rev CAGR`, min: lo, max: hi, step: 0.5, value: v });
+    } else if (seg.kind === "milestone_option" && seg.success_prob) {
+      sliders.push({ segId: seg.id, field: "success_prob", label: `${seg.name} Prob`, min: 0, max: 1, step: 0.05, value: Math.min(1, Math.max(0, seg.success_prob.base)) });
+    }
+  }
+  if (fm.segments.length <= 3) {
+    for (const seg of fm.segments) {
+      if (sliders.length >= 6) break;
+      if (seg.kind !== "milestone_option" && seg.valuation_metric !== "revenue" && seg.valuation_metric !== "ev_direct" && seg.margin_pct) {
+        const v = seg.margin_pct.base;
+        const lo = Math.min(v, 0, Math.floor(seg.margin_pct.bear - 10));
+        const hi = Math.max(v, Math.min(95, Math.ceil(Math.max(60, seg.margin_pct.bull + 10))));
+        sliders.push({ segId: seg.id, field: "margin_pct", label: `${seg.name} Margin`, min: lo, max: hi, step: 0.5, value: v });
+      }
+    }
+    for (const seg of fm.segments) {
+      if (sliders.length >= 6) break;
+      if (seg.kind !== "milestone_option" && seg.valuation_metric !== "ev_direct" && seg.exit_multiple) {
+        const v = seg.exit_multiple.base;
+        const lo = Math.min(v, Math.max(1, Math.floor(Math.min(seg.exit_multiple.bear * 0.5, v * 0.5))));
+        const hi = Math.max(v, 40, Math.ceil(Math.max(seg.exit_multiple.bull * 1.4, v * 1.5)));
+        sliders.push({ segId: seg.id, field: "exit_multiple", label: `${seg.name} Multiple`, min: lo, max: hi, step: 0.5, value: v });
+      }
+    }
+  }
+  return sliders.slice(0, 6);
+}
+
+function renderSotpWorkbench(
+  sym: string,
   thesis: ThesisRow | undefined,
   detail: DossierDetail | undefined,
   currency: string,
   isDemo: boolean,
+  canMessage: boolean,
 ): string {
+  const storedSotp = detail?.sotp_summary ?? thesis?.sotp_summary ?? null;
+  if (!storedSotp) {
+    if (inspectorLoading) return "";
+    return `
+      <div class="sotp-empty-bar">
+        <span class="muted-sub">No segment driver model stored yet.</span>
+        ${canMessage ? `<button type="button" class="small" id="btn-build-sotp-agent">Build SOTP Model with Agent</button>` : ""}
+      </div>
+    `;
+  }
+
+  const fmBase = detail?.model?.fundamental_model ?? null;
+  const activeFm = (sym ? sotpDraftModel.get(sym) : undefined) ?? fmBase;
+  const livePrice = (sym ? state?.portfolio.positions.find((p) => p.ticker === sym)?.price : undefined) ?? thesis?.price ?? null;
+  const taxInfo = state ? resolveClientTaxInfo(state, thesis, detail?.model) : { hurdle_cagr_pct: 10.5, total_tax_drag_pct: 0, accumulating: false };
+  const draftClient =
+    activeFm && detail?.model
+      ? computeSotpClient(livePrice, { ...detail.model, fundamental_model: activeFm }, taxInfo)
+      : null;
+
+  const sotp = draftClient?.sotp ?? storedSotp;
+  const scen = thesis?.scenario_summary;
+  const expPx = draftClient?.expected_price_5y ?? scen?.expected_price_5y ?? sotp.totals.base.target_price;
+  const expAtCagr = draftClient?.expected_after_tax_cagr_pct ?? scen?.expected_after_tax_cagr_pct ?? sotp.totals.base.implied_after_tax_cagr_pct;
+  const spreadHurdle = draftClient?.spread_vs_hurdle_pct ?? scen?.spread_vs_hurdle_pct ?? (expAtCagr !== null ? roundNum(expAtCagr - taxInfo.hurdle_cagr_pct, 2) : null);
+
+  const engineLabel = (k: FundamentalSegment["kind"]) => (k === "unit_economics" ? "Unit" : k === "cagr_margin" ? "CAGR" : "Option");
+  const segRows = sotp.segments
+    .map((seg) => {
+      const isOpt = seg.kind === "milestone_option";
+      return `
+        <tr>
+          <th scope="row" class="wrap-cell">${esc(seg.name)}</th>
+          <td><span class="src-badge">${engineLabel(seg.kind)}</span></td>
+          <td class="num" id="sotp-seg-rev-${esc(seg.id)}">${isOpt ? "—" : `${fmtMoney(seg.base.rev_T_b, currency, 1)}B`}</td>
+          <td class="num" id="sotp-seg-metric-${esc(seg.id)}">${isOpt ? "—" : `${fmtMoney(seg.base.metric_T_b, currency, 1)}B`}</td>
+          <td class="num" id="sotp-seg-ev-${esc(seg.id)}"><strong id="sotp-seg-ev-val-${esc(seg.id)}">${fmtMoney(seg.base.ev_b, currency, 1)}B</strong> <span class="muted-sub" id="sotp-seg-share-${esc(seg.id)}">(${seg.base.ev_share_pct.toFixed(0)}%)</span></td>
+          <td class="num muted-sub" id="sotp-seg-range-${esc(seg.id)}">${fmtMoney(seg.bear.ev_b, currency, 0)}–${fmtMoney(seg.bull.ev_b, currency, 0)}B</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  const extraWarnings = storedSotp.sotp_warnings.filter((w) => !(scen?.valuation_warnings ?? []).includes(w));
+  const sotpWarnHtml =
+    extraWarnings.length > 0
+      ? `<div class="warn-box" role="status"><span class="micro-label pos-warn">SOTP Guardrails</span>${extraWarnings.map((w) => `<div>• ${esc(w)}</div>`).join("")}</div>`
+      : "";
+
+  const block1Html = `
+    <div class="drawer-card-block">
+      <div class="hypothesis-head">
+        <span class="micro-label">Segment Value Bridge (${sotp.horizon_years}Y SOTP)</span>
+        <span class="muted-sub">${sotp.segments.length} segments · ${sotp.terminal_shares_m.toLocaleString("en-US", { maximumFractionDigits: 1 })}M terminal sh</span>
+      </div>
+      <div class="compact-table-wrap">
+        <table class="compact-table">
+          <thead>
+            <tr>
+              <th scope="col">Segment</th>
+              <th scope="col">Engine</th>
+              <th scope="col" class="num">Yr-T Rev</th>
+              <th scope="col" class="num">Base Metric</th>
+              <th scope="col" class="num">Base EV</th>
+              <th scope="col" class="num">Bear–Bull</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${segRows}
+            <tr class="sotp-total-row">
+              <th scope="row">Total EV</th>
+              <td></td>
+              <td class="num" id="sotp-tot-rev">${fmtMoney(sotp.totals.base.total_rev_T_b, currency, 1)}B</td>
+              <td class="num" id="sotp-tot-metric">${fmtMoney(sotp.totals.base.total_metric_T_b, currency, 1)}B</td>
+              <td class="num" id="sotp-tot-ev">${fmtMoney(sotp.totals.base.total_ev_b, currency, 1)}B</td>
+              <td class="num muted-sub" id="sotp-tot-range">${fmtMoney(sotp.totals.bear.total_ev_b, currency, 0)}–${fmtMoney(sotp.totals.bull.total_ev_b, currency, 0)}B</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="rdcf-bridge">
+        <span>Net Cash <strong id="sotp-live-netcash">${fmtMoney(sotp.totals.base.projected_net_cash_b, currency, 1)}B</strong> + EV <strong id="sotp-live-ev">${fmtMoney(sotp.totals.base.total_ev_b, currency, 1)}B</strong> = Equity <strong id="sotp-live-eq">${fmtMoney(sotp.totals.base.equity_value_b, currency, 1)}B</strong> / ${sotp.terminal_shares_m.toLocaleString("en-US", { maximumFractionDigits: 1 })}M sh &rarr; Base Target <strong id="sotp-live-base-px">${fmtMoney(sotp.totals.base.target_price, currency, 2)}</strong></span>
+        <span>Bear–Bull <strong id="sotp-live-px-range">${fmtMoney(sotp.totals.bear.target_price, currency, 0)}–${fmtMoney(sotp.totals.bull.target_price, currency, 0)}</strong> · Exp 5Y <strong id="sotp-live-exp-px">${fmtMoney(expPx, currency, 2)}</strong> · After-Tax <strong id="sotp-live-exp-cagr">${expAtCagr !== null ? fmtSignedPct(expAtCagr, 1) : "—"}</strong> · vs Hurdle <strong id="sotp-live-spread" class="${spreadHurdle !== null ? (spreadHurdle >= 0 ? "pos-ok" : "pos-bad") : ""}">${spreadHurdle !== null ? fmtSignedPct(spreadHurdle, 1) : "—"}</strong></span>
+      </div>
+      ${sotp.methodology_note ? `<div class="muted-sub">${esc(sotp.methodology_note)}</div>` : ""}
+      ${sotpWarnHtml}
+    </div>
+  `;
+
+  const sliders = activeFm ? buildSotpSliders(activeFm) : [];
+  const block2Html =
+    sliders.length > 0
+      ? `
+      <div class="drawer-card-block">
+        <div class="hypothesis-head">
+          <span class="micro-label">Key-Driver Sensitivity Sliders (Base Case)</span>
+          <div class="actions-row" style="gap:0.35rem">
+            <button type="button" class="small ghost" id="btn-reset-sotp">Reset</button>
+            <button type="button" class="small primary" id="btn-save-sotp" ${isDemo ? `disabled title="Read-only in Sample Demo preview"` : ""}>Save SOTP Model</button>
+          </div>
+        </div>
+        <div class="sotp-sliders-grid">
+          ${sliders
+            .map(
+              (sl) => `
+            <div class="sim-field">
+              <label>
+                <span class="wrap-cell">${esc(sl.label)}</span>
+                <strong id="sotp-slider-val-${esc(sl.segId)}-${esc(sl.field)}">${esc(formatSliderValue(sl.field, sl.value))}</strong>
+              </label>
+              <input type="range" class="sotp-slider" data-sotp-seg="${esc(sl.segId)}" data-sotp-field="${esc(sl.field)}" min="${sl.min}" max="${sl.max}" step="${sl.step}" value="${sl.value}" />
+            </div>
+          `,
+            )
+            .join("")}
+        </div>
+      </div>
+    `
+      : inspectorLoading
+        ? `<div class="muted-sub">Loading segment driver sliders...</div>`
+        : "";
+
+  const vpRows = sotp.variant_perception;
+  const block3Html =
+    vpRows.length > 0
+      ? `
+      <div class="drawer-card-block">
+        <div class="hypothesis-head">
+          <span class="micro-label">Variant Perception Ledger</span>
+          <span class="muted-sub">${vpRows.length} KPIs vs Street</span>
+        </div>
+        <div class="compact-table-wrap">
+          <table class="compact-table">
+            <thead>
+              <tr>
+                <th scope="col">KPI</th>
+                <th scope="col">Street Consensus</th>
+                <th scope="col">My View</th>
+                <th scope="col">Check</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${vpRows
+                .map((vp) => {
+                  const hyp = vp.linked_hypothesis_id ? thesis?.hypotheses?.find((h) => h.id === vp.linked_hypothesis_id) : undefined;
+                  const checkHtml = hyp
+                    ? hyp.auto_eval?.passed === true
+                      ? `<span class="auto-badge ok" title="${esc(hyp.auto_eval.detail)}">Verified</span>`
+                      : hyp.auto_eval?.passed === false
+                        ? `<span class="auto-badge bad" title="${esc(hyp.auto_eval.detail)}">Breached</span>`
+                        : hypothesisStateBadge(hyp.status)
+                    : vp.linked_hypothesis_id
+                      ? `<span class="src-badge">${esc(vp.linked_hypothesis_id)}</span>`
+                      : `<span class="muted-sub">—</span>`;
+                  return `
+                    <tr>
+                      <th scope="row" class="wrap-cell">${esc(vp.kpi)}${vp.edge_rationale ? `<div class="muted-sub">${esc(vp.edge_rationale)}</div>` : ""}</th>
+                      <td class="wrap-cell muted-sub">${esc(vp.consensus_view)}</td>
+                      <td class="wrap-cell">${esc(vp.my_view)}</td>
+                      <td>${checkHtml}${hyp ? `<div class="muted-sub">${esc(hyp.id)}</div>` : ""}</td>
+                    </tr>
+                  `;
+                })
+                .join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `
+      : "";
+
+  return `${block1Html}${block2Html}${block3Html}`;
+}
+
+function renderValuationSection(
+  sym: string,
+  thesis: ThesisRow | undefined,
+  detail: DossierDetail | undefined,
+  currency: string,
+  isDemo: boolean,
+  canMessage: boolean,
+): string {
+  const sotpHtml = renderSotpWorkbench(sym, thesis, detail, currency, isDemo, canMessage);
   const rdcf = thesis?.reverse_dcf;
   const scen = thesis?.scenario_summary;
   const model = detail?.model;
@@ -4048,7 +4872,7 @@ function renderValuationSection(
     `
     : "";
 
-  return `${rdcfHtml}${scenTableHtml}${editFormHtml}`;
+  return `${sotpHtml}${rdcfHtml}${scenTableHtml}${editFormHtml}`;
 }
 
 function renderDipTriageSection(thesis: ThesisRow | undefined, currency: string, baseCcy: string): string {
@@ -4713,7 +5537,7 @@ function renderInspectorDialog(ticker: string, preserveOpenKeys?: Set<string> | 
 
   const valuationTabHtml = `
     <div style="display:flex;flex-direction:column;gap:0.75rem">
-      ${renderValuationSection(thesis, detail, currency, state.is_demo)}
+      ${renderValuationSection(sym, thesis, detail, currency, state.is_demo, canMessage)}
       ${consensusBlock}
       ${renderFundamentalsAndBandsSection(detail?.fundamentals, thesis?.fundamentals_summary, bands)}
     </div>
@@ -5036,6 +5860,111 @@ function bindInspectorEvents(dlg: HTMLDialogElement, sym: string, detail: Dossie
     renderInspectorDialog(sym, openKeys);
   });
 
+  dlg.querySelector<HTMLButtonElement>("#btn-build-sotp-agent")?.addEventListener("click", async () => {
+    await sendAgentPrompt(
+      `Construct a 3-5 segment fundamental_model (SOTP segment economics + base_shares_m + net_cash_b) and 2-4 variant_perception KPI rows from ${sym}'s latest 10-K/10-Q segment footnotes and earnings releases, linking hypotheses where applicable, and persist it to dossiers/${sym}/model.json via upsert_dossier.`,
+      { mode: inspectorSendMode, label: "build SOTP model", ticker: sym },
+    );
+  });
+
+  const applySotpLiveDomUpdate = (draft: FundamentalModel) => {
+    if (!state || !detail?.model) return;
+    const thesis = state.theses.find((t) => t.ticker === sym) ?? detail.thesis ?? undefined;
+    const pos = state.portfolio.positions.find((p) => p.ticker === sym);
+    const currency = pos?.currency ?? thesis?.currency ?? "USD";
+    const livePrice = pos?.price ?? thesis?.price ?? null;
+    const taxInfo = resolveClientTaxInfo(state, thesis, detail.model);
+    const live = computeSotpClient(livePrice, { ...detail.model, fundamental_model: draft }, taxInfo);
+    if (!live) return;
+
+    const setText = (id: string, text: string) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = text;
+    };
+    const { sotp } = live;
+    for (const seg of sotp.segments) {
+      const isOpt = seg.kind === "milestone_option";
+      setText(`sotp-seg-rev-${seg.id}`, isOpt ? "—" : `${fmtMoney(seg.base.rev_T_b, currency, 1)}B`);
+      setText(`sotp-seg-metric-${seg.id}`, isOpt ? "—" : `${fmtMoney(seg.base.metric_T_b, currency, 1)}B`);
+      setText(`sotp-seg-ev-val-${seg.id}`, `${fmtMoney(seg.base.ev_b, currency, 1)}B`);
+      setText(`sotp-seg-share-${seg.id}`, `(${seg.base.ev_share_pct.toFixed(0)}%)`);
+      setText(`sotp-seg-range-${seg.id}`, `${fmtMoney(seg.bear.ev_b, currency, 0)}–${fmtMoney(seg.bull.ev_b, currency, 0)}B`);
+    }
+    setText("sotp-tot-rev", `${fmtMoney(sotp.totals.base.total_rev_T_b, currency, 1)}B`);
+    setText("sotp-tot-metric", `${fmtMoney(sotp.totals.base.total_metric_T_b, currency, 1)}B`);
+    setText("sotp-tot-ev", `${fmtMoney(sotp.totals.base.total_ev_b, currency, 1)}B`);
+    setText("sotp-tot-range", `${fmtMoney(sotp.totals.bear.total_ev_b, currency, 0)}–${fmtMoney(sotp.totals.bull.total_ev_b, currency, 0)}B`);
+    setText("sotp-live-netcash", `${fmtMoney(sotp.totals.base.projected_net_cash_b, currency, 1)}B`);
+    setText("sotp-live-ev", `${fmtMoney(sotp.totals.base.total_ev_b, currency, 1)}B`);
+    setText("sotp-live-eq", `${fmtMoney(sotp.totals.base.equity_value_b, currency, 1)}B`);
+    setText("sotp-live-base-px", fmtMoney(sotp.totals.base.target_price, currency, 2));
+    setText("sotp-live-px-range", `${fmtMoney(sotp.totals.bear.target_price, currency, 0)}–${fmtMoney(sotp.totals.bull.target_price, currency, 0)}`);
+    setText("sotp-live-exp-px", fmtMoney(live.expected_price_5y, currency, 2));
+    setText("sotp-live-exp-cagr", live.expected_after_tax_cagr_pct !== null ? fmtSignedPct(live.expected_after_tax_cagr_pct, 1) : "—");
+    const spreadEl = document.getElementById("sotp-live-spread");
+    if (spreadEl) {
+      spreadEl.textContent = live.spread_vs_hurdle_pct !== null ? fmtSignedPct(live.spread_vs_hurdle_pct, 1) : "—";
+      spreadEl.className = live.spread_vs_hurdle_pct !== null ? (live.spread_vs_hurdle_pct >= 0 ? "pos-ok" : "pos-bad") : "";
+    }
+  };
+
+  dlg.querySelectorAll<HTMLInputElement>(".sotp-slider").forEach((slider) => {
+    slider.addEventListener("input", () => {
+      const segId = slider.dataset.sotpSeg;
+      const field = slider.dataset.sotpField as SotpSliderField | undefined;
+      const baseFm = detail?.model?.fundamental_model;
+      if (!segId || !field || !baseFm) return;
+      const nextVal = Number(slider.value);
+      if (!Number.isFinite(nextVal)) return;
+
+      let draft = sotpDraftModel.get(sym);
+      if (!draft) {
+        draft = JSON.parse(JSON.stringify(baseFm)) as FundamentalModel;
+        sotpDraftModel.set(sym, draft);
+      }
+      const seg = draft.segments.find((s) => s.id === segId);
+      const triple = seg?.[field];
+      if (!triple) return;
+      triple.base = nextVal;
+
+      const valEl = document.getElementById(`sotp-slider-val-${segId}-${field}`);
+      if (valEl) valEl.textContent = formatSliderValue(field, nextVal);
+      applySotpLiveDomUpdate(draft);
+    });
+  });
+
+  dlg.querySelector<HTMLButtonElement>("#btn-reset-sotp")?.addEventListener("click", () => {
+    sotpDraftModel.delete(sym);
+    renderInspectorDialog(sym, captureOpenDisclosures(dlg));
+  });
+
+  dlg.querySelector<HTMLButtonElement>("#btn-save-sotp")?.addEventListener("click", async () => {
+    const baseModel = detail?.model;
+    const draft = sotpDraftModel.get(sym) ?? baseModel?.fundamental_model;
+    if (!state || !baseModel || !draft) return;
+    const thesis = state.theses.find((t) => t.ticker === sym) ?? detail?.thesis ?? undefined;
+    const livePrice = state.portfolio.positions.find((p) => p.ticker === sym)?.price ?? thesis?.price ?? null;
+    const taxInfo = resolveClientTaxInfo(state, thesis, baseModel);
+    const live = computeSotpClient(livePrice, { ...baseModel, fundamental_model: draft }, taxInfo);
+    const mergedModel: DossierModel = {
+      ...baseModel,
+      as_of: new Date().toISOString().slice(0, 10),
+      fundamental_model: draft,
+      scenarios: draft.derive_scenarios_from_sotp !== false && live ? live.sotp.derived_scenarios : baseModel.scenarios,
+    };
+    const prevCached = dossierCache.get(sym);
+    if (prevCached) {
+      dossierCache.set(sym, { ...prevCached, model: mergedModel, ...(live ? { sotp_summary: live.sotp } : {}) });
+    }
+    sotpDraftModel.delete(sym);
+    await runAppTool(
+      "app_save_dossier_model",
+      { ticker: sym, model: mergedModel, rationale: "Adjusted SOTP segment driver sliders" },
+      `Saved ${sym} SOTP valuation model.`,
+    );
+    void fetchDossierDetail(sym);
+  });
+
   dlg.querySelector<HTMLButtonElement>("#btn-save-dossier-model")?.addEventListener("click", async () => {
     const readNum = (id: string, fallback: number): number => {
       const el = dlg.querySelector<HTMLInputElement>(`#${id}`);
@@ -5248,6 +6177,9 @@ function openInspector(ticker: string): void {
   const sym = ticker.toUpperCase();
   if (inspectorTicker !== sym) {
     inspectorTab = "summary";
+  }
+  for (const k of sotpDraftModel.keys()) {
+    if (k !== sym) sotpDraftModel.delete(k);
   }
   inspectorTicker = sym;
   inspectorThemeSlug = null;
@@ -5802,7 +6734,10 @@ function bindOnboardingEvents(root: HTMLElement): void {
   root.querySelector<HTMLButtonElement>("#btn-preview-demo")?.addEventListener("click", async () => {
     dossierCache.clear();
     themeCache.clear();
+    sotpDraftModel.clear();
     backtestResult = null;
+    quantEvalResult = null;
+    quantEvalError = null;
     await runServerRefresh("Loading sample preview...", { demo: true, tab: "overview" });
   });
 }
@@ -5877,7 +6812,10 @@ function bindChromeEvents(root: HTMLElement): void {
   root.querySelector<HTMLButtonElement>("#btn-exit-demo")?.addEventListener("click", async () => {
     dossierCache.clear();
     themeCache.clear();
+    sotpDraftModel.clear();
     backtestResult = null;
+    quantEvalResult = null;
+    quantEvalError = null;
     await runServerRefresh("Exiting preview...", { demo: false, tab: "overview" });
   });
 
@@ -6012,6 +6950,37 @@ async function runDeterministicBacktestFromForm(root: HTMLElement): Promise<void
   } catch (err) {
     backtestBusy = false;
     backtestError = `Backtest error: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  renderPanelsOnly();
+}
+
+async function runQuantEvaluation(): Promise<void> {
+  if (!state || !hostCaps?.serverTools) return;
+  quantEvalBusy = true;
+  quantEvalError = null;
+  renderPanelsOnly();
+  try {
+    const res = await app.callServerTool({
+      name: "app_run_quant_eval",
+      arguments: {
+        horizon_weeks: quantEvalHorizonWeeks,
+        include_external_wealth: btIncludeExternal,
+        tx_cost_bps: btTxCostBps,
+        demo: state.is_demo,
+      },
+    });
+    quantEvalBusy = false;
+    if (res.isError) {
+      quantEvalError = res.content?.find((c) => c.type === "text")?.text ?? "Walk-forward evaluation failed.";
+    } else if (res.structuredContent && typeof res.structuredContent === "object") {
+      quantEvalResult = res.structuredContent as unknown as QuantWalkForwardEvalResult;
+      toastMessage = `Walk-forward eval (${quantEvalResult.windows_evaluated} windows, ${quantEvalResult.horizon_weeks}w) complete.`;
+    } else {
+      quantEvalError = "Walk-forward evaluation returned no structured result.";
+    }
+  } catch (err) {
+    quantEvalBusy = false;
+    quantEvalError = `Walk-forward eval error: ${err instanceof Error ? err.message : String(err)}`;
   }
   renderPanelsOnly();
 }
@@ -6353,6 +7322,20 @@ function bindPanelEvents(root: HTMLElement): void {
   root.querySelector<HTMLFormElement>("#lab-backtest-form")?.addEventListener("submit", (e) => {
     e.preventDefault();
     void runDeterministicBacktestFromForm(root);
+  });
+
+  root.querySelectorAll<HTMLButtonElement>("[data-qe-horizon]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const next = Number(btn.dataset.qeHorizon) === 26 ? 26 : 13;
+      if (next !== quantEvalHorizonWeeks) {
+        quantEvalHorizonWeeks = next;
+        renderPanelsOnly();
+      }
+    });
+  });
+
+  root.querySelector<HTMLButtonElement>("#btn-run-quant-eval")?.addEventListener("click", () => {
+    void runQuantEvaluation();
   });
 }
 
