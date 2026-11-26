@@ -6317,7 +6317,7 @@ function bindInspectorEvents(dlg: HTMLDialogElement, sym: string, detail: Dossie
     });
   });
 
-  const deepResearchPrompt = `Run a full 3-lens institutional deep research dive on ${sym}: (1) Business quality, moat, supply chain, XBRL Owner Earnings (FCF-SBC), ROIC, and Sloan Accruals (sync_fundamentals_xbrl + sync_insiders_form4 + check_sec_edgar); (2) Reverse DCF market-implied expectations vs Street consensus and Mauboussin base rates; (3) Steelman bear case and machine-checkable falsifiable hypotheses. Persist the full memo.md, 5Y model.json, and updated thesis via upsert_dossier and log the scored test via record_thesis_test.`;
+  const deepResearchPrompt = buildDeepResearchPrompt(sym);
 
   dlg.querySelector<HTMLButtonElement>("#btn-inspector-deep-research")?.addEventListener("click", async () => {
     await sendAgentPrompt(deepResearchPrompt, { mode: inspectorSendMode, label: "deep research", ticker: sym });
@@ -7381,10 +7381,11 @@ function bindPanelEvents(root: HTMLElement): void {
       e.stopPropagation();
       const sym = btn.dataset.ticker;
       if (!sym) return;
-      await sendAgentPrompt(
-        `Run a full 3-lens institutional deep research dive on ${sym}: (1) Business quality, moat, supply chain, XBRL Owner Earnings (FCF-SBC), ROIC, and Sloan Accruals; (2) Reverse DCF market-implied expectations vs Street consensus and base rates; (3) Steelman bear case and machine-checkable falsifiable hypotheses. Persist memo.md, model.json, and thesis updates via upsert_dossier and record_thesis_test.`,
-        { mode: "background", label: "deep research", ticker: sym },
-      );
+      await sendAgentPrompt(buildDeepResearchPrompt(sym), {
+        mode: "background",
+        label: "deep research",
+        ticker: sym,
+      });
     });
   });
 
@@ -7600,6 +7601,20 @@ async function runAppTool(name: string, args: Record<string, unknown>, okToast: 
     toastMessage = `Action failed: ${err instanceof Error ? err.message : String(err)}`;
     render();
   }
+}
+
+function buildDeepResearchPrompt(sym: string): string {
+  return (
+    `Run a full 3-lens institutional deep research dive on ${sym}: ` +
+    `(1) Business quality, moat, segment footnotes, XBRL Owner Earnings (FCF-SBC), ROIC, and Sloan Accruals ` +
+    `(call sync_fundamentals_xbrl + sync_insiders_form4 + check_sec_edgar); ` +
+    `(2) Bottom-up multi-segment SOTP fundamental_model (set base_shares_m, annual_dilution_pct, net_cash_b, ` +
+    `1-8 segments using unit_economics/cagr_margin/milestone_option with derive_scenarios_from_sotp: true) ` +
+    `plus 2-4 variant_perception KPI rows linked to hypotheses, cross-checked against Reverse DCF market-implied ` +
+    `expectations vs Street consensus and base rates; ` +
+    `(3) Steelman bear case with machine-checkable falsifiable hypotheses (is_core: true). ` +
+    `Persist memo_md, model (including fundamental_model), and thesis updates via upsert_dossier and log the scored test via record_thesis_test.`
+  );
 }
 
 async function sendAgentPrompt(

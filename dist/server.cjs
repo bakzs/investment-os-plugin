@@ -45746,6 +45746,137 @@ var HYPOTHESIS_ITEM_SCHEMA = {
   },
   required: ["id", "claim"]
 };
+var SCENARIO_TRIPLE_SCHEMA = {
+  type: "object",
+  properties: {
+    bear: { type: "number" },
+    base: { type: "number" },
+    bull: { type: "number" }
+  },
+  required: ["bear", "base", "bull"]
+};
+var SCENARIO_CASE_SCHEMA = {
+  type: "object",
+  properties: {
+    probability: { type: "number" },
+    target_price_5y: { type: "number" },
+    multiple: { type: ["number", "null"] },
+    metric_cagr_pct: { type: ["number", "null"] },
+    summary: { type: "string" }
+  },
+  required: ["probability", "target_price_5y", "summary"]
+};
+var DOSSIER_MODEL_SCHEMA = {
+  type: "object",
+  description: "Optional 5Y valuation model (DossierModelSchema): fundamental_model (bottom-up SOTP segments + variant_perception), reverse_dcf (with net_cash_b, annual_dilution_pct), scenarios, dividend_yield_pct, accumulating, dividend_wht_pct, tranches.",
+  properties: {
+    as_of: { type: "string", description: "ISO date YYYY-MM-DD." },
+    horizon_years: { type: "integer", description: "Valuation horizon in years (1-15, default 5)." },
+    dividend_yield_pct: { type: "number" },
+    accumulating: { type: "boolean", description: "True for accumulating UCITS ETFs (0% distributing WHT drag)." },
+    dividend_wht_pct: { type: ["number", "null"] },
+    fundamental_model: {
+      type: ["object", "null"],
+      description: "Bottom-up multi-segment SOTP driver model & Variant Perception ledger.",
+      properties: {
+        base_shares_m: { type: "number", description: "Current diluted share count in millions (must match XBRL within ~15%)." },
+        annual_dilution_pct: { type: "number", description: "Annual share count change % (-15 to +30; negative = net buybacks)." },
+        net_cash_b: { type: "number", description: "Current net cash in USD billions (negative = net debt)." },
+        projected_net_cash_b: { ...SCENARIO_TRIPLE_SCHEMA, description: "Optional Year-T net cash in billions per scenario; overrides net_cash_b when provided." },
+        scenario_probabilities: { ...SCENARIO_TRIPLE_SCHEMA, description: "Weights for bear/base/bull (defaults 0.25/0.50/0.25)." },
+        derive_scenarios_from_sotp: { type: "boolean", description: "When true (default), derives scenarios.{bear,base,bull} automatically from segments." },
+        methodology_note: { type: "string" },
+        segments: {
+          type: "array",
+          minItems: 1,
+          maxItems: 8,
+          description: "1-8 revenue/profit/option business segments derived from 10-K/10-Q footnotes.",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Lowercase alphanumeric/kebab slug (e.g. aws-cloud)." },
+              name: { type: "string" },
+              kind: { type: "string", enum: ["unit_economics", "cagr_margin", "milestone_option"] },
+              valuation_metric: { type: "string", enum: ["owner_earnings", "ebit", "fcf", "revenue", "ev_direct"] },
+              unit_label: { type: "string" },
+              units: SCENARIO_TRIPLE_SCHEMA,
+              rev_per_unit_label: { type: "string" },
+              rev_per_unit: SCENARIO_TRIPLE_SCHEMA,
+              rev_multiplier_to_b: { type: "number", description: "Factor converting (units * rev_per_unit) to $B (default 0.001 for M-units * $/unit -> $B)." },
+              current_rev_b: { type: "number", description: "Baseline LTM/FY segment revenue in $B for cagr_margin segments." },
+              rev_cagr_pct: SCENARIO_TRIPLE_SCHEMA,
+              margin_pct: SCENARIO_TRIPLE_SCHEMA,
+              capex_or_sbc_drag_b: SCENARIO_TRIPLE_SCHEMA,
+              exit_multiple: SCENARIO_TRIPLE_SCHEMA,
+              milestone_label: { type: "string" },
+              success_prob: { ...SCENARIO_TRIPLE_SCHEMA, description: "Probability in [0, 1] for milestone_option segments." },
+              success_ev_b: { ...SCENARIO_TRIPLE_SCHEMA, description: "Terminal EV in $B if milestone succeeds." },
+              notes: { type: "string" }
+            },
+            required: ["id", "name", "kind"]
+          }
+        },
+        variant_perception: {
+          type: "array",
+          maxItems: 8,
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string" },
+              kpi: { type: "string" },
+              consensus_view: { type: "string" },
+              my_view: { type: "string" },
+              edge_rationale: { type: "string" },
+              linked_hypothesis_id: { type: ["string", "null"] }
+            },
+            required: ["id", "kpi", "consensus_view", "my_view"]
+          }
+        }
+      },
+      required: ["base_shares_m", "segments"]
+    },
+    reverse_dcf: {
+      type: ["object", "null"],
+      properties: {
+        basis: { type: "string", enum: ["fcf", "eps"] },
+        current_metric_per_share: { type: "number" },
+        current_revenue_b: { type: ["number", "null"] },
+        shares_diluted_m: { type: ["number", "null"] },
+        target_margin_pct: { type: ["number", "null"] },
+        exit_multiple: { type: "number" },
+        base_revenue_cagr_pct: { type: ["number", "null"] },
+        net_cash_b: { type: ["number", "null"] },
+        annual_dilution_pct: { type: "number" },
+        metric_basis_note: { type: ["string", "null"] },
+        linked_hypothesis_ids: { type: "array", items: { type: "string" } },
+        notes: { type: ["string", "null"] }
+      },
+      required: ["current_metric_per_share", "exit_multiple"]
+    },
+    scenarios: {
+      type: ["object", "null"],
+      properties: {
+        bear: SCENARIO_CASE_SCHEMA,
+        base: SCENARIO_CASE_SCHEMA,
+        bull: SCENARIO_CASE_SCHEMA
+      }
+    },
+    tranches: {
+      type: "array",
+      maxItems: 5,
+      items: {
+        type: "object",
+        properties: {
+          label: { type: "string" },
+          price: { type: "number" },
+          pct_of_add: { type: "number" },
+          note: { type: "string" }
+        },
+        required: ["label", "price", "pct_of_add"]
+      }
+    }
+  }
+};
 var THESIS_BASE_PROPERTIES = {
   ticker: { type: "string" },
   role: { type: "string" },
@@ -46012,10 +46143,7 @@ var TOOLS = [
       type: "object",
       properties: {
         ...THESIS_BASE_PROPERTIES,
-        model: {
-          type: "object",
-          description: "Optional 5Y valuation model (DossierModelSchema): fundamental_model (bottom-up SOTP segments + variant_perception), reverse_dcf (with net_cash_b, annual_dilution_pct), scenarios, dividend_yield_pct, accumulating, dividend_wht_pct, tranches."
-        },
+        model: DOSSIER_MODEL_SCHEMA,
         memo_md: {
           type: "string",
           description: "Optional full primary-source markdown research memo saved to dossiers/<TICKER>/memo.md."
@@ -46466,7 +46594,7 @@ var TOOLS = [
       type: "object",
       properties: {
         ticker: { type: "string" },
-        model: { type: "object" },
+        model: DOSSIER_MODEL_SCHEMA,
         rationale: { type: "string" },
         use_cache: { type: "boolean" }
       },

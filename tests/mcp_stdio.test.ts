@@ -66,6 +66,24 @@ test("bundled dist/server.cjs passes end-to-end v0.8 stdio MCP App lifecycle", a
       });
     }
 
+    const upsertDossierSchema = byName.get("upsert_dossier")?.inputSchema as {
+      properties?: {
+        model?: {
+          properties?: {
+            fundamental_model?: {
+              properties?: {
+                segments?: unknown;
+                variant_perception?: unknown;
+              };
+            };
+          };
+        };
+      };
+    };
+    const fmProps = upsertDossierSchema?.properties?.model?.properties?.fundamental_model?.properties;
+    assert.ok(fmProps?.segments, "upsert_dossier schema must expose fundamental_model.segments");
+    assert.ok(fmProps?.variant_perception, "upsert_dossier schema must expose fundamental_model.variant_perception");
+
     for (const appToolName of [
       "app_get_dashboard",
       "app_check_edgar",

@@ -2,13 +2,12 @@
   "name": "investment-os",
   "displayName": "Investment OS",
   "version": "0.8.0",
-  "description": "Institutional Quantamental Personal-CIO sidecar for multi-currency portfolios: analytical Ledoit-Wolf & Patton-Politis-White L* Block Bootstrap forecasting, Black-Litterman Brier calibration, zero-lookahead walk-forward evaluation & allocation horse race, bottom-up multi-segment SOTP & Variant Perception dossiers, SEC XBRL Owner Earnings/ROIC quality scoring, Form 4 insiders, 3-lens deep research, and quiet Watchdog.",
+  "description": "Local-first, strictly read-only Personal CIO workstation for long-only investors. Combines multi-currency ETF look-through, zero-key SEC XBRL & Form 4 signals, bottom-up SOTP research dossiers, institutional portfolio forecasting, and zero-lookahead walk-forward model validation.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
-    "Open my Investment OS dashboard and help me onboard my portfolio",
-    "Forecast my portfolio over 5 years if I apply the recommended tax swaps, exits, and deploy freed cash",
-    "Run a 3-lens institutional deep dive on a company and update its living dossier and Reverse DCF model",
-    "Run a Watchdog sweep and summarize only high-priority actionable deltas across my holdings"
+    "Open my Investment OS dashboard and help me onboard or refresh my portfolio",
+    "Run a 3-lens deep research dive with a bottom-up SOTP segment model on a stock",
+    "Simulate a 5-year portfolio forecast and check walk-forward model calibration"
   ],
   "author": {
     "name": "bakzs",

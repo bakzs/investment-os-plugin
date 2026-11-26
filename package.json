@@ -1,7 +1,7 @@
 {
   "name": "investment-os-plugin",
   "version": "0.8.0",
-  "description": "Open-source Antigravity Institutional Quantamental Personal-CIO MCP App plugin: Analytical Ledoit-Wolf shrinkage (λ*), automatic Patton-Politis-White block length (L*), Black-Litterman Brier-calibrated forecasting, zero-lookahead walk-forward evaluation harness, bottom-up SOTP & Variant Perception dossiers, Jacobi PCA factor risk, HRP, Deflated Sharpe backtesting, SEC XBRL/Form 4 signals, 3-lens adversarial research, and quiet Watchdog.",
+  "description": "Local-first, strictly read-only Personal CIO workstation and MCP App plugin for Antigravity: multi-currency ETF look-through, zero-key SEC XBRL/Form 4 signals, bottom-up SOTP research dossiers, Brier-calibrated Black-Litterman & Block Bootstrap forecasting, and zero-lookahead walk-forward model validation.",
   "license": "MIT",
   "type": "module",
   "repository": {
