@@ -33424,109 +33424,17 @@ var {
   safeDump
 } = yaml;
 
-// src/server/market.ts
-var YF_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (compatible; InvestmentOS-Plugin/0.2.0)",
-  Accept: "application/json"
-};
-function round4(n) {
-  return Math.round((n + Number.EPSILON) * 1e4) / 1e4;
-}
-function round2(n) {
-  return Math.round((n + Number.EPSILON) * 100) / 100;
-}
-async function fetchYahooChartQuote(symbol2, timeoutMs = 7e3) {
-  const url2 = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol2)}?interval=1d&range=1mo`;
-  try {
-    const resp = await fetch(url2, {
-      headers: YF_HEADERS,
-      signal: AbortSignal.timeout(timeoutMs)
-    });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    const result = data?.chart?.result?.[0];
-    const meta3 = result?.meta;
-    if (!meta3) return null;
-    let price = meta3.regularMarketPrice ?? meta3.previousClose ?? meta3.chartPreviousClose;
-    if (typeof price !== "number" || !Number.isFinite(price) || price <= 0) {
-      return null;
-    }
-    let scale = 1;
-    let currency = (meta3.currency ?? "USD").trim();
-    if (currency === "GBp" || currency === "GBX") {
-      scale = 0.01;
-      price = price * scale;
-      currency = "GBP";
-    } else {
-      currency = currency.toUpperCase();
-    }
-    const rawCloses = result?.indicators?.quote?.[0]?.close ?? [];
-    const sparkline = rawCloses.filter((v) => typeof v === "number" && Number.isFinite(v) && v > 0).map((v) => round4(v * scale)).slice(-22);
-    let prevClose = null;
-    if (sparkline.length >= 2) {
-      const lastPt = sparkline[sparkline.length - 1];
-      const sameAsLast = Math.abs(price - lastPt) / price < 5e-4;
-      prevClose = sameAsLast ? sparkline[sparkline.length - 2] : lastPt;
-    } else if (typeof meta3.previousClose === "number" && meta3.previousClose > 0) {
-      prevClose = meta3.previousClose * scale;
-    }
-    const anchor1mRaw = typeof meta3.chartPreviousClose === "number" && meta3.chartPreviousClose > 0 ? meta3.chartPreviousClose * scale : sparkline[0];
-    const change1d = prevClose && prevClose > 0 ? round2((price - prevClose) / prevClose * 100) : null;
-    const change1m = anchor1mRaw && anchor1mRaw > 0 ? round2((price - anchor1mRaw) / anchor1mRaw * 100) : null;
-    return {
-      symbol: symbol2,
-      price,
-      currency,
-      marketState: meta3.marketState,
-      sparkline,
-      change_1d_pct: change1d,
-      change_1m_pct: change1m
-    };
-  } catch {
-    return null;
-  }
-}
-async function fetchQuotesBatch(symbols, concurrency = 4) {
-  const unique = Array.from(new Set(symbols.map((s) => s.trim()).filter(Boolean)));
-  const out = /* @__PURE__ */ new Map();
-  let idx = 0;
-  async function worker() {
-    while (idx < unique.length) {
-      const current = unique[idx];
-      idx += 1;
-      if (!current) continue;
-      const res = await fetchYahooChartQuote(current);
-      if (res) {
-        out.set(current, res);
-      }
-    }
-  }
-  const workers = Array.from({ length: Math.min(concurrency, Math.max(1, unique.length)) }, () => worker());
-  await Promise.all(workers);
-  return out;
-}
-async function fetchFxRatesToBase(currencies, baseCurrency, fallbackRates) {
-  const base = baseCurrency.toUpperCase();
-  const out = { ...fallbackRates, [base]: 1 };
-  const needed = Array.from(new Set(currencies.map((c) => c.toUpperCase()).filter((c) => c !== base)));
-  for (const ccy of needed) {
-    const directSym = ccy === "USD" ? `${base}=X` : `${ccy}${base}=X`;
-    const direct = await fetchYahooChartQuote(directSym);
-    if (direct && direct.price > 0) {
-      out[ccy] = direct.price;
-      continue;
-    }
-    const inverseSym = `${base}${ccy}=X`;
-    const inverse = await fetchYahooChartQuote(inverseSym);
-    if (inverse && inverse.price > 0) {
-      out[ccy] = 1 / inverse.price;
-    }
-  }
-  return out;
-}
+// src/server/edgar.ts
+var import_node_fs2 = __toESM(require("node:fs"), 1);
+
+// src/server/storage.ts
+var import_node_fs = __toESM(require("node:fs"), 1);
+var import_node_os = __toESM(require("node:os"), 1);
+var import_node_path = __toESM(require("node:path"), 1);
 
 // src/server/schema.ts
 var TICKER_REGEX = /^[A-Z0-9][A-Z0-9._-]{0,14}$/;
+var THEME_SLUG_REGEX = /^[a-z0-9][a-z0-9-]{0,63}$/;
 var ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 var CURRENCY_REGEX = /^[A-Z]{3}$/;
 function normalizeTicker(raw) {
@@ -33536,13 +33444,27 @@ function normalizeTicker(raw) {
   }
   return sym;
 }
+function normalizeThemeSlug(raw) {
+  const slug = raw.trim().toLowerCase();
+  if (!THEME_SLUG_REGEX.test(slug) || slug.includes("..")) {
+    throw new Error(`Invalid theme slug: ${raw}`);
+  }
+  return slug;
+}
 var CurrencySchema = external_exports.string().trim().toUpperCase().regex(CURRENCY_REGEX, "Currency must be a 3-letter ISO-4217 code");
 var TickerSchema = external_exports.string().trim().toUpperCase().refine((v) => TICKER_REGEX.test(v) && !v.includes(".."), {
   message: "Invalid ticker symbol"
 });
+var ThemeSlugSchema = external_exports.string().trim().toLowerCase().refine((v) => THEME_SLUG_REGEX.test(v) && !v.includes(".."), {
+  message: "Theme slug must be lowercase alphanumeric/kebab-case (1-64 chars)"
+});
+var SlugSchema = ThemeSlugSchema;
 var FiniteNumber = external_exports.number().finite();
 var NonNegativeNumber = external_exports.number().finite().min(0);
 var PctNumber = external_exports.number().finite().min(0).max(100);
+var IsoDateSchema = external_exports.string().trim().regex(ISO_DATE_REGEX, "Date must be YYYY-MM-DD");
+var IsoDateNullableOptional = IsoDateSchema.nullable().optional();
+var SafeHttpsUrlSchema = external_exports.string().trim().max(400).refine((u) => u.startsWith("https://"), { message: "URL must start with https://" });
 var RiskCapRuleSchema = external_exports.object({
   id: external_exports.string().trim().min(1).max(64),
   label: external_exports.string().trim().min(1).max(120),
@@ -33552,11 +33474,35 @@ var RiskCapRuleSchema = external_exports.object({
   tickers: external_exports.array(external_exports.string().trim().max(24)).optional(),
   include_etf_residual_key: external_exports.string().trim().max(64).optional()
 });
+var BenchmarkConfigSchema = external_exports.object({
+  ticker: TickerSchema.default("VWRA"),
+  yf_symbol: external_exports.string().trim().min(1).max(24).default("VWRA.L"),
+  label: external_exports.string().trim().min(1).max(80).default("VWRA.L Core Global"),
+  expected_cagr_pct: external_exports.number().finite().min(0).max(50).default(8),
+  alpha_buffer_pct: external_exports.number().finite().min(0).max(30).default(2.5),
+  estate_tax_drag_mode: external_exports.enum(["hedge", "amortized"]).default("hedge"),
+  estate_tax_hedge_bps: external_exports.number().finite().min(0).max(500).default(35),
+  estate_tax_amortize_years: external_exports.number().int().min(1).max(50).default(20),
+  estate_tax_annual_drag_pct: external_exports.number().finite().min(0).max(20).nullable().default(null),
+  core_active_cap: external_exports.number().int().min(1).max(50).default(12)
+});
 var ProfileSchema = external_exports.object({
   base_currency: CurrencySchema.default("USD"),
   timezone: external_exports.string().trim().min(1).max(64).default("UTC"),
   edgar_user_agent: external_exports.string().trim().max(200).optional(),
   custody_label: external_exports.string().trim().min(1).max(80).default("Primary Brokerage"),
+  benchmark: BenchmarkConfigSchema.default({
+    ticker: "VWRA",
+    yf_symbol: "VWRA.L",
+    label: "VWRA.L Core Global",
+    expected_cagr_pct: 8,
+    alpha_buffer_pct: 2.5,
+    estate_tax_drag_mode: "hedge",
+    estate_tax_hedge_bps: 35,
+    estate_tax_amortize_years: 20,
+    estate_tax_annual_drag_pct: null,
+    core_active_cap: 12
+  }),
   tax_profile: external_exports.object({
     country_code: external_exports.string().trim().toUpperCase().min(2).max(12).default("US"),
     nra_us_estate_tax_enabled: external_exports.boolean().default(false),
@@ -33574,6 +33520,7 @@ var ProfileSchema = external_exports.object({
     enabled: external_exports.boolean().default(false),
     label: external_exports.string().trim().min(1).max(80).default("External Equity Exposure"),
     ticker: external_exports.string().trim().max(24).nullable().default(null),
+    qty: NonNegativeNumber.nullable().default(null),
     amount_base: NonNegativeNumber.default(0),
     vested_pct: PctNumber.nullable().default(null),
     us_situs: external_exports.boolean().default(false),
@@ -33584,6 +33531,7 @@ var ProfileSchema = external_exports.object({
     enabled: false,
     label: "External Equity Exposure",
     ticker: null,
+    qty: null,
     amount_base: 0,
     vested_pct: null,
     us_situs: false,
@@ -33673,7 +33621,22 @@ var CatalystsFileSchema = external_exports.object({
 var HypothesisStatusSchema = external_exports.enum(["untested", "supported", "weakened", "falsified"]);
 var ConfidenceSchema = external_exports.enum(["low", "medium", "high"]);
 var VerdictSchema = external_exports.enum(["HIGH_CONVICTION", "WATCH", "PROBATION", "EXIT"]);
-var SafeHttpsUrlSchema = external_exports.string().trim().max(400).refine((u) => u.startsWith("https://"), { message: "source_url must start with https://" });
+var DossierTierSchema = external_exports.enum(["active", "bench", "passed"]);
+var ActionVerdictSchema = external_exports.enum(["GO", "WAIT", "PASS"]);
+var ProvenanceSourceKindSchema = external_exports.enum(["sec", "ibkr", "model", "market", "report"]);
+var ProvenanceSourceSchema = external_exports.object({
+  label: external_exports.string().trim().min(1).max(120),
+  kind: ProvenanceSourceKindSchema,
+  date: external_exports.string().trim().regex(ISO_DATE_REGEX, "source date must be YYYY-MM-DD").nullable().optional(),
+  url: SafeHttpsUrlSchema.nullable().optional()
+});
+var HypothesisRuleSchema = external_exports.object({
+  source: external_exports.enum(["xbrl", "edgar", "market", "insiders"]).default("xbrl"),
+  metric: external_exports.string().trim().min(1).max(64),
+  op: external_exports.enum(["<=", "<", ">=", ">", "=="]),
+  threshold: external_exports.number().finite(),
+  period: external_exports.enum(["latest_q", "ttm", "latest_fy"]).default("latest_q")
+});
 var HypothesisSchema = external_exports.object({
   id: external_exports.string().trim().min(1).max(64).regex(/^[a-zA-Z0-9._-]+$/, "Hypothesis id must be alphanumeric/kebab-case"),
   claim: external_exports.string().trim().min(1).max(300),
@@ -33682,18 +33645,35 @@ var HypothesisSchema = external_exports.object({
   confidence: ConfidenceSchema.default("medium"),
   evidence: external_exports.string().trim().max(500).optional(),
   last_tested: external_exports.string().trim().regex(ISO_DATE_REGEX, "last_tested must be YYYY-MM-DD").nullable().optional(),
-  source_url: SafeHttpsUrlSchema.nullable().optional()
+  source_url: SafeHttpsUrlSchema.nullable().optional(),
+  is_core: external_exports.boolean().default(false),
+  waiver_reason: external_exports.string().trim().max(240).nullable().optional(),
+  waiver_expires: IsoDateNullableOptional,
+  rule: HypothesisRuleSchema.nullable().optional()
+});
+var PitSnapshotSchema = external_exports.object({
+  vix: external_exports.number().finite().nullable().optional(),
+  us10y_pct: external_exports.number().finite().nullable().optional(),
+  expected_after_tax_cagr_pct: external_exports.number().finite().nullable().optional(),
+  hurdle_cagr_pct: external_exports.number().finite().nullable().optional(),
+  implied_revenue_cagr_pct: external_exports.number().finite().nullable().optional(),
+  portfolio_weight_pct: external_exports.number().finite().nullable().optional(),
+  fundamentals_period: external_exports.string().trim().max(32).nullable().optional()
 });
 var ThesisTestRecordSchema = external_exports.object({
   ticker: TickerSchema,
   tested_at: external_exports.string().trim().min(1).max(64),
+  event_type: external_exports.enum(["thesis_test", "rule_change"]).default("thesis_test"),
   verdict: VerdictSchema,
+  action_verdict: ActionVerdictSchema.nullable().optional(),
   kill_switch_triggered: external_exports.boolean().default(false),
   summary: external_exports.string().trim().min(1).max(600),
   bear_case: external_exports.string().trim().max(600).optional(),
   hypotheses_tested: external_exports.array(HypothesisSchema).max(12).default([]),
   price_at_test: NonNegativeNumber.nullable().optional(),
-  currency: CurrencySchema.optional()
+  benchmark_price_at_test: NonNegativeNumber.nullable().optional(),
+  currency: CurrencySchema.optional(),
+  pit_snapshot: PitSnapshotSchema.nullable().optional()
 });
 var ThesisUpdateSchema = external_exports.object({
   ticker: TickerSchema,
@@ -33701,6 +33681,15 @@ var ThesisUpdateSchema = external_exports.object({
   yf_symbol: external_exports.string().trim().min(1).max(24).optional(),
   currency: CurrencySchema.optional(),
   us_situs: external_exports.boolean().optional(),
+  tier: DossierTierSchema.optional(),
+  action_verdict: ActionVerdictSchema.nullable().optional(),
+  takeaway: external_exports.array(external_exports.string().trim().min(1).max(260)).max(3).optional(),
+  last_audited_date: external_exports.string().trim().regex(ISO_DATE_REGEX, "last_audited_date must be YYYY-MM-DD").nullable().optional(),
+  price_at_audit: NonNegativeNumber.nullable().optional(),
+  sources: external_exports.array(ProvenanceSourceSchema).max(12).optional(),
+  rejection_reason: external_exports.string().trim().max(600).nullable().optional(),
+  reentry_trigger: external_exports.string().trim().max(400).nullable().optional(),
+  reentry_price: NonNegativeNumber.nullable().optional(),
   buy_zone_low: NonNegativeNumber.nullable().optional(),
   buy_zone_high: NonNegativeNumber.nullable().optional(),
   trim_zone: NonNegativeNumber.nullable().optional(),
@@ -33714,18 +33703,360 @@ var ThesisUpdateSchema = external_exports.object({
   bear_case_summary: external_exports.string().trim().max(600).nullable().optional(),
   last_tested_date: external_exports.string().trim().regex(ISO_DATE_REGEX, "last_tested_date must be YYYY-MM-DD").nullable().optional(),
   hypotheses: external_exports.array(HypothesisSchema).max(12).optional(),
+  theme_refs: external_exports.array(SlugSchema).max(12).optional(),
+  rationale: external_exports.string().trim().max(300).optional(),
   core_thesis: external_exports.array(external_exports.string().trim().min(1).max(400)).max(8).optional(),
   kill_switches: external_exports.array(external_exports.string().trim().min(1).max(400)).max(8).optional(),
   decision_log_note: external_exports.string().trim().max(4e3).optional()
+});
+var ScenarioCaseSchema = external_exports.object({
+  probability: external_exports.number().finite().min(0).max(1),
+  target_price_5y: NonNegativeNumber,
+  multiple: NonNegativeNumber.nullable().optional(),
+  metric_cagr_pct: external_exports.number().finite().min(-99).max(500).nullable().optional(),
+  summary: external_exports.string().trim().min(1).max(400)
+});
+var ReverseDcfInputSchema = external_exports.object({
+  basis: external_exports.enum(["fcf", "eps"]).default("fcf"),
+  current_metric_per_share: external_exports.number().finite().positive(),
+  current_revenue_b: external_exports.number().finite().positive().nullable().optional(),
+  shares_diluted_m: external_exports.number().finite().positive().nullable().optional(),
+  target_margin_pct: external_exports.number().finite().min(0.1).max(100).nullable().optional(),
+  exit_multiple: external_exports.number().finite().positive(),
+  base_revenue_cagr_pct: external_exports.number().finite().min(-50).max(200).nullable().optional(),
+  net_cash_b: external_exports.number().finite().nullable().optional(),
+  annual_dilution_pct: external_exports.number().finite().min(-15).max(30).default(0),
+  metric_basis_note: external_exports.string().trim().max(120).nullable().optional(),
+  linked_hypothesis_ids: external_exports.array(external_exports.string().trim().min(1).max(64)).max(12).default([]),
+  notes: external_exports.string().trim().max(500).nullable().optional()
+});
+var TrancheRuleSchema = external_exports.object({
+  label: external_exports.string().trim().min(1).max(80),
+  price: NonNegativeNumber,
+  pct_of_add: external_exports.number().finite().min(0).max(100),
+  note: external_exports.string().trim().max(240).optional()
+});
+var DossierModelSchema = external_exports.object({
+  as_of: external_exports.string().trim().max(64).optional(),
+  horizon_years: external_exports.number().int().min(1).max(15).default(5),
+  dividend_yield_pct: external_exports.number().finite().min(0).max(30).default(0),
+  accumulating: external_exports.boolean().default(false),
+  dividend_wht_pct: PctNumber.nullable().optional(),
+  reverse_dcf: ReverseDcfInputSchema.nullable().optional(),
+  scenarios: external_exports.object({
+    bear: ScenarioCaseSchema,
+    base: ScenarioCaseSchema,
+    bull: ScenarioCaseSchema
+  }).nullable().optional(),
+  tranches: external_exports.array(TrancheRuleSchema).max(5).optional()
+});
+var EarningsInsightSchema = external_exports.object({
+  period: external_exports.string().trim().max(80).optional(),
+  published_at: external_exports.string().trim().max(64).optional(),
+  kind: external_exports.enum(["preview", "recap", "summary"]).default("summary"),
+  headline: external_exports.string().trim().max(240).optional(),
+  summary: external_exports.string().trim().max(1500),
+  key_metrics: external_exports.array(external_exports.string().trim().max(240)).max(12).default([]),
+  source_url: SafeHttpsUrlSchema.nullable().optional()
+});
+var OptionsIntelSchema = external_exports.object({
+  as_of: external_exports.string().trim().max(64).optional(),
+  underlying_price: NonNegativeNumber.nullable().optional(),
+  expiry: external_exports.string().trim().max(32),
+  atm_strike: NonNegativeNumber.nullable().optional(),
+  straddle_price: NonNegativeNumber.nullable().optional(),
+  implied_move_pct: external_exports.number().finite().min(0).max(200),
+  call_iv_pct: external_exports.number().finite().min(0).max(500).nullable().optional(),
+  put_iv_pct: external_exports.number().finite().min(0).max(500).nullable().optional(),
+  iv_skew_pct: external_exports.number().finite().min(-200).max(200).nullable().optional(),
+  iv_percentile_52w: external_exports.number().finite().min(0).max(100).nullable().optional(),
+  note: external_exports.string().trim().max(300).optional()
+});
+var CompanyConnectionSchema = external_exports.object({
+  ticker: external_exports.string().trim().max(24).optional(),
+  name: external_exports.string().trim().min(1).max(120),
+  relation: external_exports.string().trim().min(1).max(64).default("peer")
+});
+var DossierIntelSchema = external_exports.object({
+  updated_at: external_exports.string().trim().min(1).max(64),
+  provider: external_exports.string().trim().min(1).max(64).default("ibkr"),
+  contract_id: external_exports.union([external_exports.number().int(), external_exports.string().trim().min(1).max(40)]).nullable().optional(),
+  earnings_insight: EarningsInsightSchema.nullable().optional(),
+  options_intel: OptionsIntelSchema.nullable().optional(),
+  themes: external_exports.array(external_exports.string().trim().min(1).max(120)).max(20).default([]),
+  connections: external_exports.array(CompanyConnectionSchema).max(20).default([])
+});
+var HistoryPointSchema = external_exports.object({
+  date: external_exports.string().trim().regex(ISO_DATE_REGEX, "History date must be YYYY-MM-DD"),
+  close: external_exports.number().finite().positive()
+});
+var HistorySeriesSchema = external_exports.object({
+  symbol: external_exports.string().trim().min(1).max(32),
+  currency: CurrencySchema.default("USD"),
+  source: external_exports.enum(["yahoo", "ibkr", "manual"]).default("yahoo"),
+  updated_at: external_exports.string().trim().min(1).max(64),
+  points: external_exports.array(HistoryPointSchema).default([])
+});
+var HistoryCacheSchema = external_exports.object({
+  updated_at: external_exports.string().trim().max(64).nullable().default(null),
+  series: external_exports.record(external_exports.string(), HistorySeriesSchema).default({})
+});
+var PaPeriodReturnSchema = external_exports.object({
+  period: external_exports.string().trim().min(1).max(32),
+  twr_pct: external_exports.number().finite().nullable().optional(),
+  mwr_pct: external_exports.number().finite().nullable().optional(),
+  benchmark_pct: external_exports.number().finite().nullable().optional(),
+  start_date: external_exports.string().trim().max(32).nullable().optional(),
+  end_date: external_exports.string().trim().max(32).nullable().optional()
+});
+var PaPerformanceSchema = external_exports.object({
+  updated_at: external_exports.string().trim().min(1).max(64),
+  provider: external_exports.string().trim().min(1).max(64).default("ibkr"),
+  base_currency: CurrencySchema.optional(),
+  periods: external_exports.array(PaPeriodReturnSchema).max(20).default([]),
+  note: external_exports.string().trim().max(400).optional()
+});
+var MacroRegimeLabelSchema = external_exports.enum(["CALM", "ELEVATED", "HIGH_VOL", "STRESS"]);
+var MacroRegimeSchema = external_exports.object({
+  updated_at: external_exports.string().trim().min(1).max(64),
+  vix: external_exports.number().finite().nullable().default(null),
+  us10y_pct: external_exports.number().finite().nullable().default(null),
+  us3m_pct: external_exports.number().finite().nullable().default(null),
+  hy_credit_ratio: external_exports.number().finite().nullable().default(null),
+  dxy: external_exports.number().finite().nullable().default(null),
+  regime_label: MacroRegimeLabelSchema.default("CALM"),
+  notes: external_exports.string().trim().max(400).nullable().optional()
+});
+var MarketCacheEntrySchema = external_exports.object({
+  price: NonNegativeNumber,
+  regular_price: NonNegativeNumber.nullable().optional(),
+  extended_price: NonNegativeNumber.nullable().optional(),
+  market_state: external_exports.string().trim().max(24).nullable().optional(),
+  quote_time: external_exports.string().trim().max(64).nullable().optional(),
+  fifty_two_week_high: external_exports.number().finite().positive().nullable().optional(),
+  fifty_two_week_low: external_exports.number().finite().positive().nullable().optional(),
+  currency: CurrencySchema.default("USD"),
+  sparkline: external_exports.array(external_exports.number().finite()).default([]),
+  change_1d_pct: external_exports.number().finite().nullable().default(null),
+  change_1m_pct: external_exports.number().finite().nullable().default(null)
+});
+var MarketCacheSchema = external_exports.object({
+  updated_at: external_exports.string().trim().max(64).nullable().default(null),
+  vix: external_exports.number().finite().nullable().default(null),
+  vix_sparkline: external_exports.array(external_exports.number().finite()).default([]),
+  fx_rates: external_exports.record(CurrencySchema, external_exports.number().finite().positive()).optional(),
+  macro_regime: MacroRegimeSchema.nullable().optional(),
+  quotes: external_exports.record(external_exports.string(), MarketCacheEntrySchema).default({})
+});
+var FundamentalsPeriodSchema = external_exports.object({
+  period_end: IsoDateSchema,
+  filed_date: IsoDateNullableOptional,
+  fiscal_year: external_exports.number().int().min(1990).max(2100).nullable().optional(),
+  fiscal_period: external_exports.string().trim().min(1).max(16),
+  form: external_exports.string().trim().max(16).optional(),
+  accession: external_exports.string().trim().max(32).optional(),
+  revenue_m: external_exports.number().finite().nullable().optional(),
+  gross_profit_m: external_exports.number().finite().nullable().optional(),
+  operating_income_m: external_exports.number().finite().nullable().optional(),
+  net_income_m: external_exports.number().finite().nullable().optional(),
+  ocf_m: external_exports.number().finite().nullable().optional(),
+  capex_m: external_exports.number().finite().nullable().optional(),
+  fcf_m: external_exports.number().finite().nullable().optional(),
+  sbc_m: external_exports.number().finite().nullable().optional(),
+  diluted_shares_m: external_exports.number().finite().positive().nullable().optional(),
+  eps_diluted: external_exports.number().finite().nullable().optional(),
+  accounts_receivable_m: external_exports.number().finite().nullable().optional(),
+  inventory_m: external_exports.number().finite().nullable().optional(),
+  cogs_m: external_exports.number().finite().nullable().optional(),
+  cash_and_st_inv_m: external_exports.number().finite().nullable().optional(),
+  total_debt_m: external_exports.number().finite().nullable().optional(),
+  net_cash_b: external_exports.number().finite().nullable().optional(),
+  gross_margin_pct: external_exports.number().finite().nullable().optional(),
+  operating_margin_pct: external_exports.number().finite().nullable().optional(),
+  fcf_margin_pct: external_exports.number().finite().nullable().optional(),
+  ocf_to_ni_pct: external_exports.number().finite().nullable().optional(),
+  sbc_pct_rev: external_exports.number().finite().nullable().optional(),
+  dso_days: external_exports.number().finite().nullable().optional(),
+  dio_days: external_exports.number().finite().nullable().optional()
+});
+var FundamentalsRatiosSchema = external_exports.object({
+  gross_margin_pct: external_exports.number().finite().nullable().optional(),
+  operating_margin_pct: external_exports.number().finite().nullable().optional(),
+  dso_days: external_exports.number().finite().nullable().optional(),
+  dio_days: external_exports.number().finite().nullable().optional(),
+  ocf_to_ni_pct: external_exports.number().finite().nullable().optional(),
+  fcf_margin_pct: external_exports.number().finite().nullable().optional(),
+  sbc_pct_rev: external_exports.number().finite().nullable().optional(),
+  net_cash_b: external_exports.number().finite().nullable().optional(),
+  diluted_shares_yoy_pct: external_exports.number().finite().nullable().optional(),
+  ttm_eps: external_exports.number().finite().nullable().optional(),
+  ttm_fcf_per_share: external_exports.number().finite().nullable().optional(),
+  ttm_rev_per_share: external_exports.number().finite().nullable().optional()
+});
+var FundamentalsSchema = external_exports.object({
+  ticker: TickerSchema,
+  cik: external_exports.string().trim().max(16).nullable().optional(),
+  updated_at: external_exports.string().trim().min(1).max(64),
+  source: external_exports.enum(["sec_xbrl", "manual", "hybrid"]).default("sec_xbrl"),
+  currency: CurrencySchema.default("USD"),
+  latest_periodic_accession: external_exports.string().trim().max(32).nullable().optional(),
+  quarterly: external_exports.array(FundamentalsPeriodSchema).max(24).default([]),
+  annual: external_exports.array(FundamentalsPeriodSchema).max(10).default([]),
+  latest_ratios: FundamentalsRatiosSchema.default({}),
+  overrides: external_exports.record(external_exports.string(), external_exports.union([external_exports.number().finite(), external_exports.string().max(240), external_exports.null()])).optional()
+});
+var InsiderWindowSchema = external_exports.object({
+  disc_buy_usd: NonNegativeNumber.default(0),
+  disc_sell_usd: NonNegativeNumber.default(0),
+  plan_sell_usd: NonNegativeNumber.default(0),
+  distinct_buyers: external_exports.number().int().min(0).default(0),
+  distinct_sellers: external_exports.number().int().min(0).default(0)
+});
+var InsiderFilingRowSchema = external_exports.object({
+  filing_date: IsoDateSchema,
+  accession: external_exports.string().trim().min(1).max(32),
+  form: external_exports.string().trim().max(16).default("4"),
+  owner_name: external_exports.string().trim().min(1).max(160),
+  title: external_exports.string().trim().max(160).default(""),
+  is_director: external_exports.boolean().default(false),
+  code: external_exports.string().trim().min(1).max(16),
+  shares: NonNegativeNumber.default(0),
+  price: NonNegativeNumber.nullable().default(null),
+  value_usd: NonNegativeNumber.default(0),
+  is_10b5_1: external_exports.boolean().default(false),
+  url: SafeHttpsUrlSchema.nullable().optional()
+});
+var InsidersSchema = external_exports.object({
+  ticker: TickerSchema,
+  cik: external_exports.string().trim().max(16).nullable().optional(),
+  updated_at: external_exports.string().trim().min(1).max(64),
+  cached_accessions: external_exports.array(external_exports.string().trim().max(32)).max(100).default([]),
+  window_90d: InsiderWindowSchema.default({
+    disc_buy_usd: 0,
+    disc_sell_usd: 0,
+    plan_sell_usd: 0,
+    distinct_buyers: 0,
+    distinct_sellers: 0
+  }),
+  window_12m: InsiderWindowSchema.default({
+    disc_buy_usd: 0,
+    disc_sell_usd: 0,
+    plan_sell_usd: 0,
+    distinct_buyers: 0,
+    distinct_sellers: 0
+  }),
+  flags: external_exports.array(external_exports.string().trim().min(1).max(160)).max(20).default([]),
+  recent_filings: external_exports.array(InsiderFilingRowSchema).max(100).default([])
+});
+var IntelHistoryEntrySchema = external_exports.object({
+  recorded_at: external_exports.string().trim().min(1).max(64),
+  provider: external_exports.string().trim().min(1).max(64).default("ibkr"),
+  period: external_exports.string().trim().max(80).nullable().optional(),
+  eps_actual: external_exports.number().finite().nullable().optional(),
+  eps_est: external_exports.number().finite().nullable().optional(),
+  rev_actual_b: external_exports.number().finite().nullable().optional(),
+  rev_est_b: external_exports.number().finite().nullable().optional(),
+  fy1_eps_est: external_exports.number().finite().nullable().optional(),
+  fy2_eps_est: external_exports.number().finite().nullable().optional(),
+  implied_move_pct: external_exports.number().finite().min(0).max(200).nullable().optional(),
+  iv_30d_pct: external_exports.number().finite().min(0).max(500).nullable().optional(),
+  iv_pct_52w: external_exports.number().finite().min(0).max(100).nullable().optional(),
+  headline: external_exports.string().trim().max(240).nullable().optional()
+});
+var ThemeStanceSchema = external_exports.enum(["beneficiary", "hedged_tollbooth", "at_risk", "watch"]);
+var ThemeExposureSchema = external_exports.object({
+  ticker: TickerSchema,
+  stance: ThemeStanceSchema,
+  note: external_exports.string().trim().min(1).max(400)
+});
+var ThemeSignpostSchema = external_exports.object({
+  id: external_exports.string().trim().min(1).max(64).regex(/^[a-zA-Z0-9._-]+$/, "Signpost id must be alphanumeric/kebab-case"),
+  metric: external_exports.string().trim().min(1).max(200),
+  threshold: external_exports.string().trim().max(160).optional(),
+  status: external_exports.enum(["watching", "confirmed", "falsified"]).default("watching"),
+  evidence: external_exports.string().trim().max(400).nullable().optional(),
+  last_checked: IsoDateNullableOptional
+});
+var ThemeObjectSchema = external_exports.object({
+  slug: ThemeSlugSchema,
+  title: external_exports.string().trim().min(1).max(140),
+  updated_at: external_exports.string().trim().min(1).max(64),
+  relationship_mode: external_exports.enum(["zero_sum", "symbiotic", "cyclical", "structural"]).default("structural"),
+  summary: external_exports.string().trim().min(1).max(1200),
+  shared_assumptions: external_exports.array(external_exports.string().trim().min(1).max(400)).max(16).default([]),
+  exposures: external_exports.array(ThemeExposureSchema).max(30).default([]),
+  signposts: external_exports.array(ThemeSignpostSchema).max(20).default([]),
+  sources: external_exports.array(ProvenanceSourceSchema).max(16).default([])
+});
+var WatchdogAlertSeveritySchema = external_exports.enum(["high", "medium", "info"]);
+var WatchdogAlertSchema = external_exports.object({
+  id: external_exports.string().trim().min(1).max(120),
+  detected_at: external_exports.string().trim().min(1).max(64),
+  severity: WatchdogAlertSeveritySchema.default("medium"),
+  kind: external_exports.string().trim().min(1).max(64),
+  ticker: TickerSchema.nullable().optional(),
+  theme_slug: ThemeSlugSchema.nullable().optional(),
+  title: external_exports.string().trim().min(1).max(180),
+  detail: external_exports.string().trim().max(600).default(""),
+  acknowledged: external_exports.boolean().default(false)
+});
+var DossierUpsertSchema = ThesisUpdateSchema.extend({
+  model: DossierModelSchema.optional(),
+  memo_md: external_exports.string().max(2e5).optional(),
+  intel: DossierIntelSchema.optional()
+});
+var IntelIngestSchema = external_exports.object({
+  ticker: TickerSchema.optional(),
+  intel: DossierIntelSchema.optional(),
+  history_series: external_exports.array(HistorySeriesSchema).max(40).optional(),
+  pa_performance: PaPerformanceSchema.optional()
+}).refine((v) => Boolean(v.intel || v.history_series && v.history_series.length > 0 || v.pa_performance), {
+  message: "Provide at least one of intel, history_series, or pa_performance"
+}).refine((v) => !v.intel || Boolean(v.ticker), {
+  message: "ticker is required when ingesting dossier intel"
+});
+var BacktestRequestSchema = external_exports.object({
+  candidate_ticker: TickerSchema,
+  candidate_yf_symbol: external_exports.string().trim().min(1).max(24).optional(),
+  target_weight_pct: external_exports.number().finite().min(0.5).max(50).default(5),
+  funding_source: external_exports.string().trim().min(1).max(40).default("cash").refine(
+    (val) => {
+      if (val === "cash" || val === "pro_rata") return true;
+      if (val.startsWith("swap:")) {
+        const sym = val.slice(5).trim().toUpperCase();
+        return TICKER_REGEX.test(sym) && !sym.includes("..");
+      }
+      return false;
+    },
+    { message: 'funding_source must be "cash", "pro_rata", or "swap:<TICKER>"' }
+  ),
+  rebalance_band_pct: external_exports.number().finite().min(5).max(100).default(25),
+  include_external_wealth: external_exports.boolean().default(true),
+  rf_pct: external_exports.number().finite().min(0).max(20).optional(),
+  demo: external_exports.boolean().optional()
+});
+var EtfMetadataSchema = external_exports.object({
+  isin: external_exports.string().trim().max(24).optional(),
+  domicile: external_exports.string().trim().max(40).optional(),
+  us_situs: external_exports.boolean().optional(),
+  ocf_pct: external_exports.number().finite().min(0).max(10).optional(),
+  us_weight: external_exports.number().finite().min(0).max(1).optional(),
+  other_semis_residual: external_exports.number().finite().min(0).max(1).optional()
+}).catchall(external_exports.union([external_exports.number().finite(), external_exports.string().max(120), external_exports.boolean()]));
+var EtfWeightsConfigSchema = external_exports.object({
+  as_of: external_exports.string().trim().max(64).optional(),
+  note: external_exports.string().trim().max(400).optional(),
+  etf_weights: external_exports.record(
+    external_exports.string().trim().min(1).max(24),
+    external_exports.record(external_exports.string().trim().min(1).max(64), external_exports.union([external_exports.number().finite().min(0), external_exports.string().trim().max(240)]))
+  ).default({}),
+  etf_metadata: external_exports.record(external_exports.string().trim().min(1).max(24), EtfMetadataSchema).default({})
 });
 function defaultProfile() {
   return ProfileSchema.parse({});
 }
 
 // src/server/storage.ts
-var import_node_fs = __toESM(require("node:fs"), 1);
-var import_node_os = __toESM(require("node:os"), 1);
-var import_node_path = __toESM(require("node:path"), 1);
 var SecurityError = class extends Error {
   constructor(message) {
     super(message);
@@ -33777,24 +34108,37 @@ function safeResolve(baseDir, ...segments) {
   }
   return target;
 }
-function ensureDataDir(dataDir) {
-  import_node_fs.default.mkdirSync(dataDir, { recursive: true, mode: 448 });
-  const thesesDir = safeResolve(dataDir, "theses");
-  import_node_fs.default.mkdirSync(thesesDir, { recursive: true, mode: 448 });
+function ensurePrivateDir(dir) {
+  import_node_fs.default.mkdirSync(dir, { recursive: true, mode: 448 });
   try {
-    import_node_fs.default.chmodSync(dataDir, 448);
-    import_node_fs.default.chmodSync(thesesDir, 448);
+    import_node_fs.default.chmodSync(dir, 448);
   } catch {
   }
 }
+function ensureDataDir(dataDir) {
+  ensurePrivateDir(dataDir);
+  ensurePrivateDir(safeResolve(dataDir, "theses"));
+  ensurePrivateDir(safeResolve(dataDir, "dossiers"));
+  ensurePrivateDir(safeResolve(dataDir, "themes"));
+  ensurePrivateDir(safeResolve(dataDir, "macro"));
+}
 function atomicWriteFile(targetPath, content) {
   const dir = import_node_path.default.dirname(targetPath);
-  import_node_fs.default.mkdirSync(dir, { recursive: true, mode: 448 });
+  ensurePrivateDir(dir);
   const tmpPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
   import_node_fs.default.writeFileSync(tmpPath, content, { encoding: "utf-8", mode: 384 });
   import_node_fs.default.renameSync(tmpPath, targetPath);
   try {
     import_node_fs.default.chmodSync(targetPath, 384);
+  } catch {
+  }
+}
+function appendPrivateJsonl(filePath, lines) {
+  if (lines.length === 0) return;
+  ensurePrivateDir(import_node_path.default.dirname(filePath));
+  import_node_fs.default.appendFileSync(filePath, lines.join(""), { encoding: "utf-8", mode: 384 });
+  try {
+    import_node_fs.default.chmodSync(filePath, 384);
   } catch {
   }
 }
@@ -33833,18 +34177,26 @@ function savePortfolio(dataDir, portfolio) {
 }
 function loadEtfWeights(dataDir, pluginRoot) {
   const defaultPath = import_node_path.default.resolve(pluginRoot, "defaults", "etf_weights.json");
-  const baseCfg = import_node_fs.default.existsSync(defaultPath) ? JSON.parse(import_node_fs.default.readFileSync(defaultPath, "utf-8")) : { etf_weights: {}, etf_metadata: {} };
+  const baseCfg = import_node_fs.default.existsSync(defaultPath) ? EtfWeightsConfigSchema.parse(JSON.parse(import_node_fs.default.readFileSync(defaultPath, "utf-8"))) : { etf_weights: {}, etf_metadata: {} };
   const customPath = safeResolve(dataDir, "etf_weights.json");
   if (!import_node_fs.default.existsSync(customPath)) {
     return baseCfg;
   }
-  const customCfg = JSON.parse(import_node_fs.default.readFileSync(customPath, "utf-8"));
+  const rawCustom = JSON.parse(import_node_fs.default.readFileSync(customPath, "utf-8"));
+  const customCfg = EtfWeightsConfigSchema.parse(rawCustom);
   return {
     as_of: customCfg.as_of ?? baseCfg.as_of,
     note: customCfg.note ?? baseCfg.note,
-    etf_weights: { ...baseCfg.etf_weights, ...customCfg.etf_weights ?? {} },
-    etf_metadata: { ...baseCfg.etf_metadata, ...customCfg.etf_metadata ?? {} }
+    etf_weights: { ...baseCfg.etf_weights, ...customCfg.etf_weights },
+    etf_metadata: { ...baseCfg.etf_metadata, ...customCfg.etf_metadata }
   };
+}
+function saveEtfWeights(dataDir, config2) {
+  ensureDataDir(dataDir);
+  const validated = EtfWeightsConfigSchema.parse(config2);
+  const filePath = safeResolve(dataDir, "etf_weights.json");
+  atomicWriteFile(filePath, JSON.stringify(validated, null, 2) + "\n");
+  return validated;
 }
 function loadCatalysts(dataDir) {
   const filePath = safeResolve(dataDir, "catalysts.yaml");
@@ -33879,37 +34231,52 @@ function saveEdgarCache(dataDir, state) {
   const filePath = safeResolve(dataDir, "edgar_latest.json");
   atomicWriteFile(filePath, JSON.stringify(state, null, 2) + "\n");
 }
+function emptyMarketCache() {
+  return {
+    updated_at: null,
+    vix: null,
+    vix_sparkline: [],
+    quotes: {}
+  };
+}
 function loadMarketCache(dataDir) {
   const filePath = safeResolve(dataDir, "market_cache.json");
   if (!import_node_fs.default.existsSync(filePath)) {
-    return {
-      updated_at: null,
-      vix: null,
-      vix_sparkline: [],
-      quotes: {}
-    };
+    return emptyMarketCache();
   }
   try {
-    const parsed = JSON.parse(import_node_fs.default.readFileSync(filePath, "utf-8"));
-    return {
-      updated_at: parsed.updated_at ?? null,
-      vix: typeof parsed.vix === "number" ? parsed.vix : null,
-      vix_sparkline: Array.isArray(parsed.vix_sparkline) ? parsed.vix_sparkline : [],
-      quotes: parsed.quotes ?? {}
-    };
+    const raw = JSON.parse(import_node_fs.default.readFileSync(filePath, "utf-8"));
+    const strict = MarketCacheSchema.safeParse(raw);
+    if (strict.success) {
+      return strict.data;
+    }
+    const salvagedQuotes = {};
+    if (raw && typeof raw === "object" && raw.quotes && typeof raw.quotes === "object") {
+      for (const [k, v] of Object.entries(raw.quotes)) {
+        const parsedEntry = MarketCacheEntrySchema.safeParse(v);
+        if (parsedEntry.success) {
+          salvagedQuotes[k] = parsedEntry.data;
+        }
+      }
+    }
+    const salvagedMacro = MacroRegimeSchema.safeParse(raw?.macro_regime);
+    return MarketCacheSchema.parse({
+      updated_at: typeof raw?.updated_at === "string" ? raw.updated_at : null,
+      vix: typeof raw?.vix === "number" && Number.isFinite(raw.vix) ? raw.vix : null,
+      vix_sparkline: Array.isArray(raw?.vix_sparkline) ? raw.vix_sparkline.filter((x) => typeof x === "number" && Number.isFinite(x)) : [],
+      macro_regime: salvagedMacro.success ? salvagedMacro.data : void 0,
+      quotes: salvagedQuotes
+    });
   } catch {
-    return {
-      updated_at: null,
-      vix: null,
-      vix_sparkline: [],
-      quotes: {}
-    };
+    return emptyMarketCache();
   }
 }
 function saveMarketCache(dataDir, state) {
   ensureDataDir(dataDir);
+  const validated = MarketCacheSchema.parse(state);
   const filePath = safeResolve(dataDir, "market_cache.json");
-  atomicWriteFile(filePath, JSON.stringify(state, null, 2) + "\n");
+  atomicWriteFile(filePath, JSON.stringify(validated, null, 2) + "\n");
+  return validated;
 }
 function listThesisFiles(dataDir) {
   const thesesDir = safeResolve(dataDir, "theses");
@@ -33941,16 +34308,267 @@ function writeThesisFile(dataDir, ticker, content) {
   atomicWriteFile(filePath, content);
   return filePath;
 }
+function getDossierDir(dataDir, ticker) {
+  const sym = normalizeTicker(ticker);
+  return safeResolve(dataDir, "dossiers", sym);
+}
+function ensureDossierDir(dataDir, ticker) {
+  ensureDataDir(dataDir);
+  const dir = getDossierDir(dataDir, ticker);
+  ensurePrivateDir(dir);
+  return dir;
+}
+function loadDossierModel(dataDir, ticker) {
+  const filePath = safeResolve(getDossierDir(dataDir, ticker), "model.json");
+  if (!import_node_fs.default.existsSync(filePath)) return null;
+  const parsed = JSON.parse(import_node_fs.default.readFileSync(filePath, "utf-8"));
+  return DossierModelSchema.parse(parsed);
+}
+function saveDossierModel(dataDir, ticker, model) {
+  const dir = ensureDossierDir(dataDir, ticker);
+  const validated = DossierModelSchema.parse(model);
+  const filePath = safeResolve(dir, "model.json");
+  atomicWriteFile(filePath, JSON.stringify(validated, null, 2) + "\n");
+  return validated;
+}
+function hasDossierMemo(dataDir, ticker) {
+  const filePath = safeResolve(getDossierDir(dataDir, ticker), "memo.md");
+  return import_node_fs.default.existsSync(filePath);
+}
+function loadDossierMemo(dataDir, ticker) {
+  const filePath = safeResolve(getDossierDir(dataDir, ticker), "memo.md");
+  if (!import_node_fs.default.existsSync(filePath)) return null;
+  return import_node_fs.default.readFileSync(filePath, "utf-8");
+}
+function saveDossierMemo(dataDir, ticker, content) {
+  const dir = ensureDossierDir(dataDir, ticker);
+  const filePath = safeResolve(dir, "memo.md");
+  atomicWriteFile(filePath, content);
+  return filePath;
+}
+function loadDossierIntel(dataDir, ticker) {
+  const filePath = safeResolve(getDossierDir(dataDir, ticker), "intel.json");
+  if (!import_node_fs.default.existsSync(filePath)) return null;
+  const parsed = JSON.parse(import_node_fs.default.readFileSync(filePath, "utf-8"));
+  return DossierIntelSchema.parse(parsed);
+}
+function saveDossierIntel(dataDir, ticker, intel) {
+  const dir = ensureDossierDir(dataDir, ticker);
+  const validated = DossierIntelSchema.parse(intel);
+  const filePath = safeResolve(dir, "intel.json");
+  atomicWriteFile(filePath, JSON.stringify(validated, null, 2) + "\n");
+  return validated;
+}
+function loadDossierFundamentals(dataDir, ticker) {
+  const filePath = safeResolve(getDossierDir(dataDir, ticker), "fundamentals.json");
+  if (!import_node_fs.default.existsSync(filePath)) return null;
+  const parsed = JSON.parse(import_node_fs.default.readFileSync(filePath, "utf-8"));
+  return FundamentalsSchema.parse(parsed);
+}
+function saveDossierFundamentals(dataDir, ticker, fundamentals) {
+  const sym = normalizeTicker(ticker);
+  const dir = ensureDossierDir(dataDir, sym);
+  const validated = FundamentalsSchema.parse({ ...fundamentals, ticker: sym });
+  const filePath = safeResolve(dir, "fundamentals.json");
+  atomicWriteFile(filePath, JSON.stringify(validated, null, 2) + "\n");
+  return validated;
+}
+function loadDossierInsiders(dataDir, ticker) {
+  const filePath = safeResolve(getDossierDir(dataDir, ticker), "insiders.json");
+  if (!import_node_fs.default.existsSync(filePath)) return null;
+  const parsed = JSON.parse(import_node_fs.default.readFileSync(filePath, "utf-8"));
+  return InsidersSchema.parse(parsed);
+}
+function saveDossierInsiders(dataDir, ticker, insiders) {
+  const sym = normalizeTicker(ticker);
+  const dir = ensureDossierDir(dataDir, sym);
+  const validated = InsidersSchema.parse({ ...insiders, ticker: sym });
+  const filePath = safeResolve(dir, "insiders.json");
+  atomicWriteFile(filePath, JSON.stringify(validated, null, 2) + "\n");
+  return validated;
+}
+function appendIntelHistory(dataDir, ticker, entry) {
+  const dir = ensureDossierDir(dataDir, ticker);
+  const validated = IntelHistoryEntrySchema.parse(entry);
+  const filePath = safeResolve(dir, "intel_history.jsonl");
+  appendPrivateJsonl(filePath, [JSON.stringify(validated) + "\n"]);
+  return validated;
+}
+function loadIntelHistory(dataDir, ticker, limit = 50) {
+  const filePath = safeResolve(getDossierDir(dataDir, ticker), "intel_history.jsonl");
+  if (!import_node_fs.default.existsSync(filePath)) return [];
+  const lines = import_node_fs.default.readFileSync(filePath, "utf-8").split(/\r?\n/);
+  const entries = [];
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    try {
+      entries.push(IntelHistoryEntrySchema.parse(JSON.parse(trimmed)));
+    } catch {
+    }
+  }
+  return entries.reverse().slice(0, limit);
+}
+function getThemeYamlPath(dataDir, slug) {
+  const norm = normalizeThemeSlug(slug);
+  return safeResolve(dataDir, "themes", `${norm}.yaml`);
+}
+function getThemeMemoPath(dataDir, slug) {
+  const norm = normalizeThemeSlug(slug);
+  return safeResolve(dataDir, "themes", `${norm}.md`);
+}
+function listThemes(dataDir) {
+  const themesDir = safeResolve(dataDir, "themes");
+  if (!import_node_fs.default.existsSync(themesDir)) return [];
+  const files = import_node_fs.default.readdirSync(themesDir).filter((f) => (f.endsWith(".yaml") || f.endsWith(".yml")) && !f.startsWith(".")).sort();
+  const out = [];
+  for (const fileName of files) {
+    const filePath = safeResolve(themesDir, fileName);
+    try {
+      const parsed = yaml.load(import_node_fs.default.readFileSync(filePath, "utf-8"));
+      if (parsed && typeof parsed === "object") {
+        out.push(ThemeObjectSchema.parse(parsed));
+      }
+    } catch {
+    }
+  }
+  return out;
+}
+function loadTheme(dataDir, slug) {
+  const filePath = getThemeYamlPath(dataDir, slug);
+  if (!import_node_fs.default.existsSync(filePath)) return null;
+  const parsed = yaml.load(import_node_fs.default.readFileSync(filePath, "utf-8"));
+  if (!parsed || typeof parsed !== "object") return null;
+  return ThemeObjectSchema.parse(parsed);
+}
+function saveTheme(dataDir, theme) {
+  ensureDataDir(dataDir);
+  const normSlug = normalizeThemeSlug(theme.slug);
+  const validated = ThemeObjectSchema.parse({ ...theme, slug: normSlug });
+  const filePath = getThemeYamlPath(dataDir, normSlug);
+  atomicWriteFile(filePath, yaml.dump(validated, { sortKeys: false, lineWidth: 120 }));
+  return validated;
+}
+function loadThemeMemo(dataDir, slug) {
+  const filePath = getThemeMemoPath(dataDir, slug);
+  if (!import_node_fs.default.existsSync(filePath)) return null;
+  return import_node_fs.default.readFileSync(filePath, "utf-8");
+}
+function saveThemeMemo(dataDir, slug, content) {
+  ensureDataDir(dataDir);
+  const filePath = getThemeMemoPath(dataDir, slug);
+  atomicWriteFile(filePath, content);
+  return filePath;
+}
+function loadMacroRegime(dataDir) {
+  const filePath = safeResolve(dataDir, "macro", "regimes.yaml");
+  if (!import_node_fs.default.existsSync(filePath)) return null;
+  const parsed = yaml.load(import_node_fs.default.readFileSync(filePath, "utf-8"));
+  if (!parsed || typeof parsed !== "object") return null;
+  return MacroRegimeSchema.parse(parsed);
+}
+function saveMacroRegime(dataDir, regime) {
+  ensureDataDir(dataDir);
+  const validated = MacroRegimeSchema.parse(regime);
+  const filePath = safeResolve(dataDir, "macro", "regimes.yaml");
+  atomicWriteFile(filePath, yaml.dump(validated, { sortKeys: false, lineWidth: 120 }));
+  return validated;
+}
+function appendWatchdogAlerts(dataDir, alerts) {
+  if (alerts.length === 0) return [];
+  ensureDataDir(dataDir);
+  const validated = alerts.map((a) => WatchdogAlertSchema.parse(a));
+  const filePath = safeResolve(dataDir, "alerts_log.jsonl");
+  appendPrivateJsonl(
+    filePath,
+    validated.map((v) => JSON.stringify(v) + "\n")
+  );
+  return validated;
+}
+function loadWatchdogAlerts(dataDir, opts) {
+  const filePath = safeResolve(dataDir, "alerts_log.jsonl");
+  if (!import_node_fs.default.existsSync(filePath)) return [];
+  const limit = typeof opts === "number" ? opts : opts?.limit ?? 100;
+  const onlyUnack = typeof opts === "object" && opts !== null ? Boolean(opts.onlyUnacknowledged) : false;
+  const lines = import_node_fs.default.readFileSync(filePath, "utf-8").split(/\r?\n/);
+  const entries = [];
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = WatchdogAlertSchema.parse(JSON.parse(trimmed));
+      if (!onlyUnack || !parsed.acknowledged) {
+        entries.push(parsed);
+      }
+    } catch {
+    }
+  }
+  return entries.reverse().slice(0, limit);
+}
+function ackWatchdogAlerts(dataDir, ids) {
+  const filePath = safeResolve(dataDir, "alerts_log.jsonl");
+  if (!import_node_fs.default.existsSync(filePath)) {
+    return { updated: 0, alerts: [] };
+  }
+  const idList = Array.isArray(ids) ? ids : [ids];
+  const ackAll = idList.includes("*");
+  const idSet = new Set(idList);
+  const lines = import_node_fs.default.readFileSync(filePath, "utf-8").split(/\r?\n/);
+  const parsedEntries = [];
+  let updated = 0;
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    try {
+      const item = WatchdogAlertSchema.parse(JSON.parse(trimmed));
+      if (!item.acknowledged && (ackAll || idSet.has(item.id))) {
+        parsedEntries.push({ ...item, acknowledged: true });
+        updated += 1;
+      } else {
+        parsedEntries.push(item);
+      }
+    } catch {
+    }
+  }
+  if (updated > 0) {
+    ensureDataDir(dataDir);
+    atomicWriteFile(filePath, parsedEntries.map((e) => JSON.stringify(e) + "\n").join(""));
+  }
+  return { updated, alerts: [...parsedEntries].reverse() };
+}
+function loadHistoryCache(dataDir) {
+  const filePath = safeResolve(dataDir, "history_cache.json");
+  if (!import_node_fs.default.existsSync(filePath)) {
+    return { updated_at: null, series: {} };
+  }
+  const parsed = JSON.parse(import_node_fs.default.readFileSync(filePath, "utf-8"));
+  return HistoryCacheSchema.parse(parsed);
+}
+function saveHistoryCache(dataDir, state) {
+  ensureDataDir(dataDir);
+  const validated = HistoryCacheSchema.parse(state);
+  const filePath = safeResolve(dataDir, "history_cache.json");
+  atomicWriteFile(filePath, JSON.stringify(validated, null, 2) + "\n");
+  return validated;
+}
+function loadPaPerformance(dataDir) {
+  const filePath = safeResolve(dataDir, "pa_performance.json");
+  if (!import_node_fs.default.existsSync(filePath)) return null;
+  const parsed = JSON.parse(import_node_fs.default.readFileSync(filePath, "utf-8"));
+  return PaPerformanceSchema.parse(parsed);
+}
+function savePaPerformance(dataDir, state) {
+  ensureDataDir(dataDir);
+  const validated = PaPerformanceSchema.parse(state);
+  const filePath = safeResolve(dataDir, "pa_performance.json");
+  atomicWriteFile(filePath, JSON.stringify(validated, null, 2) + "\n");
+  return validated;
+}
 function appendThesisTestLog(dataDir, entry) {
   ensureDataDir(dataDir);
   const validated = ThesisTestRecordSchema.parse(entry);
   const filePath = safeResolve(dataDir, "test_log.jsonl");
-  const line = JSON.stringify(validated) + "\n";
-  import_node_fs.default.appendFileSync(filePath, line, { encoding: "utf-8", mode: 384 });
-  try {
-    import_node_fs.default.chmodSync(filePath, 384);
-  } catch {
-  }
+  appendPrivateJsonl(filePath, [JSON.stringify(validated) + "\n"]);
   return validated;
 }
 function loadThesisTestLog(dataDir, ticker, limit = 25) {
@@ -33976,32 +34594,45 @@ function loadThesisTestLog(dataDir, ticker, limit = 25) {
 }
 
 // src/server/edgar.ts
-var import_node_fs2 = __toESM(require("node:fs"), 1);
-var DEFAULT_USER_AGENT = "InvestmentOS-Plugin/0.2.0 (https://github.com/bakzs/investment-os-plugin)";
-var IMPORTANT_FORMS = /* @__PURE__ */ new Set([
-  "10-K",
-  "10-Q",
+var DEFAULT_SEC_USER_AGENT = "InvestmentOS-Plugin/0.5.0 (contact@investment-os.local)";
+var SEC_PACING_MS = 150;
+var PERIODIC_FORMS = /* @__PURE__ */ new Set(["10-K", "10-Q", "20-F", "10-K/A", "10-Q/A", "20-F/A"]);
+var EVENT_FORMS = /* @__PURE__ */ new Set([
   "8-K",
-  "20-F",
+  "8-K/A",
   "6-K",
-  "DEF 14A",
+  "NT 10-Q",
+  "NT 10-K",
+  "424B4",
+  "424B5",
   "S-1",
   "S-3",
-  "424B5",
+  "DEF 14A",
   "SC 13D",
-  "SC 13G"
+  "SC 13D/A",
+  "SC 13G",
+  "SC 13G/A"
 ]);
+var IMPORTANT_FORMS = /* @__PURE__ */ new Set([...PERIODIC_FORMS, ...EVENT_FORMS]);
 var TICKERS_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1e3;
+var EIGHT_K_RED_FLAG_ITEMS = {
+  "4.01": { severity: "high", label: "Change in Registrant's Certifying Accountant (Item 4.01)" },
+  "4.02": { severity: "high", label: "Non-Reliance on Prior Financial Statements / Restatement (Item 4.02)" },
+  "1.02": { severity: "medium", label: "Termination of a Material Definitive Agreement (Item 1.02)" },
+  "3.02": { severity: "medium", label: "Unregistered Sales of Equity Securities / Dilution (Item 3.02)" },
+  "5.02": { severity: "medium", label: "Departure or Appointment of Directors / Principal Officers (Item 5.02)" }
+};
 function resolveSecUserAgent(profile, env = process.env) {
   const fromEnv = env.SEC_USER_AGENT?.trim();
   if (fromEnv) return fromEnv;
   if (profile.edgar_user_agent?.trim()) return profile.edgar_user_agent.trim();
-  return DEFAULT_USER_AGENT;
+  return DEFAULT_SEC_USER_AGENT;
 }
-async function sleep(ms) {
+async function sleepMs(ms) {
+  if (ms <= 0) return;
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-async function loadSecTickerMap(dataDir, userAgent) {
+async function loadSecTickerMap(dataDir, userAgent, fetchImpl = fetch) {
   const cachePath = safeResolve(dataDir, "sec_tickers_cache.json");
   let entries = null;
   if (import_node_fs2.default.existsSync(cachePath)) {
@@ -34015,7 +34646,7 @@ async function loadSecTickerMap(dataDir, userAgent) {
     }
   }
   if (!entries) {
-    const resp = await fetch("https://www.sec.gov/files/company_tickers.json", {
+    const resp = await fetchImpl("https://www.sec.gov/files/company_tickers.json", {
       headers: { "User-Agent": userAgent, Accept: "application/json" },
       signal: AbortSignal.timeout(12e3)
     });
@@ -34041,40 +34672,72 @@ async function loadSecTickerMap(dataDir, userAgent) {
   }
   return map3;
 }
-async function fetchRecentFilings(cikPadded, userAgent, limit = 6) {
+async function fetchSecSubmissions(cikPadded, userAgent, fetchImpl = fetch) {
   const url2 = `https://data.sec.gov/submissions/CIK${cikPadded}.json`;
-  const resp = await fetch(url2, {
+  const resp = await fetchImpl(url2, {
     headers: { "User-Agent": userAgent, Accept: "application/json" },
     signal: AbortSignal.timeout(1e4)
   });
   if (!resp.ok) {
     throw new Error(`SEC submissions fetch failed (${resp.status}) for CIK ${cikPadded}`);
   }
-  const payload = await resp.json();
+  return await resp.json();
+}
+function extractFilingsFromSubmissions(payload, cikPadded, opts) {
   const recent = payload.filings?.recent;
   if (!recent?.form || !recent.filingDate || !recent.accessionNumber || !recent.primaryDocument) {
     return [];
   }
+  const maxPeriodic = Math.max(1, opts?.maxPeriodic ?? 4);
+  const maxEvent = Math.max(1, opts?.maxEvent ?? 10);
   const cikInt = String(Number(cikPadded));
-  const out = [];
+  const periodic = [];
+  const events = [];
   for (let i = 0; i < recent.form.length; i += 1) {
-    const form = recent.form[i] ?? "";
-    if (!IMPORTANT_FORMS.has(form)) continue;
+    const form = (recent.form[i] ?? "").trim();
+    const upper = form.toUpperCase();
+    const isPeriodic = PERIODIC_FORMS.has(upper);
+    const isEvent = !isPeriodic && EVENT_FORMS.has(upper);
+    if (!isPeriodic && !isEvent) continue;
+    if (isPeriodic && periodic.length >= maxPeriodic) {
+      if (events.length >= maxEvent) break;
+      continue;
+    }
+    if (isEvent && events.length >= maxEvent) {
+      if (periodic.length >= maxPeriodic) break;
+      continue;
+    }
     const acc = recent.accessionNumber[i] ?? "";
     const accNoDash = acc.replace(/-/g, "");
     const doc = recent.primaryDocument[i] ?? "";
     const rawItems = recent.items?.[i];
     const items = Array.isArray(rawItems) ? rawItems.join(",") : String(rawItems ?? "");
-    out.push({
+    const row = {
       form,
       filingDate: recent.filingDate[i] ?? "",
       accession: acc,
       items,
       url: `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accNoDash}/${doc}`
-    });
-    if (out.length >= limit) break;
+    };
+    if (isPeriodic) {
+      periodic.push({ idx: i, row });
+    } else {
+      events.push({ idx: i, row });
+    }
+    if (periodic.length >= maxPeriodic && events.length >= maxEvent) {
+      break;
+    }
   }
-  return out;
+  return [...periodic, ...events].sort((a, b) => {
+    const dateCmp = b.row.filingDate.localeCompare(a.row.filingDate);
+    if (dateCmp !== 0) return dateCmp;
+    return a.idx - b.idx;
+  }).map((entry) => entry.row);
+}
+async function fetchRecentFilings(cikPadded, userAgent, opts, fetchImpl = fetch) {
+  const payload = await fetchSecSubmissions(cikPadded, userAgent, fetchImpl);
+  const resolvedOpts = typeof opts === "number" ? { maxPeriodic: 4, maxEvent: Math.max(10, opts) } : { maxPeriodic: opts?.maxPeriodic ?? 4, maxEvent: opts?.maxEvent ?? 10 };
+  return extractFilingsFromSubmissions(payload, cikPadded, resolvedOpts);
 }
 function evaluateSecGates(catalysts, filingsByTicker) {
   const evals = [];
@@ -34097,25 +34760,78 @@ function evaluateSecGates(catalysts, filingsByTicker) {
   }
   return evals;
 }
-async function pollEdgarFilings(dataDir, profile, tickers, catalysts, nowIso) {
+function extractSecRedFlags(filingsByTicker) {
+  const flags = [];
+  for (const [ticker, rows] of Object.entries(filingsByTicker)) {
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) {
+      const formUpper = (row.form ?? "").trim().toUpperCase();
+      if (formUpper === "NT 10-Q" || formUpper === "NT 10-K") {
+        flags.push({
+          ticker,
+          form: row.form,
+          filingDate: row.filingDate,
+          accession: row.accession,
+          code: formUpper,
+          severity: "high",
+          label: formUpper === "NT 10-Q" ? "Late Quarterly Filing Notice (NT 10-Q)" : "Late Annual Filing Notice (NT 10-K)",
+          items: row.items || void 0,
+          url: row.url
+        });
+        continue;
+      }
+      if (formUpper === "8-K" || formUpper === "8-K/A") {
+        const rawItems = (row.items ?? "").trim();
+        if (!rawItems) continue;
+        const tokens = Array.from(
+          new Set(
+            rawItems.split(/[,;\s]+/).map((t) => t.trim()).filter(Boolean)
+          )
+        );
+        for (const itemCode of tokens) {
+          const spec = EIGHT_K_RED_FLAG_ITEMS[itemCode];
+          if (!spec) continue;
+          flags.push({
+            ticker,
+            form: row.form,
+            filingDate: row.filingDate,
+            accession: row.accession,
+            code: `8-K:${itemCode}`,
+            severity: spec.severity,
+            label: spec.label,
+            items: rawItems,
+            url: row.url
+          });
+        }
+      }
+    }
+  }
+  return flags.sort((a, b) => {
+    const dateCmp = b.filingDate.localeCompare(a.filingDate);
+    if (dateCmp !== 0) return dateCmp;
+    if (a.severity !== b.severity) return a.severity === "high" ? -1 : 1;
+    return a.ticker.localeCompare(b.ticker);
+  });
+}
+async function pollEdgarFilings(dataDir, profile, tickers, catalysts, nowIso, fetchImpl = fetch) {
   const ua = resolveSecUserAgent(profile);
-  const tickerMap = await loadSecTickerMap(dataDir, ua);
+  const tickerMap = await loadSecTickerMap(dataDir, ua, fetchImpl);
   const existing = loadEdgarCache(dataDir);
   const filingsByTicker = { ...existing.filings_by_ticker };
   const skippedTickers = [];
   const uniqueTargets = Array.from(new Set(tickers.map((t) => normalizeTicker(t))));
-  for (let i = 0; i < uniqueTargets.length; i += 1) {
-    const sym = uniqueTargets[i];
+  let fetchCount = 0;
+  for (const sym of uniqueTargets) {
     if (!sym) continue;
     const cik = tickerMap.get(sym);
     if (!cik) {
       skippedTickers.push(sym);
       continue;
     }
-    if (i > 0) await sleep(150);
-    const hasGate = catalysts.some((c) => c.ticker === sym && c.sec_gate);
-    const rows = await fetchRecentFilings(cik, ua, hasGate ? 12 : 5);
-    filingsByTicker[sym] = rows.slice(0, 5);
+    if (fetchCount > 0) await sleepMs(SEC_PACING_MS);
+    fetchCount += 1;
+    const rows = await fetchRecentFilings(cik, ua, { maxPeriodic: 4, maxEvent: 10 }, fetchImpl);
+    filingsByTicker[sym] = rows;
   }
   const cache = {
     checked_at: nowIso,
@@ -34123,14 +34839,411 @@ async function pollEdgarFilings(dataDir, profile, tickers, catalysts, nowIso) {
     filings_by_ticker: filingsByTicker
   };
   saveEdgarCache(dataDir, cache);
-  return { cache, skippedTickers };
+  return { cache, skippedTickers, redFlags: extractSecRedFlags(filingsByTicker) };
 }
 
-// src/server/engine.ts
+// src/server/market.ts
+var YF_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (compatible; InvestmentOS-Plugin/0.5.0)",
+  Accept: "application/json"
+};
+var YAHOO_HISTORY_TTL_MS = 24 * 60 * 60 * 1e3;
+var IBKR_HISTORY_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
+function round4(n) {
+  return Math.round((n + Number.EPSILON) * 1e4) / 1e4;
+}
+function round2(n) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+function inferMarketState(meta3, nowSec) {
+  const explicit = meta3.marketState?.trim().toUpperCase();
+  if (explicit) return explicit;
+  const tp = meta3.currentTradingPeriod;
+  if (tp?.regular?.start && tp?.regular?.end && nowSec >= tp.regular.start && nowSec <= tp.regular.end) {
+    return "REGULAR";
+  }
+  if (tp?.pre?.start && tp?.pre?.end && nowSec >= tp.pre.start && nowSec <= tp.pre.end) {
+    return "PRE";
+  }
+  if (tp?.post?.start && tp?.post?.end && nowSec >= tp.post.start && nowSec <= tp.post.end) {
+    return "POST";
+  }
+  return "CLOSED";
+}
+async function fetchIntradayExtendedQuote(symbol2, scale, timeoutMs, fetchImpl) {
+  const url2 = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol2)}?interval=1m&range=1d&includePrePost=true`;
+  try {
+    const resp = await fetchImpl(url2, {
+      headers: YF_HEADERS,
+      signal: AbortSignal.timeout(Math.min(timeoutMs, 3500))
+    });
+    if (!resp.ok) return { extendedPrice: null, quoteTime: null };
+    const data = await resp.json();
+    const result = data?.chart?.result?.[0];
+    const meta3 = result?.meta;
+    if (!meta3) return { extendedPrice: null, quoteTime: null };
+    if (typeof meta3.postMarketPrice === "number" && Number.isFinite(meta3.postMarketPrice) && meta3.postMarketPrice > 0) {
+      return {
+        extendedPrice: round4(meta3.postMarketPrice * scale),
+        quoteTime: typeof meta3.postMarketTime === "number" && Number.isFinite(meta3.postMarketTime) ? new Date(meta3.postMarketTime * 1e3).toISOString() : null
+      };
+    }
+    if (typeof meta3.preMarketPrice === "number" && Number.isFinite(meta3.preMarketPrice) && meta3.preMarketPrice > 0) {
+      return {
+        extendedPrice: round4(meta3.preMarketPrice * scale),
+        quoteTime: typeof meta3.preMarketTime === "number" && Number.isFinite(meta3.preMarketTime) ? new Date(meta3.preMarketTime * 1e3).toISOString() : null
+      };
+    }
+    const timestamps = result?.timestamp ?? [];
+    const closes = result?.indicators?.quote?.[0]?.close ?? [];
+    const regStart = meta3.currentTradingPeriod?.regular?.start;
+    const regEnd = meta3.currentTradingPeriod?.regular?.end;
+    for (let i = timestamps.length - 1; i >= 0; i -= 1) {
+      const ts = timestamps[i];
+      const px = closes[i];
+      if (typeof ts !== "number" || typeof px !== "number" || !Number.isFinite(px) || px <= 0) continue;
+      const isExtended = typeof regEnd === "number" && ts > regEnd || typeof regStart === "number" && ts < regStart;
+      if (isExtended) {
+        return {
+          extendedPrice: round4(px * scale),
+          quoteTime: new Date(ts * 1e3).toISOString()
+        };
+      }
+      break;
+    }
+    return { extendedPrice: null, quoteTime: null };
+  } catch {
+    return { extendedPrice: null, quoteTime: null };
+  }
+}
+async function fetchYahooChartQuote(symbol2, timeoutMs = 7e3, fetchImpl = fetch) {
+  const url2 = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol2)}?interval=1d&range=1mo&includePrePost=true`;
+  try {
+    const resp = await fetchImpl(url2, {
+      headers: YF_HEADERS,
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const result = data?.chart?.result?.[0];
+    const meta3 = result?.meta;
+    if (!meta3) return null;
+    let price = meta3.regularMarketPrice ?? meta3.previousClose ?? meta3.chartPreviousClose;
+    if (typeof price !== "number" || !Number.isFinite(price) || price <= 0) {
+      return null;
+    }
+    let scale = 1;
+    let currency = (meta3.currency ?? "USD").trim();
+    if (currency === "GBp" || currency === "GBX") {
+      scale = 0.01;
+      price = round4(price * scale);
+      currency = "GBP";
+    } else {
+      currency = currency.toUpperCase();
+    }
+    if (!/^[A-Z]{3}$/.test(currency)) {
+      currency = "USD";
+    }
+    const nowSec = Math.floor(Date.now() / 1e3);
+    const marketState = inferMarketState(meta3, nowSec);
+    let extendedPrice = null;
+    let quoteTimeSec = meta3.regularMarketTime;
+    if ((marketState === "POST" || marketState === "POSTPOST" || marketState === "CLOSED") && typeof meta3.postMarketPrice === "number" && Number.isFinite(meta3.postMarketPrice) && meta3.postMarketPrice > 0) {
+      extendedPrice = round4(meta3.postMarketPrice * scale);
+      quoteTimeSec = meta3.postMarketTime ?? quoteTimeSec;
+    } else if ((marketState === "PRE" || marketState === "PREPRE") && typeof meta3.preMarketPrice === "number" && Number.isFinite(meta3.preMarketPrice) && meta3.preMarketPrice > 0) {
+      extendedPrice = round4(meta3.preMarketPrice * scale);
+      quoteTimeSec = meta3.preMarketTime ?? quoteTimeSec;
+    } else if (typeof meta3.postMarketPrice === "number" && Number.isFinite(meta3.postMarketPrice) && meta3.postMarketPrice > 0) {
+      extendedPrice = round4(meta3.postMarketPrice * scale);
+      quoteTimeSec = meta3.postMarketTime ?? quoteTimeSec;
+    } else if (typeof meta3.preMarketPrice === "number" && Number.isFinite(meta3.preMarketPrice) && meta3.preMarketPrice > 0) {
+      extendedPrice = round4(meta3.preMarketPrice * scale);
+      quoteTimeSec = meta3.preMarketTime ?? quoteTimeSec;
+    }
+    let quoteTime = typeof quoteTimeSec === "number" && Number.isFinite(quoteTimeSec) && quoteTimeSec > 0 ? new Date(quoteTimeSec * 1e3).toISOString() : null;
+    const isEquityLike = !symbol2.startsWith("^") && !symbol2.endsWith("=X");
+    if (extendedPrice === null && isEquityLike && (marketState === "PRE" || marketState === "POST")) {
+      const intraday = await fetchIntradayExtendedQuote(symbol2, scale, timeoutMs, fetchImpl);
+      if (intraday.extendedPrice !== null) {
+        extendedPrice = intraday.extendedPrice;
+        if (intraday.quoteTime) quoteTime = intraday.quoteTime;
+      }
+    }
+    const rawCloses = result?.indicators?.quote?.[0]?.close ?? [];
+    const sparkline = rawCloses.filter((v) => typeof v === "number" && Number.isFinite(v) && v > 0).map((v) => round4(v * scale)).slice(-22);
+    let prevClose = null;
+    if (sparkline.length >= 2) {
+      const lastPt = sparkline[sparkline.length - 1];
+      const sameAsLast = Math.abs(price - lastPt) / price < 5e-4;
+      prevClose = sameAsLast ? sparkline[sparkline.length - 2] : lastPt;
+    } else if (typeof meta3.previousClose === "number" && meta3.previousClose > 0) {
+      prevClose = meta3.previousClose * scale;
+    }
+    const anchor1mRaw = typeof meta3.chartPreviousClose === "number" && meta3.chartPreviousClose > 0 ? meta3.chartPreviousClose * scale : sparkline[0];
+    const change1d = prevClose && prevClose > 0 ? round2((price - prevClose) / prevClose * 100) : null;
+    const change1m = anchor1mRaw && anchor1mRaw > 0 ? round2((price - anchor1mRaw) / anchor1mRaw * 100) : null;
+    const high52w = typeof meta3.fiftyTwoWeekHigh === "number" && Number.isFinite(meta3.fiftyTwoWeekHigh) && meta3.fiftyTwoWeekHigh > 0 ? round4(meta3.fiftyTwoWeekHigh * scale) : null;
+    const low52w = typeof meta3.fiftyTwoWeekLow === "number" && Number.isFinite(meta3.fiftyTwoWeekLow) && meta3.fiftyTwoWeekLow > 0 ? round4(meta3.fiftyTwoWeekLow * scale) : null;
+    return {
+      symbol: symbol2,
+      price,
+      regular_price: price,
+      extended_price: extendedPrice,
+      market_state: marketState,
+      marketState,
+      quote_time: quoteTime,
+      fifty_two_week_high: high52w,
+      fifty_two_week_low: low52w,
+      currency,
+      sparkline,
+      change_1d_pct: change1d,
+      change_1m_pct: change1m
+    };
+  } catch {
+    return null;
+  }
+}
+async function fetchQuotesBatch(symbols, concurrency = 4, fetchImpl = fetch) {
+  const unique = Array.from(new Set(symbols.map((s) => s.trim()).filter(Boolean)));
+  const out = /* @__PURE__ */ new Map();
+  let idx = 0;
+  async function worker() {
+    while (idx < unique.length) {
+      const current = unique[idx];
+      idx += 1;
+      if (!current) continue;
+      const res = await fetchYahooChartQuote(current, 7e3, fetchImpl);
+      if (res) {
+        out.set(current, res);
+      }
+    }
+  }
+  const workers = Array.from({ length: Math.min(concurrency, Math.max(1, unique.length)) }, () => worker());
+  await Promise.all(workers);
+  return out;
+}
+async function fetchFxRatesToBase(currencies, baseCurrency, fallbackRates, fetchImpl = fetch) {
+  const base = baseCurrency.toUpperCase();
+  const out = { ...fallbackRates, [base]: 1 };
+  const needed = Array.from(new Set(currencies.map((c) => c.toUpperCase()).filter((c) => c !== base)));
+  for (const ccy of needed) {
+    const directSym = ccy === "USD" ? `${base}=X` : `${ccy}${base}=X`;
+    const direct = await fetchYahooChartQuote(directSym, 7e3, fetchImpl);
+    if (direct && direct.price > 0) {
+      out[ccy] = direct.price;
+      continue;
+    }
+    const inverseSym = `${base}${ccy}=X`;
+    const inverse = await fetchYahooChartQuote(inverseSym, 7e3, fetchImpl);
+    if (inverse && inverse.price > 0) {
+      out[ccy] = 1 / inverse.price;
+    }
+  }
+  return out;
+}
+function classifyMacroRegime(vix, hyCreditRatio) {
+  if (vix !== null && (vix >= 35 || vix >= 28 && hyCreditRatio !== null && hyCreditRatio < 0.78)) {
+    return "STRESS";
+  }
+  if (vix !== null && vix >= 28) {
+    return "HIGH_VOL";
+  }
+  if (vix !== null && vix >= 20) {
+    return "ELEVATED";
+  }
+  return "CALM";
+}
+async function fetchMacroRegime(opts) {
+  const fetchImpl = opts?.fetchImpl ?? fetch;
+  const nowIso = opts?.nowIso ?? (/* @__PURE__ */ new Date()).toISOString();
+  const quotes = await fetchQuotesBatch(["^VIX", "^TNX", "^IRX", "HYG", "IEF", "DX-Y.NYB"], 6, fetchImpl);
+  const vixRaw = quotes.get("^VIX")?.price ?? null;
+  const tnxRaw = quotes.get("^TNX")?.price ?? null;
+  const irxRaw = quotes.get("^IRX")?.price ?? null;
+  const hygRaw = quotes.get("HYG")?.price ?? null;
+  const iefRaw = quotes.get("IEF")?.price ?? null;
+  const dxyRaw = quotes.get("DX-Y.NYB")?.price ?? null;
+  const normalizeYield = (val) => {
+    if (val === null || !Number.isFinite(val)) return null;
+    return round2(val > 25 ? val / 10 : val);
+  };
+  const vix = vixRaw !== null ? round2(vixRaw) : null;
+  const us10yPct = normalizeYield(tnxRaw);
+  const us3mPct = normalizeYield(irxRaw);
+  const hyCreditRatio = hygRaw !== null && iefRaw !== null && iefRaw > 0 ? round4(hygRaw / iefRaw) : null;
+  const dxy = dxyRaw !== null ? round2(dxyRaw) : null;
+  const regimeLabel = classifyMacroRegime(vix, hyCreditRatio);
+  const noteParts = [];
+  if (us10yPct !== null && us3mPct !== null) {
+    const slopeBps = Math.round((us10yPct - us3mPct) * 100);
+    noteParts.push(`10Y-3M slope ${slopeBps >= 0 ? "+" : ""}${slopeBps} bps`);
+  }
+  if (vix !== null && vix >= 28) {
+    noteParts.push("High volatility regime \u2014 stage tranches 2-3 weeks apart");
+  }
+  return MacroRegimeSchema.parse({
+    updated_at: nowIso,
+    vix,
+    us10y_pct: us10yPct,
+    us3m_pct: us3mPct,
+    hy_credit_ratio: hyCreditRatio,
+    dxy,
+    regime_label: regimeLabel,
+    notes: noteParts.length > 0 ? noteParts.join("; ") : null
+  });
+}
+async function fetchYahooHistory(symbol2, range = "5y", interval = "1wk", timeoutMs = 9e3, fetchImpl = fetch) {
+  const url2 = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol2)}?interval=${encodeURIComponent(interval)}&range=${encodeURIComponent(range)}`;
+  try {
+    const resp = await fetchImpl(url2, {
+      headers: YF_HEADERS,
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const result = data?.chart?.result?.[0];
+    if (!result) return null;
+    const timestamps = result.timestamp ?? [];
+    const adjCloses = result.indicators?.adjclose?.[0]?.adjclose ?? [];
+    const rawCloses = result.indicators?.quote?.[0]?.close ?? [];
+    if (timestamps.length === 0) return null;
+    let scale = 1;
+    let currency = (result.meta?.currency ?? "USD").trim();
+    if (currency === "GBp" || currency === "GBX") {
+      scale = 0.01;
+      currency = "GBP";
+    } else {
+      currency = currency.toUpperCase();
+    }
+    if (!/^[A-Z]{3}$/.test(currency)) {
+      currency = "USD";
+    }
+    const byDate = /* @__PURE__ */ new Map();
+    for (let i = 0; i < timestamps.length; i += 1) {
+      const ts = timestamps[i];
+      if (typeof ts !== "number" || !Number.isFinite(ts)) continue;
+      const adj = adjCloses[i];
+      const raw = rawCloses[i];
+      const val = typeof adj === "number" && Number.isFinite(adj) && adj > 0 ? adj : typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : null;
+      if (val === null) continue;
+      const dateStr = new Date(ts * 1e3).toISOString().slice(0, 10);
+      byDate.set(dateStr, round4(val * scale));
+    }
+    const points = Array.from(byDate.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date5, close]) => ({ date: date5, close }));
+    if (points.length < 2) return null;
+    return { symbol: symbol2, currency, points };
+  } catch {
+    return null;
+  }
+}
+async function fetchYahooDailyBenchmark(symbol2, range = "1y", timeoutMs = 9e3, fetchImpl = fetch) {
+  return fetchYahooHistory(symbol2, range, "1d", timeoutMs, fetchImpl);
+}
+function fxHistorySymbolToUsd(currency) {
+  const ccy = currency.trim().toUpperCase();
+  if (!/^[A-Z]{3}$/.test(ccy) || ccy === "USD") return null;
+  return `${ccy}USD=X`;
+}
+async function ensureHistorySeries(dataDir, symbols, opts) {
+  const nowMs = opts?.nowMs ?? Date.now();
+  const concurrency = opts?.concurrency ?? 4;
+  const fetchImpl = opts?.fetchImpl ?? fetch;
+  const cache = loadHistoryCache(dataDir);
+  const fxSymbols = (opts?.fxCurrencies ?? []).map((c) => fxHistorySymbolToUsd(c)).filter((s) => Boolean(s));
+  const unique = Array.from(new Set([...symbols, ...fxSymbols].map((s) => s.trim()).filter(Boolean)));
+  const toFetch = [];
+  for (const sym of unique) {
+    const existing = cache.series[sym];
+    if (existing && existing.points.length >= 10) {
+      const updatedMs = Date.parse(existing.updated_at);
+      const ageMs = Number.isFinite(updatedMs) ? nowMs - updatedMs : Number.POSITIVE_INFINITY;
+      if (existing.source === "manual") continue;
+      if (existing.source === "ibkr" && ageMs < IBKR_HISTORY_TTL_MS) {
+        continue;
+      }
+      if (existing.source === "yahoo" && ageMs < YAHOO_HISTORY_TTL_MS) {
+        continue;
+      }
+    }
+    toFetch.push(sym);
+  }
+  let dirty = false;
+  const nowIso = new Date(nowMs).toISOString();
+  if (toFetch.length > 0) {
+    let idx = 0;
+    async function worker() {
+      while (idx < toFetch.length) {
+        const sym = toFetch[idx];
+        idx += 1;
+        if (!sym) continue;
+        const fetched = await fetchYahooHistory(sym, "5y", "1wk", 9e3, fetchImpl);
+        if (fetched && fetched.points.length >= 2) {
+          cache.series[sym] = {
+            symbol: sym,
+            currency: fetched.currency,
+            source: "yahoo",
+            updated_at: nowIso,
+            points: fetched.points
+          };
+          dirty = true;
+        }
+      }
+    }
+    const workers = Array.from({ length: Math.min(concurrency, toFetch.length) }, () => worker());
+    await Promise.all(workers);
+  }
+  if (opts?.dailyBenchmarkSymbol?.trim()) {
+    const benchSym = opts.dailyBenchmarkSymbol.trim();
+    const dailyKey = `daily:${benchSym}`;
+    const existingDaily = cache.series[dailyKey];
+    const updatedMs = existingDaily ? Date.parse(existingDaily.updated_at) : Number.NaN;
+    const ageMs = Number.isFinite(updatedMs) ? nowMs - updatedMs : Number.POSITIVE_INFINITY;
+    if (!existingDaily || existingDaily.points.length < 10 || ageMs >= YAHOO_HISTORY_TTL_MS) {
+      const fetchedDaily = await fetchYahooDailyBenchmark(benchSym, "1y", 9e3, fetchImpl);
+      if (fetchedDaily && fetchedDaily.points.length >= 2) {
+        cache.series[dailyKey] = {
+          symbol: benchSym,
+          currency: fetchedDaily.currency,
+          source: "yahoo",
+          updated_at: nowIso,
+          points: fetchedDaily.points
+        };
+        dirty = true;
+      }
+    }
+  }
+  if (dirty) {
+    cache.updated_at = nowIso;
+    return saveHistoryCache(dataDir, cache);
+  }
+  return cache;
+}
+
+// src/server/quant.ts
 var SHARE_CLASS_GROUPS = {
   GOOG: { canonical: "GOOG/GOOGL", members: ["GOOGL", "GOOG"] },
   GOOGL: { canonical: "GOOG/GOOGL", members: ["GOOGL", "GOOG"] }
 };
+var KNOWN_US_ETF_TICKERS = /* @__PURE__ */ new Set([
+  "QQQ",
+  "VOO",
+  "VTI",
+  "SPY",
+  "IVV",
+  "VT",
+  "VUG",
+  "VGT",
+  "SCHD",
+  "SOXX",
+  "SMH",
+  "QQQM",
+  "SPLG"
+]);
+function round(value, decimals = 2) {
+  const factor = 10 ** decimals;
+  return Math.round((value + Number.EPSILON) * factor) / factor;
+}
 function canonicalAssetName(ticker) {
   const sym = ticker.trim().toUpperCase();
   return SHARE_CLASS_GROUPS[sym]?.canonical ?? sym;
@@ -34142,6 +35255,2022 @@ function memberTickersForCanonical(canonical) {
   const group = SHARE_CLASS_GROUPS[upper];
   return group ? group.members : [upper];
 }
+function computeUsEstateTaxNra(usSitusUsd) {
+  if (!Number.isFinite(usSitusUsd) || usSitusUsd <= 6e4) {
+    return {
+      us_situs_usd: round(Math.max(0, usSitusUsd || 0), 2),
+      taxable_excess_over_60k_usd: 0,
+      tentative_tax_usd: 0,
+      unified_credit_usd: 13e3,
+      net_estate_tax_usd: 0,
+      effective_rate_pct: 0,
+      marginal_rate_pct: 0
+    };
+  }
+  const brackets = [
+    [1e4, 0.18],
+    [2e4, 0.2],
+    [4e4, 0.22],
+    [6e4, 0.24],
+    [8e4, 0.26],
+    [1e5, 0.28],
+    [15e4, 0.3],
+    [25e4, 0.32],
+    [5e5, 0.34],
+    [75e4, 0.37],
+    [1e6, 0.39],
+    [Number.POSITIVE_INFINITY, 0.4]
+  ];
+  let tentative = 0;
+  let prev = 0;
+  let marginal = 0.18;
+  for (const [cap, rate] of brackets) {
+    if (usSitusUsd > prev) {
+      const slice = Math.min(usSitusUsd, cap) - prev;
+      tentative += slice * rate;
+      marginal = rate;
+      prev = cap;
+    } else {
+      break;
+    }
+  }
+  const netTax = Math.max(0, tentative - 13e3);
+  return {
+    us_situs_usd: round(usSitusUsd, 2),
+    taxable_excess_over_60k_usd: round(usSitusUsd - 6e4, 2),
+    tentative_tax_usd: round(tentative, 2),
+    unified_credit_usd: 13e3,
+    net_estate_tax_usd: round(netTax, 2),
+    effective_rate_pct: round(netTax / usSitusUsd * 100, 2),
+    marginal_rate_pct: round(marginal * 100, 1)
+  };
+}
+function computeAfterTaxHurdle(profile, usSitus, dividendYieldPct = 0, marginalEstateRatePct, opts) {
+  const bench = profile.benchmark;
+  const benchmarkCagrPct = round(bench.expected_cagr_pct ?? 8, 2);
+  const alphaBufferPct = round(bench.alpha_buffer_pct ?? 2.5, 2);
+  const hurdleCagrPct = round(benchmarkCagrPct + alphaBufferPct, 2);
+  const safeDivYield = Number.isFinite(dividendYieldPct) && dividendYieldPct > 0 ? dividendYieldPct : 0;
+  const accumulating = Boolean(opts?.accumulating);
+  let effectiveWhtPct = 0;
+  if (!accumulating) {
+    if (opts?.dividendWhtPctOverride !== null && opts?.dividendWhtPctOverride !== void 0 && Number.isFinite(opts.dividendWhtPctOverride)) {
+      effectiveWhtPct = Math.min(100, Math.max(0, opts.dividendWhtPctOverride));
+    } else {
+      effectiveWhtPct = usSitus ? profile.tax_profile.us_dividend_wht_pct : profile.tax_profile.ucits_dividend_wht_pct;
+    }
+  }
+  const divWhtDragPct = accumulating ? 0 : round(safeDivYield * effectiveWhtPct / 100, 2);
+  const resolvedMarginal = marginalEstateRatePct !== null && marginalEstateRatePct !== void 0 && Number.isFinite(marginalEstateRatePct) ? marginalEstateRatePct : 34;
+  let estateTaxDragPct = 0;
+  let estateTaxDragMode = "none";
+  if (profile.tax_profile.nra_us_estate_tax_enabled && usSitus) {
+    if (bench.estate_tax_annual_drag_pct !== null && bench.estate_tax_annual_drag_pct !== void 0) {
+      estateTaxDragPct = round(bench.estate_tax_annual_drag_pct, 2);
+      estateTaxDragMode = "override";
+    } else if (resolvedMarginal <= 0) {
+      estateTaxDragPct = 0;
+      estateTaxDragMode = bench.estate_tax_drag_mode ?? "hedge";
+    } else if ((bench.estate_tax_drag_mode ?? "hedge") === "hedge") {
+      const hedgeBps = Number.isFinite(bench.estate_tax_hedge_bps) ? bench.estate_tax_hedge_bps : 35;
+      estateTaxDragPct = round(Math.max(0, hedgeBps) / 100, 2);
+      estateTaxDragMode = "hedge";
+    } else {
+      const rateFrac = Math.min(0.4, Math.max(0, resolvedMarginal / 100));
+      const years = Math.max(1, bench.estate_tax_amortize_years || 20);
+      estateTaxDragPct = round((1 - Math.pow(1 - rateFrac, 1 / years)) * 100, 2);
+      estateTaxDragMode = "amortized";
+    }
+  }
+  const totalTaxDragPct = round(divWhtDragPct + estateTaxDragPct, 2);
+  const requiredGrossCagrPct = round(hurdleCagrPct + totalTaxDragPct, 2);
+  return {
+    benchmark_ticker: bench.ticker,
+    benchmark_label: bench.label,
+    benchmark_cagr_pct: benchmarkCagrPct,
+    alpha_buffer_pct: alphaBufferPct,
+    hurdle_cagr_pct: hurdleCagrPct,
+    us_situs: usSitus,
+    accumulating,
+    dividend_yield_pct: round(safeDivYield, 2),
+    effective_wht_pct: round(effectiveWhtPct, 2),
+    div_wht_drag_pct: divWhtDragPct,
+    estate_tax_drag_mode: estateTaxDragMode,
+    estate_tax_drag_pct: estateTaxDragPct,
+    total_tax_drag_pct: totalTaxDragPct,
+    required_gross_cagr_pct: requiredGrossCagrPct
+  };
+}
+function computeScenarioSummary(price, model, taxInfo, opts) {
+  if (price === null || !Number.isFinite(price) || price <= 0 || !model?.scenarios) {
+    return null;
+  }
+  const horizon = Math.max(1, model.horizon_years || 5);
+  const rawCases = model.scenarios;
+  const probSum = rawCases.bear.probability + rawCases.base.probability + rawCases.bull.probability;
+  const isAccumulating = Boolean(model.accumulating || taxInfo.accumulating);
+  const rawDivYieldPct = !isAccumulating && Number.isFinite(model.dividend_yield_pct) && model.dividend_yield_pct > 0 ? model.dividend_yield_pct : 0;
+  const evalCase = (label) => {
+    const c = rawCases[label];
+    const ratio = c.target_price_5y / price;
+    const priceCagrPct = ratio > 0 ? (Math.pow(ratio, 1 / horizon) - 1) * 100 : -95;
+    const grossPct = round(priceCagrPct + rawDivYieldPct, 2);
+    const afterTaxPct = round(grossPct - taxInfo.total_tax_drag_pct, 2);
+    return {
+      label,
+      probability: round(c.probability, 4),
+      target_price_5y: round(c.target_price_5y, 2),
+      multiple: c.multiple ?? null,
+      metric_cagr_pct: c.metric_cagr_pct ?? null,
+      summary: c.summary,
+      gross_cagr_pct: grossPct,
+      after_tax_cagr_pct: afterTaxPct
+    };
+  };
+  const bear = evalCase("bear");
+  const base = evalCase("base");
+  const bull = evalCase("bull");
+  const list = [bear, base, bull];
+  const weights = probSum > 0 ? list.map((c) => c.probability / probSum) : [1 / 3, 1 / 3, 1 / 3];
+  let expectedPrice = 0;
+  let expectedTerminalGross = 0;
+  let expectedTerminalAfterTax = 0;
+  let logAfterTaxSum = 0;
+  for (let i = 0; i < list.length; i += 1) {
+    const c = list[i];
+    const w = weights[i];
+    expectedPrice += w * c.target_price_5y;
+    const rGross = c.gross_cagr_pct / 100;
+    const rAfterTax = c.after_tax_cagr_pct / 100;
+    expectedTerminalGross += w * price * Math.pow(Math.max(0.01, 1 + rGross), horizon);
+    expectedTerminalAfterTax += w * price * Math.pow(Math.max(0.01, 1 + rAfterTax), horizon);
+    logAfterTaxSum += w * Math.log(Math.max(0.05, 1 + rAfterTax));
+  }
+  const expectedPrice5y = round(expectedPrice, 2);
+  const expectedGrossCagrPct = round(
+    (Math.pow(Math.max(1e-4, expectedTerminalGross / price), 1 / horizon) - 1) * 100,
+    2
+  );
+  const expectedAfterTaxCagrPct = round(
+    (Math.pow(Math.max(1e-4, expectedTerminalAfterTax / price), 1 / horizon) - 1) * 100,
+    2
+  );
+  const standaloneKellyCagrPct = round((Math.exp(logAfterTaxSum) - 1) * 100, 2);
+  const dispersionDragBps = Math.max(0, Math.round((expectedAfterTaxCagrPct - standaloneKellyCagrPct) * 100));
+  const spreadVsBenchmark = round(expectedAfterTaxCagrPct - taxInfo.benchmark_cagr_pct, 2);
+  const spreadVsHurdle = round(expectedAfterTaxCagrPct - taxInfo.hurdle_cagr_pct, 2);
+  const valuationWarnings = [];
+  const isSingleStock = !opts?.isEtf && !isAccumulating;
+  if (isSingleStock) {
+    const bearTotalRetPct = round((bear.target_price_5y - price) / price * 100, 1);
+    if (bearTotalRetPct > -10) {
+      valuationWarnings.push(
+        `Bear case implies ${bearTotalRetPct >= 0 ? "+" : ""}${bearTotalRetPct}% 5Y price return (> -10%); single-stock downside may be cushioned.`
+      );
+    }
+  }
+  const rd = model.reverse_dcf;
+  if (rd?.current_revenue_b && rd.current_revenue_b > 0 && rd.shares_diluted_m && rd.shares_diluted_m > 0) {
+    const impliedCurMarginPct = round(
+      rd.current_metric_per_share * rd.shares_diluted_m / 1e3 / rd.current_revenue_b * 100,
+      1
+    );
+    if (impliedCurMarginPct > 65) {
+      valuationWarnings.push(
+        `Reverse DCF inputs imply ${impliedCurMarginPct}% current ${rd.basis.toUpperCase()} margin (>65% GIGO guardrail \u2014 verify shares/metric basis).`
+      );
+    }
+    const xbrlMargin = rd.basis === "fcf" ? opts?.fundamentals?.latest_ratios.fcf_margin_pct : opts?.fundamentals?.latest_ratios.operating_margin_pct;
+    if (typeof xbrlMargin === "number" && Number.isFinite(xbrlMargin) && Math.abs(impliedCurMarginPct - xbrlMargin) >= 20) {
+      valuationWarnings.push(
+        `Implied current ${rd.basis.toUpperCase()} margin (${impliedCurMarginPct}%) diverges by ${round(Math.abs(impliedCurMarginPct - xbrlMargin), 1)}pp from XBRL (${round(xbrlMargin, 1)}%).`
+      );
+    }
+  }
+  if (rd?.current_revenue_b && rd.current_revenue_b > 25) {
+    let baseRevWarned = false;
+    if (rd.base_revenue_cagr_pct !== null && rd.base_revenue_cagr_pct !== void 0 && rd.base_revenue_cagr_pct > 15) {
+      valuationWarnings.push(
+        `Base revenue CAGR (${rd.base_revenue_cagr_pct}%) exceeds 15% outside-view cap on $${round(rd.current_revenue_b, 1)}B revenue base.`
+      );
+      baseRevWarned = true;
+    }
+    if (rd.shares_diluted_m && rd.shares_diluted_m > 0 && rd.target_margin_pct && rd.target_margin_pct > 0) {
+      const sharesN = rd.shares_diluted_m * Math.pow(1 + (rd.annual_dilution_pct ?? 0) / 100, horizon);
+      for (const sc of [base, bull]) {
+        const mult = sc.multiple ?? rd.exit_multiple;
+        if (!mult || mult <= 0) continue;
+        const impliedRevNB = sc.target_price_5y / mult * sharesN / 1e3 / (rd.target_margin_pct / 100);
+        const impliedCaseRevCagr = (Math.pow(Math.max(1e-4, impliedRevNB / rd.current_revenue_b), 1 / horizon) - 1) * 100;
+        if (impliedCaseRevCagr > 15 && !(sc.label === "base" && baseRevWarned)) {
+          valuationWarnings.push(
+            `${sc.label.toUpperCase()} scenario implies ${round(impliedCaseRevCagr, 1)}% 5Y revenue CAGR (>15% guardrail above $25B revenue).`
+          );
+        }
+      }
+    }
+  }
+  if (rd?.shares_diluted_m && rd.shares_diluted_m > 0) {
+    const sharesN = rd.shares_diluted_m * Math.pow(1 + (rd.annual_dilution_pct ?? 0) / 100, horizon);
+    for (const sc of [base, bull]) {
+      const termMcapB = sc.target_price_5y * sharesN / 1e3;
+      if (termMcapB > 5e3) {
+        valuationWarnings.push(
+          `${sc.label.toUpperCase()} scenario implies $${round(termMcapB / 1e3, 2)}T terminal market cap (> $5T outside-view guardrail).`
+        );
+      }
+    }
+  }
+  return {
+    horizon_years: horizon,
+    price_used: round(price, 4),
+    tax_info: taxInfo,
+    cases: { bear, base, bull },
+    expected_price_5y: expectedPrice5y,
+    expected_gross_cagr_pct: expectedGrossCagrPct,
+    expected_after_tax_cagr_pct: expectedAfterTaxCagrPct,
+    standalone_kelly_cagr_pct: standaloneKellyCagrPct,
+    dispersion_drag_bps: dispersionDragBps,
+    spread_vs_benchmark_pct: spreadVsBenchmark,
+    spread_vs_hurdle_pct: spreadVsHurdle,
+    beats_hurdle: spreadVsHurdle >= 0,
+    valuation_warnings: valuationWarnings
+  };
+}
+function computeReverseDcf(price, model, taxInfo) {
+  if (price === null || !Number.isFinite(price) || price <= 0 || !model?.reverse_dcf) {
+    return null;
+  }
+  const rd = model.reverse_dcf;
+  const horizon = Math.max(1, model.horizon_years || 5);
+  const reqGrossPct = round(taxInfo.hurdle_cagr_pct + taxInfo.total_tax_drag_pct, 2);
+  const isAccumulating = Boolean(model.accumulating || taxInfo.accumulating);
+  const divYieldPct = !isAccumulating && Number.isFinite(model.dividend_yield_pct) && model.dividend_yield_pct > 0 ? model.dividend_yield_pct : 0;
+  const reqPriceCagrPct = Math.max(-50, reqGrossPct - divYieldPct);
+  const impliedTargetPrice = price * Math.pow(1 + reqPriceCagrPct / 100, horizon);
+  const annualDilPct = Number.isFinite(rd.annual_dilution_pct) ? rd.annual_dilution_pct : 0;
+  const dilFrac = annualDilPct / 100;
+  const shares0M = rd.shares_diluted_m && rd.shares_diluted_m > 0 ? rd.shares_diluted_m : null;
+  const shares5yM = shares0M !== null ? shares0M * Math.pow(1 + dilFrac, horizon) : null;
+  const netCashB = rd.net_cash_b !== null && rd.net_cash_b !== void 0 && Number.isFinite(rd.net_cash_b) ? rd.net_cash_b : null;
+  const netCashPerShare0 = netCashB !== null && shares0M !== null ? netCashB * 1e3 / shares0M : 0;
+  const netCashPerShare5y = netCashB !== null && shares5yM !== null ? netCashB * 1e3 / shares5yM : netCashPerShare0;
+  const evPerShare0 = Math.max(price * 0.1, price - netCashPerShare0);
+  const evPerShare5y = Math.max(0.01, impliedTargetPrice - netCashPerShare5y);
+  const currentMultiple = evPerShare0 / rd.current_metric_per_share;
+  const impliedMetricPerShare = evPerShare5y / rd.exit_multiple;
+  const impliedMetricCagrPct = (Math.pow(Math.max(1e-4, impliedMetricPerShare / rd.current_metric_per_share), 1 / horizon) - 1) * 100;
+  const multipleExpansionCagrPct = round(
+    (Math.pow(Math.max(1e-4, rd.exit_multiple / currentMultiple), 1 / horizon) - 1) * 100,
+    2
+  );
+  const opValCagrFactor = Math.pow(Math.max(1e-4, evPerShare5y / evPerShare0), 1 / horizon);
+  const constantMultMarginRevCagrPct = round((opValCagrFactor * (1 + dilFrac) - 1) * 100, 2);
+  let impliedCurrentMarginPct = null;
+  let marginExpansionCagrPct = null;
+  let impliedRev5yB = null;
+  let impliedRevCagrPct = null;
+  let revCagrGapPct = null;
+  if (rd.current_revenue_b && rd.current_revenue_b > 0 && shares0M !== null) {
+    const currentMetricTotalB = rd.current_metric_per_share * shares0M / 1e3;
+    impliedCurrentMarginPct = round(currentMetricTotalB / rd.current_revenue_b * 100, 2);
+    if (rd.target_margin_pct && rd.target_margin_pct > 0 && shares5yM !== null) {
+      if (impliedCurrentMarginPct > 0) {
+        marginExpansionCagrPct = round(
+          (Math.pow(Math.max(1e-4, rd.target_margin_pct / impliedCurrentMarginPct), 1 / horizon) - 1) * 100,
+          2
+        );
+      }
+      const impliedMetricTotal5yB = impliedMetricPerShare * shares5yM / 1e3;
+      impliedRev5yB = round(impliedMetricTotal5yB / (rd.target_margin_pct / 100), 2);
+      impliedRevCagrPct = round(
+        (Math.pow(Math.max(1e-4, impliedRev5yB / rd.current_revenue_b), 1 / horizon) - 1) * 100,
+        2
+      );
+      if (rd.base_revenue_cagr_pct !== null && rd.base_revenue_cagr_pct !== void 0) {
+        revCagrGapPct = round(rd.base_revenue_cagr_pct - impliedRevCagrPct, 2);
+      }
+    }
+  }
+  return {
+    basis: rd.basis,
+    horizon_years: horizon,
+    price_used: round(price, 4),
+    required_gross_cagr_pct: reqGrossPct,
+    hurdle_cagr_pct: taxInfo.hurdle_cagr_pct,
+    total_tax_drag_pct: taxInfo.total_tax_drag_pct,
+    implied_target_price_5y: round(impliedTargetPrice, 2),
+    current_multiple: round(currentMultiple, 2),
+    exit_multiple: round(rd.exit_multiple, 2),
+    current_metric_per_share: round(rd.current_metric_per_share, 4),
+    implied_metric_per_share_5y: round(impliedMetricPerShare, 2),
+    implied_metric_cagr_pct: round(impliedMetricCagrPct, 2),
+    net_cash_b: netCashB,
+    annual_dilution_pct: round(annualDilPct, 2),
+    implied_current_margin_pct: impliedCurrentMarginPct,
+    multiple_expansion_cagr_pct: multipleExpansionCagrPct,
+    margin_expansion_cagr_pct: marginExpansionCagrPct,
+    residual_revenue_cagr_pct: impliedRevCagrPct,
+    constant_mult_margin_rev_cagr_pct: constantMultMarginRevCagrPct,
+    implied_revenue_5y_b: impliedRev5yB,
+    implied_revenue_cagr_pct: impliedRevCagrPct,
+    base_revenue_cagr_pct: rd.base_revenue_cagr_pct ?? null,
+    revenue_cagr_gap_pct: revCagrGapPct,
+    target_margin_pct: rd.target_margin_pct ?? null,
+    metric_basis_note: rd.metric_basis_note ?? null,
+    linked_hypothesis_ids: rd.linked_hypothesis_ids ?? [],
+    notes: rd.notes ?? null
+  };
+}
+function percentile(sorted, p) {
+  if (sorted.length === 0) return null;
+  if (sorted.length === 1) return round(sorted[0], 2);
+  const idx = (sorted.length - 1) * p;
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  const frac = idx - lo;
+  const val = sorted[lo] * (1 - frac) + sorted[hi] * frac;
+  return round(val, 2);
+}
+function buildBand(values, current) {
+  const sorted = [...values].sort((a, b) => a - b);
+  return {
+    current: current !== null && Number.isFinite(current) && current > 0 ? round(current, 2) : null,
+    p10: sorted.length >= 4 ? percentile(sorted, 0.1) : null,
+    median: sorted.length >= 4 ? percentile(sorted, 0.5) : null,
+    p90: sorted.length >= 4 ? percentile(sorted, 0.9) : null,
+    samples: sorted.length
+  };
+}
+function computeValuationBands(historySeries, fundamentals, currentPrice) {
+  if (!fundamentals) return null;
+  const anchors = [];
+  const qAsc = [...fundamentals.quarterly].sort((a, b) => a.period_end.localeCompare(b.period_end));
+  for (let i = 3; i < qAsc.length; i += 1) {
+    const win = qAsc.slice(i - 3, i + 1);
+    const latest = win[3];
+    const shares = latest.diluted_shares_m ?? null;
+    let ttmEps = null;
+    if (win.every((q) => typeof q.eps_diluted === "number")) {
+      ttmEps = win.reduce((acc, q) => acc + (q.eps_diluted ?? 0), 0);
+    } else if (shares && shares > 0 && win.every((q) => typeof q.net_income_m === "number")) {
+      ttmEps = win.reduce((acc, q) => acc + (q.net_income_m ?? 0), 0) / shares;
+    }
+    const ttmFcfPs = shares && shares > 0 && win.every((q) => typeof q.fcf_m === "number") ? win.reduce((acc, q) => acc + (q.fcf_m ?? 0), 0) / shares : null;
+    const ttmRevPs = shares && shares > 0 && win.every((q) => typeof q.revenue_m === "number") ? win.reduce((acc, q) => acc + (q.revenue_m ?? 0), 0) / shares : null;
+    anchors.push({
+      date: latest.filed_date ?? latest.period_end,
+      ttmEps,
+      ttmFcfPs,
+      ttmRevPs
+    });
+  }
+  const earliestQAnchorDate = anchors[0]?.date ?? "9999-99-99";
+  const aAsc = [...fundamentals.annual].sort((a, b) => a.period_end.localeCompare(b.period_end));
+  for (const fy of aAsc) {
+    const anchorDate = fy.filed_date ?? fy.period_end;
+    if (anchorDate >= earliestQAnchorDate) continue;
+    const shares = fy.diluted_shares_m ?? null;
+    const ttmEps = typeof fy.eps_diluted === "number" ? fy.eps_diluted : shares && shares > 0 && typeof fy.net_income_m === "number" ? fy.net_income_m / shares : null;
+    const ttmFcfPs = shares && shares > 0 && typeof fy.fcf_m === "number" ? fy.fcf_m / shares : null;
+    const ttmRevPs = shares && shares > 0 && typeof fy.revenue_m === "number" ? fy.revenue_m / shares : null;
+    anchors.push({ date: anchorDate, ttmEps, ttmFcfPs, ttmRevPs });
+  }
+  anchors.sort((a, b) => a.date.localeCompare(b.date));
+  const lr = fundamentals.latest_ratios;
+  const curPe = currentPrice && currentPrice > 0 && lr.ttm_eps && lr.ttm_eps > 0 ? currentPrice / lr.ttm_eps : null;
+  const curPfcf = currentPrice && currentPrice > 0 && lr.ttm_fcf_per_share && lr.ttm_fcf_per_share > 0 ? currentPrice / lr.ttm_fcf_per_share : null;
+  const curPs = currentPrice && currentPrice > 0 && lr.ttm_rev_per_share && lr.ttm_rev_per_share > 0 ? currentPrice / lr.ttm_rev_per_share : null;
+  const peSamples = [];
+  const pfcfSamples = [];
+  const psSamples = [];
+  if (historySeries && historySeries.points.length > 0 && anchors.length > 0) {
+    const lastDate = historySeries.points[historySeries.points.length - 1].date;
+    const cutoffMs = Date.parse(`${lastDate}T00:00:00Z`) - 5 * 365.25 * 86400 * 1e3;
+    let aIdx = 0;
+    for (const pt of historySeries.points) {
+      const ptMs = Date.parse(`${pt.date}T00:00:00Z`);
+      if (Number.isFinite(cutoffMs) && Number.isFinite(ptMs) && ptMs < cutoffMs) continue;
+      while (aIdx + 1 < anchors.length && anchors[aIdx + 1].date <= pt.date) {
+        aIdx += 1;
+      }
+      const anchor2 = anchors[aIdx];
+      if (anchor2.date > pt.date) continue;
+      if (anchor2.ttmEps && anchor2.ttmEps > 0) {
+        const m = pt.close / anchor2.ttmEps;
+        if (m > 0 && m < 500) peSamples.push(m);
+      }
+      if (anchor2.ttmFcfPs && anchor2.ttmFcfPs > 0) {
+        const m = pt.close / anchor2.ttmFcfPs;
+        if (m > 0 && m < 500) pfcfSamples.push(m);
+      }
+      if (anchor2.ttmRevPs && anchor2.ttmRevPs > 0) {
+        const m = pt.close / anchor2.ttmRevPs;
+        if (m > 0 && m < 200) psSamples.push(m);
+      }
+    }
+  }
+  return {
+    pe: buildBand(peSamples, curPe),
+    pfcf: buildBand(pfcfSamples, curPfcf),
+    ps: buildBand(psSamples, curPs),
+    as_of: fundamentals.quarterly[0]?.period_end ?? fundamentals.annual[0]?.period_end ?? null
+  };
+}
+function compareRuleOp(observed, op, threshold) {
+  if (op === "<=") return observed <= threshold + 1e-6;
+  if (op === "<") return observed < threshold;
+  if (op === ">=") return observed >= threshold - 1e-6;
+  if (op === ">") return observed > threshold;
+  return Math.abs(observed - threshold) <= 1e-6;
+}
+function evaluateHypothesisRule(rule, fundamentals, edgarRows, insiders, marketEntry) {
+  const metric = rule.metric.trim().toLowerCase();
+  const opStr = `${rule.op} ${rule.threshold}`;
+  if (rule.source === "xbrl") {
+    if (!fundamentals) {
+      return {
+        observed: null,
+        period: null,
+        passed: null,
+        detail: `No synced XBRL fundamentals to check ${rule.metric} ${opStr}`,
+        source: "xbrl"
+      };
+    }
+    let observed = null;
+    let periodLabel = null;
+    let overrideUsed = false;
+    const overrideVal = fundamentals.overrides?.[rule.metric] ?? fundamentals.overrides?.[metric];
+    if (rule.period === "latest_q" && typeof overrideVal === "number" && Number.isFinite(overrideVal)) {
+      observed = overrideVal;
+      periodLabel = fundamentals.quarterly[0]?.period_end ?? fundamentals.annual[0]?.period_end ?? "override";
+      overrideUsed = true;
+    } else if (rule.period === "latest_fy") {
+      const fy = fundamentals.annual[0];
+      if (fy) {
+        periodLabel = fy.period_end;
+        if (metric === "revenue_b" && typeof fy.revenue_m === "number") observed = round(fy.revenue_m / 1e3, 3);
+        else {
+          const val = fy[metric];
+          if (typeof val === "number" && Number.isFinite(val)) observed = val;
+        }
+      }
+    } else if (rule.period === "ttm") {
+      const q4 = fundamentals.quarterly.slice(0, 4);
+      if (q4.length === 4) {
+        periodLabel = `TTM ${q4[0].period_end}`;
+        const sumField = (k) => {
+          if (!q4.every((q) => typeof q[k] === "number")) return null;
+          return q4.reduce((acc, q) => acc + (q[k] ?? 0), 0);
+        };
+        const ttmRev = sumField("revenue_m");
+        const ttmGp = sumField("gross_profit_m");
+        const ttmOp = sumField("operating_income_m");
+        const ttmNi = sumField("net_income_m");
+        const ttmOcf = sumField("ocf_m");
+        const ttmFcf = sumField("fcf_m");
+        const ttmSbc = sumField("sbc_m");
+        if (metric === "gross_margin_pct" && ttmRev && ttmRev > 0 && ttmGp !== null) observed = round(ttmGp / ttmRev * 100, 2);
+        else if (metric === "operating_margin_pct" && ttmRev && ttmRev > 0 && ttmOp !== null) observed = round(ttmOp / ttmRev * 100, 2);
+        else if (metric === "fcf_margin_pct" && ttmRev && ttmRev > 0 && ttmFcf !== null) observed = round(ttmFcf / ttmRev * 100, 2);
+        else if (metric === "ocf_to_ni_pct" && ttmNi && ttmNi > 0 && ttmOcf !== null) observed = round(ttmOcf / ttmNi * 100, 2);
+        else if (metric === "sbc_pct_rev" && ttmRev && ttmRev > 0 && ttmSbc !== null) observed = round(ttmSbc / ttmRev * 100, 2);
+        else if (metric === "revenue_b" && ttmRev !== null) observed = round(ttmRev / 1e3, 3);
+        else {
+          const fromRatios = fundamentals.latest_ratios[metric];
+          if (typeof fromRatios === "number" && Number.isFinite(fromRatios)) observed = fromRatios;
+        }
+      } else {
+        const fromRatios = fundamentals.latest_ratios[metric];
+        if (typeof fromRatios === "number" && Number.isFinite(fromRatios)) {
+          observed = fromRatios;
+          periodLabel = fundamentals.annual[0]?.period_end ?? fundamentals.quarterly[0]?.period_end ?? "ttm";
+        }
+      }
+    } else {
+      const q0 = fundamentals.quarterly[0] ?? fundamentals.annual[0];
+      if (q0) {
+        periodLabel = q0.period_end;
+        if (metric === "revenue_b" && typeof q0.revenue_m === "number") {
+          observed = round(q0.revenue_m / 1e3, 3);
+        } else {
+          const qVal = q0[metric];
+          if (typeof qVal === "number" && Number.isFinite(qVal)) {
+            observed = qVal;
+          } else {
+            const ratioVal = fundamentals.latest_ratios[metric];
+            if (typeof ratioVal === "number" && Number.isFinite(ratioVal)) observed = ratioVal;
+          }
+        }
+      } else {
+        const ratioVal = fundamentals.latest_ratios[metric];
+        if (typeof ratioVal === "number" && Number.isFinite(ratioVal)) {
+          observed = ratioVal;
+          periodLabel = "latest";
+        }
+      }
+    }
+    if (observed === null) {
+      return {
+        observed: null,
+        period: periodLabel,
+        passed: null,
+        detail: `XBRL metric ${rule.metric} unavailable for ${rule.period}`,
+        source: "xbrl"
+      };
+    }
+    const passed2 = compareRuleOp(observed, rule.op, rule.threshold);
+    return {
+      observed: round(observed, 2),
+      period: periodLabel,
+      passed: passed2,
+      detail: `XBRL ${rule.metric} = ${round(observed, 2)} (${periodLabel ?? rule.period}${overrideUsed ? ", override" : ""}) vs ${opStr} -> ${passed2 ? "PASS" : "BREACH"}`,
+      source: "xbrl"
+    };
+  }
+  if (rule.source === "edgar") {
+    const rows = edgarRows ?? [];
+    if (rows.length === 0) {
+      return {
+        observed: null,
+        period: null,
+        passed: null,
+        detail: `No cached EDGAR filings to check ${rule.metric}`,
+        source: "edgar"
+      };
+    }
+    const latestDate = rows[0]?.filingDate ?? null;
+    const redFlags = extractSecRedFlags({ _TARGET: rows });
+    let observed = null;
+    if (metric === "filing_10q_on_time" || metric === "no_nt_filing") {
+      const hasNt = redFlags.some((f) => f.code === "NT 10-Q" || f.code === "NT 10-K");
+      observed = hasNt ? 0 : 1;
+    } else if (metric === "no_restatement" || metric === "no_red_flags") {
+      const hasHigh = redFlags.some((f) => f.severity === "high");
+      observed = hasHigh ? 0 : 1;
+    } else if (metric === "sec_red_flag_count") {
+      observed = redFlags.length;
+    }
+    if (observed === null) {
+      return {
+        observed: null,
+        period: latestDate,
+        passed: null,
+        detail: `Unsupported EDGAR rule metric: ${rule.metric}`,
+        source: "edgar"
+      };
+    }
+    const passed2 = compareRuleOp(observed, rule.op, rule.threshold);
+    return {
+      observed,
+      period: latestDate,
+      passed: passed2,
+      detail: `EDGAR ${rule.metric} = ${observed} (latest ${latestDate ?? "n/a"}) vs ${opStr} -> ${passed2 ? "PASS" : "BREACH"}`,
+      source: "edgar"
+    };
+  }
+  if (rule.source === "insiders") {
+    if (!insiders) {
+      return {
+        observed: null,
+        period: null,
+        passed: null,
+        detail: `No synced Form 4 insider data to check ${rule.metric}`,
+        source: "insiders"
+      };
+    }
+    const periodLabel = insiders.updated_at.slice(0, 10);
+    const map3 = {
+      disc_buy_90d_usd: insiders.window_90d.disc_buy_usd,
+      disc_sell_90d_usd: insiders.window_90d.disc_sell_usd,
+      plan_sell_90d_usd: insiders.window_90d.plan_sell_usd,
+      distinct_buyers_90d: insiders.window_90d.distinct_buyers,
+      distinct_sellers_90d: insiders.window_90d.distinct_sellers,
+      disc_buy_12m_usd: insiders.window_12m.disc_buy_usd,
+      disc_sell_12m_usd: insiders.window_12m.disc_sell_usd,
+      plan_sell_12m_usd: insiders.window_12m.plan_sell_usd,
+      net_disc_90d_usd: round(insiders.window_90d.disc_buy_usd - insiders.window_90d.disc_sell_usd, 2),
+      net_disc_12m_usd: round(insiders.window_12m.disc_buy_usd - insiders.window_12m.disc_sell_usd, 2)
+    };
+    const observed = map3[metric] ?? null;
+    if (observed === null) {
+      return {
+        observed: null,
+        period: periodLabel,
+        passed: null,
+        detail: `Unsupported insider metric: ${rule.metric}`,
+        source: "insiders"
+      };
+    }
+    const passed2 = compareRuleOp(observed, rule.op, rule.threshold);
+    return {
+      observed,
+      period: periodLabel,
+      passed: passed2,
+      detail: `Insiders ${rule.metric} = ${observed} vs ${opStr} -> ${passed2 ? "PASS" : "BREACH"}`,
+      source: "insiders"
+    };
+  }
+  if (!marketEntry) {
+    return {
+      observed: null,
+      period: null,
+      passed: null,
+      detail: `No market quote cached to check ${rule.metric}`,
+      source: "market"
+    };
+  }
+  const mVal = marketEntry[metric];
+  if (typeof mVal !== "number" || !Number.isFinite(mVal)) {
+    return {
+      observed: null,
+      period: marketEntry.quote_time?.slice(0, 10) ?? null,
+      passed: null,
+      detail: `Market metric ${rule.metric} unavailable`,
+      source: "market"
+    };
+  }
+  const passed = compareRuleOp(mVal, rule.op, rule.threshold);
+  return {
+    observed: round(mVal, 2),
+    period: marketEntry.quote_time?.slice(0, 10) ?? null,
+    passed,
+    detail: `Market ${rule.metric} = ${round(mVal, 2)} vs ${opStr} -> ${passed ? "PASS" : "BREACH"}`,
+    source: "market"
+  };
+}
+function computeDipTriage(thesis, price, scenarioSummary, riskCaps, profile, edgarGates, catalysts, navBase, usdToBaseFx, lookthroughMap, opts) {
+  const sym = thesis.ticker.trim().toUpperCase();
+  const canon = canonicalAssetName(sym);
+  const benchTicker = profile.benchmark.ticker.trim().toUpperCase();
+  const isBenchmark = sym === benchTicker;
+  const isEtf = Boolean(thesis.is_etf || isBenchmark);
+  const currentPct = lookthroughMap.get(canon)?.pct_nav ?? opts?.positionWeightMap?.get(sym) ?? opts?.positionWeightMap?.get(canon) ?? 0;
+  const capById = new Map(riskCaps.map((r) => [r.id, r]));
+  let singleNameRoomPct = Number.POSITIVE_INFINITY;
+  let singleNameCapPct = null;
+  let singleNameLabel = "Thesis max weight";
+  if (thesis.max_weight_pct !== null && Number.isFinite(thesis.max_weight_pct)) {
+    singleNameRoomPct = thesis.max_weight_pct - currentPct;
+    singleNameCapPct = thesis.max_weight_pct;
+    singleNameLabel = `Thesis cap (${thesis.max_weight_pct}%)`;
+  }
+  for (const rule of profile.risk_caps) {
+    if (rule.kind === "single_name_max" && !isEtf) {
+      const room = rule.cap_pct - currentPct;
+      if (room < singleNameRoomPct) {
+        singleNameRoomPct = room;
+        singleNameCapPct = rule.cap_pct;
+        singleNameLabel = rule.label;
+      }
+    } else if (rule.kind === "ticker" && rule.ticker && canonicalAssetName(rule.ticker) === canon) {
+      const room = rule.cap_pct - currentPct;
+      if (room < singleNameRoomPct) {
+        singleNameRoomPct = room;
+        singleNameCapPct = rule.cap_pct;
+        singleNameLabel = rule.label;
+      }
+    }
+  }
+  if (!Number.isFinite(singleNameRoomPct)) {
+    singleNameRoomPct = Math.max(0, (isBenchmark ? 70 : 10) - currentPct);
+    singleNameCapPct = isBenchmark ? 70 : 10;
+    singleNameLabel = isBenchmark ? "Core benchmark allocation" : "Default 10% single-name guideline";
+  }
+  let portfolioCapRoomPct = singleNameRoomPct;
+  let effectiveCapPct = singleNameCapPct;
+  let bindingLabel = singleNameLabel;
+  for (const rule of profile.risk_caps) {
+    const evalRow = capById.get(rule.id);
+    if (rule.kind === "bucket" && (rule.tickers ?? []).some((t) => canonicalAssetName(t) === canon)) {
+      const used = evalRow?.value_pct ?? currentPct;
+      const room = rule.cap_pct - used;
+      if (room < portfolioCapRoomPct) {
+        portfolioCapRoomPct = room;
+        effectiveCapPct = rule.cap_pct;
+        bindingLabel = rule.label;
+      }
+    } else if (rule.kind === "us_situs" && thesis.us_situs) {
+      const used = evalRow?.value_pct ?? 0;
+      const room = rule.cap_pct - used;
+      if (room < portfolioCapRoomPct) {
+        portfolioCapRoomPct = room;
+        effectiveCapPct = rule.cap_pct;
+        bindingLabel = rule.label;
+      }
+    }
+  }
+  const singleRoomRounded = round(singleNameRoomPct, 2);
+  const portfolioRoomRounded = round(portfolioCapRoomPct, 2);
+  const roomPct = portfolioRoomRounded;
+  const roomBase = round(Math.max(0, roomPct / 100) * Math.max(0, navBase), 2);
+  const roomUsd = usdToBaseFx > 0 ? round(roomBase / usdToBaseFx, 2) : 0;
+  const availableFundingBase = opts?.availableFundingBase !== null && opts?.availableFundingBase !== void 0 && Number.isFinite(opts.availableFundingBase) ? round(Math.max(0, opts.availableFundingBase), 2) : null;
+  let capStatus = "PASS";
+  let capNote = `${roomPct.toFixed(1)}% NAV room under ${bindingLabel}`;
+  if (roomPct <= 0) {
+    capStatus = "FAIL";
+    capNote = singleRoomRounded > 0 ? `Portfolio cap full (${bindingLabel}); ${singleRoomRounded.toFixed(1)}% single-name swap room only` : `At or above ${bindingLabel} (${roomPct.toFixed(1)}% room)`;
+  } else if (roomPct < 2) {
+    capStatus = "WARN";
+    capNote = `Tight headroom: ${roomPct.toFixed(1)}% NAV left under ${bindingLabel}`;
+  }
+  const openSecGate = edgarGates.find((g) => g.ticker.toUpperCase() === sym && !g.cleared);
+  const tickerHighCat = catalysts.find((c) => c.ticker.toUpperCase() === sym && c.urgency === "high");
+  let gateStatus = "PASS";
+  let gateReason = "No open binary or SEC filing gates";
+  if (openSecGate) {
+    gateStatus = "BLOCKED";
+    gateReason = `Open SEC ${openSecGate.form} gate (filed after ${openSecGate.filed_after}): ${openSecGate.description}`;
+  } else if (thesis.gated) {
+    gateStatus = "BLOCKED";
+    gateReason = thesis.next_catalyst ? `Binary gate active \u2014 ${thesis.next_catalyst}` : tickerHighCat ? `Binary gate active \u2014 ${tickerHighCat.date}: ${tickerHighCat.title}` : "Binary catalyst / forensic gate active";
+  }
+  let hurdleStatus = "UNMODELED";
+  let hurdleNote = "Add 5Y Bear/Base/Bull model to test after-tax hurdle";
+  let hurdleExpectedCagr = scenarioSummary ? scenarioSummary.expected_after_tax_cagr_pct : null;
+  let hurdleTargetCagr = scenarioSummary ? scenarioSummary.tax_info.hurdle_cagr_pct : null;
+  let hurdleSpread = scenarioSummary ? scenarioSummary.spread_vs_hurdle_pct : null;
+  if (isBenchmark) {
+    hurdleStatus = "CORE_ANCHOR";
+    hurdleExpectedCagr = scenarioSummary ? scenarioSummary.expected_after_tax_cagr_pct : profile.benchmark.expected_cagr_pct;
+    hurdleTargetCagr = profile.benchmark.expected_cagr_pct;
+    hurdleSpread = round((hurdleExpectedCagr ?? profile.benchmark.expected_cagr_pct) - profile.benchmark.expected_cagr_pct, 2);
+    hurdleNote = `Core benchmark anchor (${profile.benchmark.expected_cagr_pct.toFixed(1)}% expected CAGR; exempt from +${profile.benchmark.alpha_buffer_pct.toFixed(1)}% alpha buffer)`;
+  } else if (scenarioSummary) {
+    const spread = scenarioSummary.spread_vs_hurdle_pct;
+    const hurdle = scenarioSummary.tax_info.hurdle_cagr_pct;
+    if (spread >= 0) {
+      hurdleStatus = "PASS";
+      hurdleNote = `+${spread.toFixed(2)}% vs ${hurdle.toFixed(1)}% after-tax hurdle`;
+    } else {
+      hurdleStatus = "FAIL";
+      hurdleNote = `${spread.toFixed(2)}% vs ${hurdle.toFixed(1)}% after-tax hurdle`;
+    }
+  }
+  const highVolStaged = Boolean(opts?.vix !== null && opts?.vix !== void 0 && Number.isFinite(opts.vix) && opts.vix >= 28);
+  const deployableBudgetBase = availableFundingBase !== null ? Math.min(roomBase, availableFundingBase) : roomBase;
+  const annotateTrancheNote = (note) => {
+    if (!highVolStaged) return note;
+    const tag = "High-Vol Staged (2-3w apart)";
+    return note ? `${note} \xB7 ${tag}` : tag;
+  };
+  const tranchePlan = [];
+  if (thesis.tranches && thesis.tranches.length > 0) {
+    for (const tr of thesis.tranches) {
+      tranchePlan.push({
+        label: tr.label,
+        price: round(tr.price, 2),
+        pct_of_add: round(tr.pct_of_add, 1),
+        amount_base: round(deployableBudgetBase * (tr.pct_of_add / 100), 2),
+        note: annotateTrancheNote(tr.note)
+      });
+    }
+  } else if (thesis.buy_zone_low !== null && thesis.buy_zone_high !== null && thesis.buy_zone_high > 0 && thesis.buy_zone_low >= 0 && thesis.buy_zone_high >= thesis.buy_zone_low) {
+    if (thesis.buy_zone_high > thesis.buy_zone_low) {
+      const mid = round((thesis.buy_zone_low + thesis.buy_zone_high) / 2, 2);
+      tranchePlan.push(
+        {
+          label: "Tranche 1 (Top of Zone)",
+          price: round(thesis.buy_zone_high, 2),
+          pct_of_add: 35,
+          amount_base: round(deployableBudgetBase * 0.35, 2),
+          note: annotateTrancheNote()
+        },
+        {
+          label: "Tranche 2 (Mid-Zone)",
+          price: mid,
+          pct_of_add: 40,
+          amount_base: round(deployableBudgetBase * 0.4, 2),
+          note: annotateTrancheNote()
+        },
+        {
+          label: "Tranche 3 (Deep Value)",
+          price: round(thesis.buy_zone_low, 2),
+          pct_of_add: 25,
+          amount_base: round(deployableBudgetBase * 0.25, 2),
+          note: annotateTrancheNote()
+        }
+      );
+    } else {
+      tranchePlan.push(
+        {
+          label: "Tranche 1 (Target Entry)",
+          price: round(thesis.buy_zone_low, 2),
+          pct_of_add: 50,
+          amount_base: round(deployableBudgetBase * 0.5, 2),
+          note: annotateTrancheNote()
+        },
+        {
+          label: "Tranche 2 (-8% Buffer)",
+          price: round(thesis.buy_zone_low * 0.92, 2),
+          pct_of_add: 50,
+          amount_base: round(deployableBudgetBase * 0.5, 2),
+          note: annotateTrancheNote()
+        }
+      );
+    }
+  }
+  const reentryAlert = Boolean(
+    thesis.tier === "passed" && thesis.reentry_price !== null && thesis.reentry_price !== void 0 && price !== null && Number.isFinite(price) && price <= thesis.reentry_price
+  );
+  const inBuyOrDeep = price !== null && thesis.buy_zone_high !== null && Number.isFinite(price) && price <= thesis.buy_zone_high;
+  const verdictBlocked = Boolean(thesis.kill_switch_triggered) || thesis.verdict === "PROBATION" || thesis.verdict === "EXIT";
+  let readiness = "WAIT";
+  if (thesis.tier === "passed") {
+    readiness = reentryAlert ? "REENTRY_ALERT" : "PASSED";
+  } else if (gateStatus === "BLOCKED") {
+    readiness = "GATED";
+  } else if (capStatus === "FAIL") {
+    readiness = "CAP_BLOCKED";
+  } else if (!verdictBlocked && inBuyOrDeep && (hurdleStatus === "PASS" || hurdleStatus === "CORE_ANCHOR")) {
+    readiness = "READY";
+  } else {
+    readiness = "WAIT";
+  }
+  return {
+    readiness,
+    risk_cap_check: {
+      status: capStatus,
+      current_weight_pct: round(currentPct, 2),
+      effective_cap_pct: effectiveCapPct !== null ? round(effectiveCapPct, 2) : null,
+      room_pct: roomPct,
+      single_name_room_pct: singleRoomRounded,
+      portfolio_cap_room_pct: portfolioRoomRounded,
+      room_base: roomBase,
+      room_usd: roomUsd,
+      available_funding_base: availableFundingBase,
+      note: capNote
+    },
+    gate_check: {
+      status: gateStatus,
+      reason: gateReason
+    },
+    hurdle_check: {
+      status: hurdleStatus,
+      expected_after_tax_cagr_pct: hurdleExpectedCagr,
+      hurdle_cagr_pct: hurdleTargetCagr,
+      spread_vs_hurdle_pct: hurdleSpread,
+      note: hurdleNote
+    },
+    tranche_plan: tranchePlan,
+    high_vol_staged: highVolStaged,
+    reentry_alert: reentryAlert
+  };
+}
+function computeCapitalRotationQueue(portfolio, lookthrough, riskCaps, theses, profile, fxUsdToBase, opts) {
+  const safeFxUsd = fxUsdToBase > 0 ? fxUsdToBase : 1;
+  const fxRates = { ...portfolio.fx_rates, USD: safeFxUsd, [profile.base_currency]: 1 };
+  let positions;
+  let navBase;
+  if (opts?.positionsOut && opts.navBase !== void 0) {
+    positions = opts.positionsOut;
+    navBase = opts.navBase;
+  } else {
+    let posSumBase = 0;
+    const rawPos = portfolio.positions.map((p) => {
+      const ccyFx = fxRates[p.currency] ?? safeFxUsd;
+      const mvTrading = p.qty * p.ref_price;
+      const mvBase = mvTrading * ccyFx;
+      const mvUsd = p.currency === "USD" ? mvTrading : mvBase / safeFxUsd;
+      posSumBase += mvBase;
+      return {
+        ticker: p.ticker,
+        asset_type: p.asset_type,
+        us_situs: p.us_situs,
+        currency: p.currency,
+        qty: p.qty,
+        price: p.ref_price,
+        mv_usd: round(mvUsd, 2),
+        mv_base: round(mvBase, 2),
+        weight_nav_pct: 0
+      };
+    });
+    navBase = portfolio.reported_nav_base ?? round(posSumBase + portfolio.cash_base + portfolio.accruals_base, 2);
+    positions = rawPos.map((p) => ({
+      ...p,
+      weight_nav_pct: navBase > 0 ? round(p.mv_base / navBase * 100, 2) : 0
+    }));
+  }
+  const heldPositions = positions.filter((p) => p.qty > 0 && p.mv_base > 0.01);
+  const benchTicker = profile.benchmark.ticker.toUpperCase();
+  const thesisByTicker = new Map(theses.map((t) => [t.ticker.toUpperCase(), t]));
+  const etfWeightsMap = opts?.etfWeights?.etf_weights ?? {};
+  const etfMetaMap = opts?.etfWeights?.etf_metadata ?? {};
+  const isUsEtf = (p) => p.us_situs && p.ticker.toUpperCase() !== benchTicker && (p.asset_type.toUpperCase().includes("ETF") || KNOWN_US_ETF_TICKERS.has(p.ticker.toUpperCase()));
+  const ext = profile.external_exposure;
+  const extUsSitusUsd = ext.enabled && ext.us_situs ? ext.amount_base / safeFxUsd : 0;
+  let runningUsSitusUsd = heldPositions.filter((p) => p.us_situs).reduce((acc, p) => acc + p.mv_usd, 0) + extUsSitusUsd;
+  const etfBucketFrac = (etfSym, rule) => {
+    const weights = etfWeightsMap[etfSym];
+    if (!weights) return 0;
+    const canonSet = new Set((rule.tickers ?? []).map((t) => canonicalAssetName(t)));
+    let frac = 0;
+    for (const [k, v] of Object.entries(weights)) {
+      if (typeof v === "number" && canonSet.has(canonicalAssetName(k))) {
+        frac += v;
+      }
+    }
+    if (rule.include_etf_residual_key) {
+      const res = etfMetaMap[etfSym]?.[rule.include_etf_residual_key];
+      if (typeof res === "number") frac += res;
+    }
+    return frac;
+  };
+  const capReliefPct = /* @__PURE__ */ new Map();
+  const remainingLtPct = new Map(lookthrough.map((r) => [r.name, r.pct_nav]));
+  const remainingSharesByTicker = new Map(
+    heldPositions.map((p) => [p.ticker.toUpperCase(), p.qty])
+  );
+  const swappedTickers = /* @__PURE__ */ new Set();
+  const exitedTickers = /* @__PURE__ */ new Set();
+  const propagateAssetReduction = (tickerSym, usSitus, pctNavReduced) => {
+    if (pctNavReduced <= 0) return;
+    const canon = canonicalAssetName(tickerSym);
+    if (remainingLtPct.has(canon)) {
+      remainingLtPct.set(canon, Math.max(0, round((remainingLtPct.get(canon) ?? 0) - pctNavReduced, 4)));
+    }
+    for (const cap of riskCaps) {
+      const rule = profile.risk_caps.find((r) => r.id === cap.id);
+      if (!rule) continue;
+      if (rule.kind === "us_situs" && usSitus) {
+        capReliefPct.set(cap.id, (capReliefPct.get(cap.id) ?? 0) + pctNavReduced);
+      } else if (rule.kind === "bucket" && (rule.tickers ?? []).some((t) => canonicalAssetName(t) === canon)) {
+        capReliefPct.set(cap.id, (capReliefPct.get(cap.id) ?? 0) + pctNavReduced);
+      } else if (rule.kind === "ticker" && rule.ticker && canonicalAssetName(rule.ticker) === canon) {
+        capReliefPct.set(cap.id, (capReliefPct.get(cap.id) ?? 0) + pctNavReduced);
+      }
+    }
+  };
+  const taxSwaps = [];
+  if (profile.tax_profile.nra_us_estate_tax_enabled) {
+    const usEtfs = heldPositions.filter(isUsEtf).sort((a, b) => b.mv_usd - a.mv_usd);
+    const whtDiffFrac = Math.max(
+      0,
+      (profile.tax_profile.us_dividend_wht_pct - profile.tax_profile.ucits_dividend_wht_pct) / 100
+    );
+    for (const etf of usEtfs) {
+      const beforeTaxUsd = computeUsEstateTaxNra(runningUsSitusUsd).net_estate_tax_usd;
+      const afterTaxUsd = computeUsEstateTaxNra(Math.max(0, runningUsSitusUsd - etf.mv_usd)).net_estate_tax_usd;
+      runningUsSitusUsd = Math.max(0, runningUsSitusUsd - etf.mv_usd);
+      const estateSavedBase = round((beforeTaxUsd - afterTaxUsd) * safeFxUsd, 2);
+      const annualWhtSavedBase = round(etf.mv_base * 0.013 * whtDiffFrac, 2);
+      const prevMaxLt = remainingLtPct.size > 0 ? Math.max(...remainingLtPct.values(), 0) : 0;
+      const fromWeights = etfWeightsMap[etf.ticker];
+      if (fromWeights) {
+        for (const [canon, curLtPct] of remainingLtPct.entries()) {
+          const members2 = memberTickersForCanonical(canon);
+          let fromShare = 0;
+          let toShare = 0;
+          for (const m of members2) {
+            const fw = fromWeights[m];
+            if (typeof fw === "number") fromShare += fw;
+            const tw = etfWeightsMap[benchTicker]?.[m];
+            if (typeof tw === "number") toShare += tw;
+          }
+          const delta = (fromShare - toShare) * etf.weight_nav_pct;
+          if (delta !== 0) {
+            remainingLtPct.set(canon, Math.max(0, round(curLtPct - delta, 4)));
+          }
+        }
+      }
+      const nextMaxLt = remainingLtPct.size > 0 ? Math.max(...remainingLtPct.values(), 0) : 0;
+      const autoCuredCaps = [];
+      for (const cap of riskCaps) {
+        const rule = profile.risk_caps.find((r) => r.id === cap.id);
+        if (!rule) continue;
+        if (rule.kind === "single_name_max") {
+          if (cap.status === "BREACH" && prevMaxLt > cap.cap_pct && nextMaxLt <= cap.cap_pct) {
+            autoCuredCaps.push(cap.label);
+          }
+          continue;
+        }
+        let deltaPct = 0;
+        if (rule.kind === "us_situs") {
+          deltaPct = etf.weight_nav_pct;
+        } else if (rule.kind === "bucket") {
+          const fromFrac = etfBucketFrac(etf.ticker, rule);
+          const toFrac = etfBucketFrac(benchTicker, rule);
+          deltaPct = Math.max(0, (fromFrac - toFrac) * etf.weight_nav_pct);
+        } else if (rule.kind === "ticker" && rule.ticker) {
+          const fromW = etfWeightsMap[etf.ticker]?.[rule.ticker];
+          const toW = etfWeightsMap[benchTicker]?.[rule.ticker];
+          if (typeof fromW === "number") {
+            deltaPct = Math.max(0, (fromW - (typeof toW === "number" ? toW : 0)) * etf.weight_nav_pct);
+          }
+        }
+        if (deltaPct > 0) {
+          const prevRelief = capReliefPct.get(cap.id) ?? 0;
+          const nextRelief = prevRelief + deltaPct;
+          capReliefPct.set(cap.id, nextRelief);
+          if (cap.status === "BREACH" && cap.value_pct - prevRelief > cap.cap_pct && cap.value_pct - nextRelief <= cap.cap_pct) {
+            autoCuredCaps.push(cap.label);
+          }
+        }
+      }
+      swappedTickers.add(etf.ticker.toUpperCase());
+      remainingSharesByTicker.set(etf.ticker.toUpperCase(), 0);
+      taxSwaps.push({
+        ticker: etf.ticker,
+        target_ticker: profile.benchmark.yf_symbol || benchTicker,
+        shares: etf.qty,
+        price_trading: round(etf.price, 4),
+        currency: etf.currency,
+        proceeds_usd: round(etf.mv_usd, 2),
+        proceeds_base: round(etf.mv_base, 2),
+        estate_tax_saved_base: estateSavedBase,
+        annual_wht_saved_base: annualWhtSavedBase,
+        auto_cured_caps: autoCuredCaps,
+        rationale: `Swap US-situs ${etf.ticker} -> Ireland UCITS ${profile.benchmark.yf_symbol || benchTicker} to eliminate IRC \xA72101(c) estate exposure${annualWhtSavedBase > 0 ? " & cut dividend WHT" : ""}.`
+      });
+    }
+  }
+  const mandatoryExits = [];
+  for (const pos of heldPositions) {
+    const sym = pos.ticker.toUpperCase();
+    if (swappedTickers.has(sym)) continue;
+    const th = thesisByTicker.get(sym);
+    if (!th) continue;
+    const isExitVerdict = th.verdict === "EXIT";
+    const isKillSwitch = Boolean(th.kill_switch_triggered);
+    const isZeroCap = th.max_weight_pct === 0;
+    if (!isExitVerdict && !isKillSwitch && !isZeroCap) continue;
+    const reasons = [];
+    if (isExitVerdict) reasons.push("Verdict EXIT");
+    if (isKillSwitch) reasons.push("Kill-switch triggered");
+    if (isZeroCap) reasons.push("Max weight 0%");
+    if (th.tier === "passed") reasons.push("Passed tier still held");
+    exitedTickers.add(sym);
+    remainingSharesByTicker.set(sym, 0);
+    mandatoryExits.push({
+      ticker: pos.ticker,
+      tier: th.tier ?? "active",
+      verdict: th.verdict ?? null,
+      reason: reasons.join(" \xB7 "),
+      shares: pos.qty,
+      price_trading: round(pos.price, 4),
+      currency: pos.currency,
+      proceeds_usd: round(pos.mv_usd, 2),
+      proceeds_base: round(pos.mv_base, 2),
+      weight_nav_pct: pos.weight_nav_pct
+    });
+    propagateAssetReduction(sym, pos.us_situs, pos.weight_nav_pct);
+  }
+  mandatoryExits.sort((a, b) => b.proceeds_base - a.proceeds_base);
+  const capTrims = [];
+  const nonEtfHeld = heldPositions.filter(
+    (p) => !swappedTickers.has(p.ticker.toUpperCase()) && !exitedTickers.has(p.ticker.toUpperCase()) && !p.asset_type.toUpperCase().includes("ETF")
+  );
+  const CAP_KIND_PRIORITY = {
+    ticker: 0,
+    single_name_max: 1,
+    bucket: 2,
+    us_situs: 3
+  };
+  const breachedCapsOrdered = riskCaps.filter((c) => c.status === "BREACH").map((cap, idx) => ({
+    cap,
+    rule: profile.risk_caps.find((r) => r.id === cap.id),
+    idx
+  })).filter((x) => Boolean(x.rule)).sort((a, b) => {
+    const pDiff = CAP_KIND_PRIORITY[a.rule.kind] - CAP_KIND_PRIORITY[b.rule.kind];
+    return pDiff !== 0 ? pDiff : a.idx - b.idx;
+  });
+  const remainingMvBase = (p) => {
+    const remQty = remainingSharesByTicker.get(p.ticker.toUpperCase()) ?? 0;
+    if (remQty <= 0 || p.price <= 0) return 0;
+    const ccyFx = fxRates[p.currency] ?? safeFxUsd;
+    return remQty * p.price * ccyFx;
+  };
+  for (const { cap, rule } of breachedCapsOrdered) {
+    let relief = capReliefPct.get(cap.id) ?? 0;
+    let netPct = round(cap.value_pct - relief, 2);
+    if (rule.kind === "single_name_max" && remainingLtPct.size > 0) {
+      const maxLtNow = Math.max(...remainingLtPct.values(), 0);
+      netPct = round(Math.min(cap.value_pct, maxLtNow), 2);
+      relief = Math.max(0, round(cap.value_pct - netPct, 2));
+    }
+    if (netPct <= cap.cap_pct + 0.05) continue;
+    const excessPct = round(netPct - cap.cap_pct, 2);
+    const excessBase = excessPct / 100 * navBase;
+    if (excessBase <= 1) continue;
+    const eligible = nonEtfHeld.filter((p) => (remainingSharesByTicker.get(p.ticker.toUpperCase()) ?? 0) > 1e-6);
+    let candidate = null;
+    if (rule.kind === "single_name_max") {
+      const worstLt = Array.from(remainingLtPct.entries()).filter(([name, pct]) => pct > cap.cap_pct + 0.05 && eligible.some((p) => canonicalAssetName(p.ticker) === name)).sort((a, b) => b[1] - a[1])[0];
+      if (worstLt) {
+        candidate = eligible.filter((p) => canonicalAssetName(p.ticker) === worstLt[0]).sort((a, b) => remainingMvBase(b) - remainingMvBase(a))[0] ?? null;
+      }
+    } else if (rule.kind === "ticker" && rule.ticker) {
+      const targetCanon = canonicalAssetName(rule.ticker);
+      candidate = eligible.filter((p) => canonicalAssetName(p.ticker) === targetCanon).sort((a, b) => remainingMvBase(b) - remainingMvBase(a))[0] ?? null;
+    } else if (rule.kind === "bucket") {
+      const canonSet = new Set((rule.tickers ?? []).map((t) => canonicalAssetName(t)));
+      candidate = eligible.filter((p) => canonSet.has(canonicalAssetName(p.ticker))).sort((a, b) => remainingMvBase(b) - remainingMvBase(a))[0] ?? null;
+    } else if (rule.kind === "us_situs") {
+      candidate = eligible.filter((p) => p.us_situs).sort((a, b) => remainingMvBase(b) - remainingMvBase(a))[0] ?? null;
+    }
+    if (!candidate || candidate.price <= 0) continue;
+    const candSym = candidate.ticker.toUpperCase();
+    const availQty = remainingSharesByTicker.get(candSym) ?? 0;
+    if (availQty <= 1e-6) continue;
+    const ccyFx = fxRates[candidate.currency] ?? safeFxUsd;
+    const unitBase = candidate.price * ccyFx;
+    if (unitBase <= 0) continue;
+    const rawShares = Math.min(availQty, excessBase / unitBase);
+    const sharesToTrim = Number.isInteger(candidate.qty) ? Math.min(Math.floor(availQty), Math.ceil(rawShares)) : round(rawShares, 4);
+    if (sharesToTrim <= 0) continue;
+    const proceedsBase = round(sharesToTrim * unitBase, 2);
+    const proceedsUsd = round(proceedsBase / safeFxUsd, 2);
+    remainingSharesByTicker.set(candSym, Math.max(0, round(availQty - sharesToTrim, 6)));
+    const trimPctNav = navBase > 0 ? proceedsBase / navBase * 100 : 0;
+    propagateAssetReduction(candidate.ticker, candidate.us_situs, trimPctNav);
+    capTrims.push({
+      cap_id: cap.id,
+      cap_label: cap.label,
+      ticker: candidate.ticker,
+      current_pct: netPct,
+      cap_pct: cap.cap_pct,
+      excess_pct: excessPct,
+      shares_to_trim: sharesToTrim,
+      proceeds_usd: proceedsUsd,
+      proceeds_base: proceedsBase,
+      note: relief > 0 ? `Net of ${round(relief, 1)}% prior swap/exit/trim relief; trim ${sharesToTrim} sh ${candidate.ticker} to cure ${cap.label}.` : `Trim ${sharesToTrim} sh ${candidate.ticker} to bring ${cap.label} within ${cap.cap_pct}%.`
+    });
+  }
+  const totalSwapBase = round(taxSwaps.reduce((acc, s) => acc + s.proceeds_base, 0), 2);
+  const totalFreedBase = round(
+    mandatoryExits.reduce((acc, e) => acc + e.proceeds_base, 0) + capTrims.reduce((acc, t) => acc + t.proceeds_base, 0),
+    2
+  );
+  const totalEstateSavedBase = round(taxSwaps.reduce((acc, s) => acc + s.estate_tax_saved_base, 0), 2);
+  return {
+    tax_swaps: taxSwaps,
+    mandatory_exits: mandatoryExits,
+    cap_trims: capTrims,
+    total_swap_base: totalSwapBase,
+    total_freed_base: totalFreedBase,
+    total_estate_tax_saved_base: totalEstateSavedBase
+  };
+}
+function lookupHistorySeries(historyCache, primarySym, fallbackSym) {
+  const candidates = [primarySym, primarySym.toUpperCase()];
+  if (fallbackSym) {
+    candidates.push(fallbackSym, fallbackSym.toUpperCase());
+  }
+  const baseNoSuffix = primarySym.split(".")[0];
+  if (baseNoSuffix && baseNoSuffix !== primarySym) {
+    candidates.push(baseNoSuffix, baseNoSuffix.toUpperCase());
+  }
+  for (const key of candidates) {
+    const found = historyCache.series[key];
+    if (found && found.points.length >= 2) return found;
+  }
+  return null;
+}
+function findPriceOnOrNearDate(series, targetDate) {
+  if (series.points.length === 0) return null;
+  let bestBefore = null;
+  let firstAfter = null;
+  for (const pt of series.points) {
+    if (pt.date <= targetDate) {
+      bestBefore = pt;
+    } else if (!firstAfter) {
+      firstAfter = pt;
+    }
+  }
+  if (bestBefore) {
+    const gapDays = Math.abs(Date.parse(targetDate) - Date.parse(bestBefore.date)) / 864e5;
+    if (gapDays <= 14) return bestBefore.close;
+  }
+  if (firstAfter) {
+    const gapDays = Math.abs(Date.parse(firstAfter.date) - Date.parse(targetDate)) / 864e5;
+    if (gapDays <= 14) return firstAfter.close;
+  }
+  return bestBefore?.close ?? null;
+}
+function evaluateDirectionalHit(verdict, actionVerdict, stockRet, alphaPct) {
+  if (stockRet === null) return null;
+  const metric = alphaPct !== null ? alphaPct : stockRet;
+  if (verdict === "HIGH_CONVICTION" || actionVerdict === "GO") {
+    return metric > 0;
+  }
+  if (verdict === "EXIT" || verdict === "PROBATION" || actionVerdict === "PASS") {
+    return metric <= 0;
+  }
+  if (verdict === "WATCH") {
+    return stockRet <= 0;
+  }
+  return metric > 0;
+}
+function computeBrierCalibration(testLogAll, allHypotheses) {
+  let pool;
+  if (allHypotheses && allHypotheses.length > 0) {
+    pool = allHypotheses;
+  } else {
+    const latestMap = /* @__PURE__ */ new Map();
+    const chrono = [...testLogAll].sort((a, b) => a.tested_at.localeCompare(b.tested_at));
+    for (const rec of chrono) {
+      if (rec.event_type === "rule_change") continue;
+      for (const h of rec.hypotheses_tested) {
+        latestMap.set(`${rec.ticker}:${h.id}`, h);
+      }
+    }
+    pool = Array.from(latestMap.values());
+  }
+  const tierProbs = [
+    { confidence: "high", prob: 0.8 },
+    { confidence: "medium", prob: 0.6 },
+    { confidence: "low", prob: 0.4 }
+  ];
+  let totalResolved = 0;
+  let totalBrierSum = 0;
+  const tiers = tierProbs.map(({ confidence, prob }) => {
+    const resolved = pool.filter(
+      (h) => h.confidence === confidence && (h.status === "supported" || h.status === "falsified")
+    );
+    const supportedCount = resolved.filter((h) => h.status === "supported").length;
+    const falsifiedCount = resolved.length - supportedCount;
+    let brierSum = 0;
+    for (const h of resolved) {
+      const y = h.status === "supported" ? 1 : 0;
+      brierSum += (prob - y) ** 2;
+    }
+    totalResolved += resolved.length;
+    totalBrierSum += brierSum;
+    return {
+      confidence,
+      predicted_prob: prob,
+      resolved_count: resolved.length,
+      supported_count: supportedCount,
+      falsified_count: falsifiedCount,
+      empirical_rate_pct: resolved.length > 0 ? round(supportedCount / resolved.length * 100, 1) : null,
+      brier_score: resolved.length > 0 ? round(brierSum / resolved.length, 3) : null
+    };
+  });
+  return {
+    resolved_total: totalResolved,
+    overall_brier_score: totalResolved > 0 ? round(totalBrierSum / totalResolved, 3) : null,
+    tiers
+  };
+}
+function computeForwardScorecard(testLogAll, currentPrices, historyCache, benchmarkSymbol, nowDate = /* @__PURE__ */ new Date(), allHypotheses) {
+  const nowMs = nowDate.getTime();
+  const benchBaseTicker = benchmarkSymbol.split(".")[0]?.toUpperCase() ?? benchmarkSymbol.toUpperCase();
+  const dailyBenchSeries = historyCache.series[`daily:${benchmarkSymbol}`] ?? historyCache.series[`daily:${benchBaseTicker}`] ?? null;
+  const weeklyBenchSeries = lookupHistorySeries(historyCache, benchmarkSymbol, benchBaseTicker);
+  const benchSeries = dailyBenchSeries && dailyBenchSeries.points.length >= 2 ? dailyBenchSeries : weeklyBenchSeries;
+  const latestBenchPrice = currentPrices.get(benchmarkSymbol) ?? currentPrices.get(benchBaseTicker) ?? (benchSeries && benchSeries.points.length > 0 ? benchSeries.points[benchSeries.points.length - 1].close : null);
+  const judgmentLogs = testLogAll.filter((rec) => rec.event_type !== "rule_change");
+  const chronoLogs = [...judgmentLogs].sort((a, b) => a.tested_at.localeCompare(b.tested_at));
+  const lastKeptMsByKey = /* @__PURE__ */ new Map();
+  const dedupedLogs = [];
+  for (const rec of chronoLogs) {
+    if (typeof rec.price_at_test !== "number" || !Number.isFinite(rec.price_at_test) || rec.price_at_test <= 0) {
+      continue;
+    }
+    const testDate = rec.tested_at.slice(0, 10);
+    const ms = Date.parse(`${testDate}T00:00:00Z`);
+    const dedupKey = `${rec.ticker.toUpperCase()}:${rec.verdict}`;
+    const prevMs = lastKeptMsByKey.get(dedupKey);
+    if (prevMs !== void 0 && Number.isFinite(ms) && (ms - prevMs) / 864e5 < 30) {
+      continue;
+    }
+    if (Number.isFinite(ms)) {
+      lastKeptMsByKey.set(dedupKey, ms);
+    }
+    dedupedLogs.push(rec);
+  }
+  const entries = [];
+  for (const rec of dedupedLogs) {
+    const testDate = rec.tested_at.slice(0, 10);
+    const parsedMs = Date.parse(`${testDate}T00:00:00Z`);
+    const daysElapsed = Number.isFinite(parsedMs) ? Math.max(0, Math.floor((nowMs - parsedMs) / 864e5)) : 0;
+    const curPrice = currentPrices.get(rec.ticker) ?? null;
+    const stockRet = curPrice !== null && rec.price_at_test > 0 ? round((curPrice - rec.price_at_test) / rec.price_at_test * 100, 2) : null;
+    let benchRet = null;
+    const startBenchFromRecord = typeof rec.benchmark_price_at_test === "number" && Number.isFinite(rec.benchmark_price_at_test) && rec.benchmark_price_at_test > 0 ? rec.benchmark_price_at_test : null;
+    if (latestBenchPrice !== null && latestBenchPrice > 0) {
+      const startBench = startBenchFromRecord ?? (daysElapsed > 0 && benchSeries ? findPriceOnOrNearDate(benchSeries, testDate) : null);
+      if (startBench !== null && startBench > 0) {
+        benchRet = round((latestBenchPrice - startBench) / startBench * 100, 2);
+      }
+    }
+    const alphaPct = stockRet !== null && benchRet !== null ? round(stockRet - benchRet, 2) : null;
+    const maturity = daysElapsed >= 30 ? "MATURED" : "PENDING";
+    const actionVerdict = rec.action_verdict ?? null;
+    const hit = maturity === "MATURED" ? evaluateDirectionalHit(rec.verdict, actionVerdict, stockRet, alphaPct) : null;
+    entries.push({
+      ticker: rec.ticker,
+      tested_at: rec.tested_at,
+      test_date: testDate,
+      verdict: rec.verdict,
+      action_verdict: actionVerdict,
+      maturity,
+      hit,
+      summary: rec.summary,
+      price_at_test: round(rec.price_at_test, 4),
+      current_price: curPrice !== null ? round(curPrice, 4) : null,
+      currency: rec.currency ?? "USD",
+      stock_return_pct: stockRet,
+      benchmark_return_pct: benchRet,
+      alpha_pct: alphaPct,
+      days_elapsed: daysElapsed
+    });
+  }
+  entries.sort((a, b) => b.tested_at.localeCompare(a.tested_at));
+  const pendingCount = entries.filter((e) => e.maturity === "PENDING").length;
+  const maturedCount = entries.filter((e) => e.maturity === "MATURED").length;
+  const verdicts = ["HIGH_CONVICTION", "WATCH", "PROBATION", "EXIT"];
+  const byVerdict = verdicts.map((v) => {
+    const subset = entries.filter((e) => e.verdict === v);
+    const pendingInVerdict = subset.filter((e) => e.maturity === "PENDING").length;
+    const evaluated = subset.filter((e) => e.maturity === "MATURED" && e.stock_return_pct !== null);
+    const withAlpha = evaluated.filter((e) => e.alpha_pct !== null);
+    const avgRet = evaluated.length > 0 ? round(evaluated.reduce((acc, e) => acc + (e.stock_return_pct ?? 0), 0) / evaluated.length, 2) : null;
+    const avgAlpha = withAlpha.length > 0 ? round(withAlpha.reduce((acc, e) => acc + (e.alpha_pct ?? 0), 0) / withAlpha.length, 2) : null;
+    const scored = evaluated.filter((e) => e.hit !== null);
+    const hits = scored.filter((e) => e.hit === true).length;
+    const hitRate = scored.length > 0 ? round(hits / scored.length * 100, 1) : null;
+    return {
+      verdict: v,
+      count: subset.length,
+      pending_count: pendingInVerdict,
+      evaluated_count: evaluated.length,
+      avg_return_pct: avgRet,
+      avg_alpha_pct: avgAlpha,
+      hit_rate_pct: hitRate
+    };
+  });
+  const horizonDefs = [
+    { horizon: "90d", min_days: 90 },
+    { horizon: "180d", min_days: 180 },
+    { horizon: "1Y", min_days: 365 }
+  ];
+  const horizonBuckets = horizonDefs.map(({ horizon, min_days }) => {
+    const bucket = entries.filter((e) => e.maturity === "MATURED" && e.days_elapsed >= min_days);
+    const withAlpha = bucket.filter((e) => e.alpha_pct !== null);
+    const scored = bucket.filter((e) => e.hit !== null);
+    const hits = scored.filter((e) => e.hit === true).length;
+    return {
+      horizon,
+      min_days,
+      count: bucket.length,
+      avg_alpha_pct: withAlpha.length > 0 ? round(withAlpha.reduce((acc, e) => acc + (e.alpha_pct ?? 0), 0) / withAlpha.length, 2) : null,
+      hit_rate_pct: scored.length > 0 ? round(hits / scored.length * 100, 1) : null
+    };
+  });
+  return {
+    benchmark_symbol: benchmarkSymbol,
+    total_tests: judgmentLogs.length,
+    priced_tests: entries.length,
+    pending_count: pendingCount,
+    matured_count: maturedCount,
+    entries,
+    by_verdict: byVerdict,
+    horizon_buckets: horizonBuckets,
+    brier_calibration: computeBrierCalibration(judgmentLogs, allHypotheses)
+  };
+}
+function isoWeekMonday(dateStr) {
+  const d = /* @__PURE__ */ new Date(`${dateStr}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return dateStr;
+  const day = d.getUTCDay();
+  const diff = day === 0 ? 1 : 1 - day;
+  d.setUTCDate(d.getUTCDate() + diff);
+  return d.toISOString().slice(0, 10);
+}
+function dropIncompleteCurrentWeek(points, updatedAtIso) {
+  if (points.length < 13 || !updatedAtIso) return points;
+  const updMs = Date.parse(updatedAtIso);
+  if (!Number.isFinite(updMs)) return points;
+  const updDate = new Date(updMs);
+  const updDay = updDate.getUTCDay();
+  const updWeek = isoWeekMonday(updDate.toISOString().slice(0, 10));
+  const lastPt = points[points.length - 1];
+  const lastWeek = isoWeekMonday(lastPt.date);
+  if (lastWeek !== updWeek) return points;
+  const prevWeek = isoWeekMonday(points[points.length - 2].date);
+  const isMidWeekUpdate = updDay >= 1 && updDay <= 4 || updDay === 5 && updDate.getUTCHours() < 20;
+  const isExactMidnightSynthetic = updDate.getUTCHours() === 0 && updDate.getUTCMinutes() === 0 && updDate.getUTCSeconds() === 0 && prevWeek !== lastWeek;
+  if (isMidWeekUpdate && !isExactMidnightSynthetic) {
+    return points.filter((p) => isoWeekMonday(p.date) < updWeek);
+  }
+  return points;
+}
+function bucketSeriesByWeek(series) {
+  const cleaned = dropIncompleteCurrentWeek(series.points, series.updated_at);
+  const out = /* @__PURE__ */ new Map();
+  for (const pt of cleaned) {
+    if (!Number.isFinite(pt.close) || pt.close <= 0) continue;
+    const wk = isoWeekMonday(pt.date);
+    out.set(wk, pt.close);
+  }
+  return out;
+}
+function convertWeekMapToUsd(wkMap, currency, historyCache) {
+  const ccy = currency.trim().toUpperCase();
+  if (!ccy || ccy === "USD") {
+    return { converted: wkMap, fxApplied: false };
+  }
+  const fxSeries = historyCache.series[`${ccy}USD=X`];
+  if (!fxSeries || fxSeries.points.length < 2) {
+    return { converted: wkMap, fxApplied: false };
+  }
+  const fxWkMap = bucketSeriesByWeek(fxSeries);
+  const fxWeeksAsc = Array.from(fxWkMap.keys()).sort();
+  if (fxWeeksAsc.length === 0) {
+    return { converted: wkMap, fxApplied: false };
+  }
+  const out = /* @__PURE__ */ new Map();
+  let fxIdx = 0;
+  const assetWeeksAsc = Array.from(wkMap.keys()).sort();
+  for (const wk of assetWeeksAsc) {
+    const px = wkMap.get(wk);
+    let fxRate = fxWkMap.get(wk);
+    if (fxRate === void 0) {
+      while (fxIdx + 1 < fxWeeksAsc.length && fxWeeksAsc[fxIdx + 1] <= wk) {
+        fxIdx += 1;
+      }
+      const nearestWk = fxWeeksAsc[fxIdx];
+      const gapDays = Math.abs(Date.parse(`${wk}T00:00:00Z`) - Date.parse(`${nearestWk}T00:00:00Z`)) / 864e5;
+      if (gapDays <= 14) {
+        fxRate = fxWkMap.get(nearestWk);
+      }
+    }
+    if (fxRate !== void 0 && fxRate > 0) {
+      out.set(wk, round(px * fxRate, 4));
+    }
+  }
+  return out.size >= 12 ? { converted: out, fxApplied: true } : { converted: wkMap, fxApplied: false };
+}
+function computeSeriesMetrics(values, rfPct = 4, rebalanceCount = 0) {
+  const n = values.length;
+  if (n < 2) {
+    return {
+      cagr_pct: 0,
+      total_return_pct: 0,
+      volatility_pct: 0,
+      max_drawdown_pct: 0,
+      sharpe: 0,
+      sharpe_se: 0,
+      sortino: 0,
+      rebalance_count: rebalanceCount,
+      rolling_3y_cagr_min_pct: null,
+      rolling_3y_cagr_median_pct: null,
+      rolling_3y_cagr_max_pct: null
+    };
+  }
+  const start = values[0];
+  const end = values[n - 1];
+  const weeks = n - 1;
+  const years = Math.max(1 / 52, weeks / 52);
+  const totalReturnPct = round((end / start - 1) * 100, 2);
+  const cagrPct = round((Math.pow(Math.max(1e-4, end / start), 1 / years) - 1) * 100, 2);
+  const rets = [];
+  let peak = start;
+  let maxDd = 0;
+  for (let i = 1; i < n; i += 1) {
+    const prev = values[i - 1];
+    const cur = values[i];
+    rets.push(prev > 0 ? cur / prev - 1 : 0);
+    if (cur > peak) peak = cur;
+    const dd = peak > 0 ? (cur - peak) / peak : 0;
+    if (dd < maxDd) maxDd = dd;
+  }
+  const rfWeekly = Math.pow(1 + Math.max(0, rfPct) / 100, 1 / 52) - 1;
+  const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const variance = rets.length > 1 ? rets.reduce((acc, r) => acc + (r - mean) ** 2, 0) / (rets.length - 1) : 0;
+  const volAnn = Math.sqrt(variance) * Math.sqrt(52);
+  const downSq = rets.reduce((acc, r) => acc + (r < rfWeekly ? (r - rfWeekly) ** 2 : 0), 0) / rets.length;
+  const downDevAnn = Math.sqrt(downSq) * Math.sqrt(52);
+  const annExcessMean = (mean - rfWeekly) * 52;
+  const sharpe = volAnn > 1e-9 ? round(annExcessMean / volAnn, 2) : 0;
+  const sharpeSe = round(Math.sqrt((1 + 0.5 * sharpe * sharpe) / Math.max(0.25, years)), 2);
+  const sortino = downDevAnn > 1e-9 ? round(annExcessMean / downDevAnn, 2) : 0;
+  let rollMin = null;
+  let rollMed = null;
+  let rollMax = null;
+  const win3y = 156;
+  if (n > win3y) {
+    const rolls = [];
+    for (let i = win3y; i < n; i += 1) {
+      const v0 = values[i - win3y];
+      const v1 = values[i];
+      if (v0 > 0 && v1 > 0) {
+        rolls.push((Math.pow(v1 / v0, 1 / 3) - 1) * 100);
+      }
+    }
+    if (rolls.length > 0) {
+      rolls.sort((a, b) => a - b);
+      rollMin = round(rolls[0], 2);
+      const mid = Math.floor(rolls.length / 2);
+      rollMed = round(rolls.length % 2 === 1 ? rolls[mid] : (rolls[mid - 1] + rolls[mid]) / 2, 2);
+      rollMax = round(rolls[rolls.length - 1], 2);
+    }
+  }
+  return {
+    cagr_pct: cagrPct,
+    total_return_pct: totalReturnPct,
+    volatility_pct: round(volAnn * 100, 2),
+    max_drawdown_pct: round(maxDd * 100, 2),
+    sharpe,
+    sharpe_se: sharpeSe,
+    sortino,
+    rebalance_count: rebalanceCount,
+    rolling_3y_cagr_min_pct: rollMin,
+    rolling_3y_cagr_median_pct: rollMed,
+    rolling_3y_cagr_max_pct: rollMax
+  };
+}
+function pearsonCorrelation(xs, ys) {
+  const n = Math.min(xs.length, ys.length);
+  if (n < 4) return null;
+  let sumX = 0;
+  let sumY = 0;
+  for (let i = 0; i < n; i += 1) {
+    sumX += xs[i];
+    sumY += ys[i];
+  }
+  const meanX = sumX / n;
+  const meanY = sumY / n;
+  let num = 0;
+  let denX = 0;
+  let denY = 0;
+  for (let i = 0; i < n; i += 1) {
+    const dx = xs[i] - meanX;
+    const dy = ys[i] - meanY;
+    num += dx * dy;
+    denX += dx * dx;
+    denY += dy * dy;
+  }
+  const den = Math.sqrt(denX * denY);
+  if (den <= 1e-12) return null;
+  return round(num / den, 3);
+}
+function simulatePortfolioPath(weights, weeklyPrices, numPoints, rebalanceBandFrac, rfPct = 4) {
+  const assets = Array.from(weights.entries()).filter(([, w]) => w > 1e-6);
+  const alloc = /* @__PURE__ */ new Map();
+  for (const [k, w] of assets) {
+    alloc.set(k, 100 * w);
+  }
+  const curve = [100];
+  const cashGrowthWeekly = Math.pow(1 + Math.max(0, rfPct) / 100, 1 / 52);
+  let rebalanceCount = 0;
+  for (let t = 1; t < numPoints; t += 1) {
+    let total = 0;
+    for (const [k] of assets) {
+      const prevAlloc = alloc.get(k) ?? 0;
+      if (k === "__CASH__") {
+        const nextCash = prevAlloc * cashGrowthWeekly;
+        alloc.set(k, nextCash);
+        total += nextCash;
+        continue;
+      }
+      const series = weeklyPrices.get(k);
+      const p0 = series?.[t - 1] ?? 1;
+      const p1 = series?.[t] ?? p0;
+      const nextAlloc = p0 > 0 ? prevAlloc * (p1 / p0) : prevAlloc;
+      alloc.set(k, nextAlloc);
+      total += nextAlloc;
+    }
+    if (total > 0 && rebalanceBandFrac > 0) {
+      let breached = false;
+      for (const [k, targetW] of assets) {
+        if (targetW < 1e-3) continue;
+        const curW = (alloc.get(k) ?? 0) / total;
+        if (Math.abs(curW - targetW) >= Math.max(0.02, targetW * rebalanceBandFrac)) {
+          breached = true;
+          break;
+        }
+      }
+      if (breached) {
+        rebalanceCount += 1;
+        for (const [k, targetW] of assets) {
+          alloc.set(k, total * targetW);
+        }
+      }
+    }
+    curve.push(round(total, 4));
+  }
+  return { curve, rebalanceCount };
+}
+function computeWindowCagrAndDd(dates, values, startDate, endDate) {
+  const slice = [];
+  for (let i = 0; i < dates.length; i += 1) {
+    const d = dates[i];
+    if (d >= startDate && d <= endDate) {
+      slice.push(values[i]);
+    }
+  }
+  if (slice.length < 12) return null;
+  const start = slice[0];
+  const end = slice[slice.length - 1];
+  const weeks = slice.length - 1;
+  const cagrPct = round((Math.pow(Math.max(1e-4, end / start), 52 / weeks) - 1) * 100, 2);
+  let peak = start;
+  let maxDd = 0;
+  for (const v of slice) {
+    if (v > peak) peak = v;
+    const dd = peak > 0 ? (v - peak) / peak : 0;
+    if (dd < maxDd) maxDd = dd;
+  }
+  return { weeks, cagr_pct: cagrPct, dd_pct: round(maxDd * 100, 2) };
+}
+function runDeterministicBacktest(req, portfolio, lookthrough, profile, historyCache, fxRates, opts) {
+  const candidateTicker = req.candidate_ticker.toUpperCase();
+  const candidateYf = (req.candidate_yf_symbol || candidateTicker).trim();
+  const benchmarkSym = profile.benchmark.yf_symbol || profile.benchmark.ticker;
+  const benchmarkTicker = profile.benchmark.ticker.toUpperCase();
+  const rfPct = round(req.rf_pct ?? opts?.defaultRfPct ?? 4, 2);
+  const includeExternalWealth = req.include_external_wealth !== false;
+  const candSeries = lookupHistorySeries(historyCache, candidateYf, candidateTicker);
+  if (!candSeries || candSeries.points.length < 12) {
+    throw new Error(
+      `Insufficient weekly price history for ${candidateTicker} (need at least 12 overlapping weekly bars).`
+    );
+  }
+  const benchSeries = lookupHistorySeries(historyCache, benchmarkSym, benchmarkTicker) ?? candSeries;
+  const dataSources = {};
+  dataSources[candidateTicker] = candSeries.source;
+  dataSources[benchmarkTicker] = benchSeries.source;
+  const fxUsdToBase = fxRates.USD ?? 1;
+  const posBaseValues = /* @__PURE__ */ new Map();
+  const posYfSymbols = /* @__PURE__ */ new Map();
+  let totalPosBase = 0;
+  for (const pos of portfolio.positions) {
+    const ccyFx = fxRates[pos.currency] ?? fxUsdToBase;
+    const mvBase = Math.max(0, pos.qty * pos.ref_price * ccyFx);
+    if (mvBase <= 0) continue;
+    posBaseValues.set(pos.ticker, (posBaseValues.get(pos.ticker) ?? 0) + mvBase);
+    posYfSymbols.set(pos.ticker, pos.yf_symbol || pos.ticker);
+    totalPosBase += mvBase;
+  }
+  const caveats = [];
+  const ext = profile.external_exposure;
+  let extTickerIncluded = null;
+  if (includeExternalWealth && ext.enabled && ext.ticker && ext.amount_base > 0) {
+    const extSym = ext.ticker.trim().toUpperCase();
+    posBaseValues.set(extSym, (posBaseValues.get(extSym) ?? 0) + ext.amount_base);
+    if (!posYfSymbols.has(extSym)) {
+      posYfSymbols.set(extSym, extSym);
+    }
+    totalPosBase += ext.amount_base;
+    extTickerIncluded = extSym;
+  }
+  const cashBase = Math.max(0, portfolio.cash_base + portfolio.accruals_base);
+  const rawNavBase = Math.max(1, totalPosBase + cashBase);
+  const fxConvertedTickers = [];
+  const unconvertedForeignTickers = [];
+  const rawWeekMaps = /* @__PURE__ */ new Map();
+  const candConv = convertWeekMapToUsd(bucketSeriesByWeek(candSeries), candSeries.currency, historyCache);
+  if (candConv.fxApplied) fxConvertedTickers.push(candidateTicker);
+  else if (candSeries.currency.toUpperCase() !== "USD") unconvertedForeignTickers.push(candidateTicker);
+  const benchConv = convertWeekMapToUsd(bucketSeriesByWeek(benchSeries), benchSeries.currency, historyCache);
+  if (benchConv.fxApplied) fxConvertedTickers.push(benchmarkTicker);
+  const candWeeks = candConv.converted;
+  const benchWeeks = benchConv.converted;
+  rawWeekMaps.set(candidateTicker, candWeeks);
+  rawWeekMaps.set("__BENCH__", benchWeeks);
+  const candKeys = Array.from(candWeeks.keys()).sort();
+  const benchKeys = Array.from(benchWeeks.keys()).sort();
+  const candBenchStart = candKeys[0] && benchKeys[0] ? candKeys[0] > benchKeys[0] ? candKeys[0] : benchKeys[0] : candKeys[0] ?? "";
+  const candBenchEnd = candKeys.length > 0 && benchKeys.length > 0 ? candKeys[candKeys.length - 1] < benchKeys[benchKeys.length - 1] ? candKeys[candKeys.length - 1] : benchKeys[benchKeys.length - 1] : candKeys[candKeys.length - 1] ?? "";
+  const candBenchWeeks = candKeys.filter((w) => w >= candBenchStart && w <= candBenchEnd).length;
+  const holdingCandidates = [];
+  const missingHoldings = [];
+  for (const [ticker] of posBaseValues.entries()) {
+    const yfSym = posYfSymbols.get(ticker) ?? ticker;
+    const series = lookupHistorySeries(historyCache, yfSym, ticker);
+    if (!series || series.points.length < 26) {
+      missingHoldings.push(ticker);
+      continue;
+    }
+    const conv = convertWeekMapToUsd(bucketSeriesByWeek(series), series.currency, historyCache);
+    if (conv.fxApplied && !fxConvertedTickers.includes(ticker)) fxConvertedTickers.push(ticker);
+    else if (series.currency.toUpperCase() !== "USD" && !conv.fxApplied && !unconvertedForeignTickers.includes(ticker)) {
+      unconvertedForeignTickers.push(ticker);
+    }
+    const wkMap = conv.converted;
+    if (wkMap.size < 26) {
+      missingHoldings.push(ticker);
+      continue;
+    }
+    const overlapCount = Array.from(wkMap.keys()).filter((w) => w >= candBenchStart && w <= candBenchEnd).length;
+    holdingCandidates.push({ ticker, source: series.source, wkMap, overlapCount });
+  }
+  const useThreeYearCutoff = candBenchWeeks >= 156 && holdingCandidates.some((h) => h.overlapCount >= 156);
+  const minHoldingWeeks = useThreeYearCutoff ? 156 : 26;
+  const includedHoldings = [];
+  const excludedHoldings = [...missingHoldings];
+  for (const h of holdingCandidates) {
+    if (h.overlapCount < minHoldingWeeks && h.ticker !== candidateTicker) {
+      excludedHoldings.push(h.ticker);
+      continue;
+    }
+    rawWeekMaps.set(h.ticker, h.wkMap);
+    dataSources[h.ticker] = h.source;
+    includedHoldings.push(h.ticker);
+  }
+  if (extTickerIncluded && includedHoldings.includes(extTickerIncluded)) {
+    caveats.push(`Includes external ${extTickerIncluded} exposure in liquid wealth weights.`);
+  }
+  if (fxConvertedTickers.length > 0) {
+    caveats.push(`Weekly USD FX conversion applied to: ${fxConvertedTickers.join(", ")}.`);
+  }
+  if (unconvertedForeignTickers.length > 0) {
+    caveats.push(`Local-currency bars (FX history unavailable) for: ${unconvertedForeignTickers.join(", ")}.`);
+  }
+  if (excludedHoldings.length > 0) {
+    caveats.push(
+      `Excluded holdings with <${minHoldingWeeks}w overlapping history (weights renormalized): ${excludedHoldings.join(", ")}.`
+    );
+  }
+  const allWeekSet = new Set(candWeeks.keys());
+  const sortedAllWeeks = Array.from(allWeekSet).sort();
+  const startDates = [];
+  const endDates = [];
+  for (const [key, wkMap] of rawWeekMaps.entries()) {
+    if (key === "__BENCH__" && wkMap.size === 0) continue;
+    const keys = Array.from(wkMap.keys()).sort();
+    if (keys.length === 0) continue;
+    startDates.push(keys[0]);
+    endDates.push(keys[keys.length - 1]);
+  }
+  const overlapStart = startDates.sort()[startDates.length - 1] ?? sortedAllWeeks[0] ?? "";
+  const overlapEnd = endDates.sort()[0] ?? sortedAllWeeks[sortedAllWeeks.length - 1] ?? "";
+  const candidateAlignedWeeks = sortedAllWeeks.filter((w) => w >= overlapStart && w <= overlapEnd);
+  if (candidateAlignedWeeks.length < 12) {
+    throw new Error(
+      `Insufficient overlapping history across portfolio and ${candidateTicker} (${candidateAlignedWeeks.length} weeks; need >= 12).`
+    );
+  }
+  const alignedPrices = /* @__PURE__ */ new Map();
+  const finalDates = [];
+  const lastSeen = /* @__PURE__ */ new Map();
+  const carryStreak = /* @__PURE__ */ new Map();
+  for (const wk of candidateAlignedWeeks) {
+    let allValid = true;
+    const stepPrices = /* @__PURE__ */ new Map();
+    const nextStreaks = /* @__PURE__ */ new Map();
+    for (const [key, wkMap] of rawWeekMaps.entries()) {
+      const exact = wkMap.get(wk);
+      if (exact !== void 0) {
+        stepPrices.set(key, exact);
+        nextStreaks.set(key, 0);
+      } else {
+        const carry = lastSeen.get(key);
+        const streak = carryStreak.get(key) ?? 0;
+        if (carry !== void 0 && streak < 1) {
+          stepPrices.set(key, carry);
+          nextStreaks.set(key, streak + 1);
+        } else {
+          allValid = false;
+          break;
+        }
+      }
+    }
+    if (!allValid) continue;
+    finalDates.push(wk);
+    for (const [key, val] of stepPrices.entries()) {
+      lastSeen.set(key, val);
+      carryStreak.set(key, nextStreaks.get(key) ?? 0);
+      let arr = alignedPrices.get(key);
+      if (!arr) {
+        arr = [];
+        alignedPrices.set(key, arr);
+      }
+      arr.push(val);
+    }
+  }
+  if (finalDates.length < 12) {
+    throw new Error(`Aligned backtest series has only ${finalDates.length} weeks (need >= 12).`);
+  }
+  const baseWeights = /* @__PURE__ */ new Map();
+  let backedBaseTotal = cashBase;
+  for (const ticker of includedHoldings) {
+    backedBaseTotal += posBaseValues.get(ticker) ?? 0;
+  }
+  const denom = backedBaseTotal > 0 ? backedBaseTotal : rawNavBase;
+  for (const ticker of includedHoldings) {
+    const w = (posBaseValues.get(ticker) ?? 0) / denom;
+    if (w > 0) baseWeights.set(ticker, w);
+  }
+  if (cashBase > 0) {
+    baseWeights.set("__CASH__", cashBase / denom);
+  }
+  if (baseWeights.size === 0) {
+    baseWeights.set("__BENCH__", 1);
+    caveats.push("No backed holdings available; baseline defaults to 100% benchmark.");
+  }
+  const simWeights = new Map(baseWeights);
+  const targetW = Math.min(0.95, Math.max(5e-3, req.target_weight_pct / 100));
+  const currentCandW = simWeights.get(candidateTicker) ?? 0;
+  const deltaW = targetW - currentCandW;
+  simWeights.set(candidateTicker, targetW);
+  if (deltaW > 0) {
+    let remainingToFund = deltaW;
+    if (req.funding_source.startsWith("swap:")) {
+      const swapSym = req.funding_source.slice(5).trim().toUpperCase();
+      const availSwap = simWeights.get(swapSym) ?? 0;
+      const takeSwap = Math.min(availSwap, remainingToFund);
+      simWeights.set(swapSym, Math.max(0, availSwap - takeSwap));
+      remainingToFund -= takeSwap;
+      if (remainingToFund > 5e-4) {
+        caveats.push(`Swap source ${swapSym} (${round(availSwap * 100, 1)}%) was smaller than target; remainder funded from cash/pro-rata.`);
+      }
+    }
+    if (remainingToFund > 5e-4 && (req.funding_source === "cash" || req.funding_source.startsWith("swap:"))) {
+      const availCash = simWeights.get("__CASH__") ?? 0;
+      const takeCash = Math.min(availCash, remainingToFund);
+      simWeights.set("__CASH__", Math.max(0, availCash - takeCash));
+      remainingToFund -= takeCash;
+      if (remainingToFund > 5e-4 && req.funding_source === "cash") {
+        caveats.push(`Cash (${round(availCash * 100, 1)}%) was insufficient for ${req.target_weight_pct}%; remainder funded pro-rata.`);
+      }
+    }
+    if (remainingToFund > 5e-4) {
+      let otherSum = 0;
+      for (const [k, w] of simWeights.entries()) {
+        if (k !== candidateTicker && w > 0) otherSum += w;
+      }
+      if (otherSum > 0) {
+        const scale = Math.max(0, (otherSum - remainingToFund) / otherSum);
+        for (const [k, w] of simWeights.entries()) {
+          if (k !== candidateTicker && w > 0) {
+            simWeights.set(k, w * scale);
+          }
+        }
+      }
+    }
+  } else if (deltaW < 0) {
+    const freed = -deltaW;
+    if (req.funding_source.startsWith("swap:")) {
+      const swapSym = req.funding_source.slice(5).trim().toUpperCase();
+      if (alignedPrices.has(swapSym)) {
+        simWeights.set(swapSym, (simWeights.get(swapSym) ?? 0) + freed);
+      } else {
+        simWeights.set("__CASH__", (simWeights.get("__CASH__") ?? 0) + freed);
+      }
+    } else if (req.funding_source === "pro_rata") {
+      let otherSum = 0;
+      for (const [k, w] of simWeights.entries()) {
+        if (k !== candidateTicker && w > 0) otherSum += w;
+      }
+      if (otherSum > 0) {
+        const scale = (otherSum + freed) / otherSum;
+        for (const [k, w] of simWeights.entries()) {
+          if (k !== candidateTicker && w > 0) simWeights.set(k, w * scale);
+        }
+      } else {
+        simWeights.set("__CASH__", (simWeights.get("__CASH__") ?? 0) + freed);
+      }
+    } else {
+      simWeights.set("__CASH__", (simWeights.get("__CASH__") ?? 0) + freed);
+    }
+  }
+  let simSum = 0;
+  for (const w of simWeights.values()) simSum += w;
+  if (simSum > 0 && Math.abs(simSum - 1) > 1e-6) {
+    for (const [k, w] of simWeights.entries()) {
+      simWeights.set(k, w / simSum);
+    }
+  }
+  const bandFrac = Math.max(0.05, req.rebalance_band_pct / 100);
+  const baselineSim = simulatePortfolioPath(baseWeights, alignedPrices, finalDates.length, bandFrac, rfPct);
+  const simulatedSim = simulatePortfolioPath(simWeights, alignedPrices, finalDates.length, bandFrac, rfPct);
+  const baselineCurve = baselineSim.curve;
+  const simulatedCurve = simulatedSim.curve;
+  const benchRaw = alignedPrices.get("__BENCH__");
+  const benchStart = benchRaw[0];
+  const benchmarkCurve = benchRaw.map((p) => round(p / benchStart * 100, 4));
+  const baselineMetrics = computeSeriesMetrics(baselineCurve, rfPct, baselineSim.rebalanceCount);
+  const simulatedMetrics = computeSeriesMetrics(simulatedCurve, rfPct, simulatedSim.rebalanceCount);
+  const benchmarkMetrics = computeSeriesMetrics(benchmarkCurve, rfPct, 0);
+  const toWeeklyReturns = (arr) => {
+    const out = [];
+    for (let i = 1; i < arr.length; i += 1) {
+      const prev = arr[i - 1];
+      out.push(prev > 0 ? arr[i] / prev - 1 : 0);
+    }
+    return out;
+  };
+  const candRets = toWeeklyReturns(alignedPrices.get(candidateTicker));
+  const baseRets = toWeeklyReturns(baselineCurve);
+  const candCorrPortfolio = pearsonCorrelation(candRets, baseRets);
+  const primaryBucket = profile.risk_caps.find((r) => r.kind === "bucket");
+  let candCorrCluster = null;
+  if (primaryBucket && primaryBucket.tickers && primaryBucket.tickers.length > 0) {
+    const bucketCanonSet = new Set(primaryBucket.tickers.map((t) => canonicalAssetName(t)));
+    const ltWeightByCanon = new Map(lookthrough.map((row) => [row.name, row.pct_nav]));
+    const clusterWeights = /* @__PURE__ */ new Map();
+    let clusterWTotal = 0;
+    for (const ticker of includedHoldings) {
+      const canon = canonicalAssetName(ticker);
+      if (bucketCanonSet.has(canon) && ticker !== candidateTicker) {
+        const w = includeExternalWealth && ticker === extTickerIncluded ? (baseWeights.get(ticker) ?? 0) * 100 : ltWeightByCanon.get(canon) ?? (baseWeights.get(ticker) ?? 0) * 100;
+        if (w > 0) {
+          clusterWeights.set(ticker, w);
+          clusterWTotal += w;
+        }
+      }
+    }
+    if (clusterWTotal > 0) {
+      const normCluster = /* @__PURE__ */ new Map();
+      for (const [k, w] of clusterWeights.entries()) {
+        normCluster.set(k, w / clusterWTotal);
+      }
+      const clusterSim = simulatePortfolioPath(normCluster, alignedPrices, finalDates.length, 0, rfPct);
+      candCorrCluster = pearsonCorrelation(candRets, toWeeklyReturns(clusterSim.curve));
+    }
+  }
+  const holdingCorrs = [];
+  for (const ticker of includedHoldings) {
+    if (ticker === candidateTicker) continue;
+    const arr = alignedPrices.get(ticker);
+    if (!arr) continue;
+    const c = pearsonCorrelation(candRets, toWeeklyReturns(arr));
+    if (c !== null) {
+      holdingCorrs.push({ ticker, corr: c });
+    }
+  }
+  holdingCorrs.sort((a, b) => Math.abs(b.corr) - Math.abs(a.corr));
+  const regimeDefs = [
+    { id: "2022-rate-shock", label: "2022 Rate Shock", start: "2022-01-01", end: "2022-12-31" },
+    { id: "2023-2024-ai-expansion", label: "2023\u201324 AI Expansion", start: "2023-01-01", end: "2024-12-31" },
+    { id: "2025-2026-vol", label: "2025\u201326 Market Regime", start: "2025-01-01", end: "2026-12-31" }
+  ];
+  const regimes = [];
+  for (const r of regimeDefs) {
+    const bStat = computeWindowCagrAndDd(finalDates, baselineCurve, r.start, r.end);
+    const sStat = computeWindowCagrAndDd(finalDates, simulatedCurve, r.start, r.end);
+    if (bStat && sStat) {
+      regimes.push({
+        id: r.id,
+        label: r.label,
+        start: r.start,
+        end: r.end,
+        weeks: bStat.weeks,
+        baseline_cagr_pct: bStat.cagr_pct,
+        simulated_cagr_pct: sStat.cagr_pct,
+        baseline_dd_pct: bStat.dd_pct,
+        simulated_dd_pct: sStat.dd_pct
+      });
+    }
+  }
+  if (regimes.length === 0) {
+    regimes.push({
+      id: "full-overlap",
+      label: "Full Overlapping Window",
+      start: finalDates[0],
+      end: finalDates[finalDates.length - 1],
+      weeks: finalDates.length - 1,
+      baseline_cagr_pct: baselineMetrics.cagr_pct,
+      simulated_cagr_pct: simulatedMetrics.cagr_pct,
+      baseline_dd_pct: baselineMetrics.max_drawdown_pct,
+      simulated_dd_pct: simulatedMetrics.max_drawdown_pct
+    });
+  }
+  const equityCurve = finalDates.map((date5, idx) => ({
+    date: date5,
+    baseline_idx: round(baselineCurve[idx], 2),
+    simulated_idx: round(simulatedCurve[idx], 2),
+    benchmark_idx: round(benchmarkCurve[idx], 2)
+  }));
+  const baseCaveat = `Deterministic weekly backtest (${finalDates.length - 1}w, hybrid max(2%, ${req.rebalance_band_pct}%) drift rebalance, rf=${rfPct}%, survivor/hindsight caveats apply).`;
+  const caveat = caveats.length > 0 ? `${baseCaveat} ${caveats.join(" ")}` : baseCaveat;
+  return {
+    candidate_ticker: candidateTicker,
+    candidate_yf_symbol: candidateYf,
+    benchmark_symbol: benchmarkSym,
+    target_weight_pct: round(req.target_weight_pct, 2),
+    funding_source: req.funding_source,
+    rebalance_band_pct: round(req.rebalance_band_pct, 1),
+    rf_pct: rfPct,
+    include_external_wealth: includeExternalWealth,
+    fx_converted_tickers: fxConvertedTickers,
+    overlap_start: finalDates[0],
+    overlap_end: finalDates[finalDates.length - 1],
+    weeks_analyzed: finalDates.length - 1,
+    caveat,
+    data_sources: dataSources,
+    baseline: baselineMetrics,
+    simulated: simulatedMetrics,
+    benchmark: benchmarkMetrics,
+    deltas: {
+      cagr_pct: round(simulatedMetrics.cagr_pct - baselineMetrics.cagr_pct, 2),
+      max_drawdown_pct: round(simulatedMetrics.max_drawdown_pct - baselineMetrics.max_drawdown_pct, 2),
+      sharpe: round(simulatedMetrics.sharpe - baselineMetrics.sharpe, 2),
+      sortino: round(simulatedMetrics.sortino - baselineMetrics.sortino, 2)
+    },
+    candidate_corr_portfolio: candCorrPortfolio,
+    candidate_corr_cluster: candCorrCluster,
+    top_correlations: holdingCorrs.slice(0, 5),
+    regimes,
+    equity_curve: equityCurve
+  };
+}
+
+// src/server/engine.ts
 function inferSecurityMeta(ticker, isin = "") {
   const sym = ticker.trim().toUpperCase();
   const cleanIsin = isin.trim().toUpperCase();
@@ -34215,60 +37344,6 @@ function inferSecurityMeta(ticker, isin = "") {
     asset_type: "US Equity",
     currency: "USD"
   };
-}
-function computeUsEstateTaxNra(usSitusUsd) {
-  if (!Number.isFinite(usSitusUsd) || usSitusUsd <= 6e4) {
-    return {
-      us_situs_usd: round(Math.max(0, usSitusUsd || 0), 2),
-      taxable_excess_over_60k_usd: 0,
-      tentative_tax_usd: 0,
-      unified_credit_usd: 13e3,
-      net_estate_tax_usd: 0,
-      effective_rate_pct: 0,
-      marginal_rate_pct: 0
-    };
-  }
-  const brackets = [
-    [1e4, 0.18],
-    [2e4, 0.2],
-    [4e4, 0.22],
-    [6e4, 0.24],
-    [8e4, 0.26],
-    [1e5, 0.28],
-    [15e4, 0.3],
-    [25e4, 0.32],
-    [5e5, 0.34],
-    [75e4, 0.37],
-    [1e6, 0.39],
-    [Number.POSITIVE_INFINITY, 0.4]
-  ];
-  let tentative = 0;
-  let prev = 0;
-  let marginal = 0.18;
-  for (const [cap, rate] of brackets) {
-    if (usSitusUsd > prev) {
-      const slice = Math.min(usSitusUsd, cap) - prev;
-      tentative += slice * rate;
-      marginal = rate;
-      prev = cap;
-    } else {
-      break;
-    }
-  }
-  const netTax = Math.max(0, tentative - 13e3);
-  return {
-    us_situs_usd: round(usSitusUsd, 2),
-    taxable_excess_over_60k_usd: round(usSitusUsd - 6e4, 2),
-    tentative_tax_usd: round(tentative, 2),
-    unified_credit_usd: 13e3,
-    net_estate_tax_usd: round(netTax, 2),
-    effective_rate_pct: round(netTax / usSitusUsd * 100, 2),
-    marginal_rate_pct: round(marginal * 100, 1)
-  };
-}
-function round(value, decimals = 2) {
-  const factor = 10 ** decimals;
-  return Math.round((value + Number.EPSILON) * factor) / factor;
 }
 function formatTimestamp(date5, timeZone) {
   let tz = timeZone || "UTC";
@@ -34354,6 +37429,10 @@ function extractSectionBullets(body, headingPrefix, limit) {
   }
   return bullets;
 }
+function extractLatestDecision(body) {
+  const all = extractSectionBullets(body, "## 4.", 250);
+  return all.length > 0 ? all[all.length - 1] : "";
+}
 function parseThesisMarkdown(raw) {
   const normalized = raw.replace(/\r\n/g, "\n");
   if (!normalized.startsWith("---\n")) return null;
@@ -34386,6 +37465,7 @@ function upsertThesisMarkdown(existingRaw, update, todayYmd) {
       currency: update.currency ?? meta3.currency,
       us_situs: update.us_situs ?? meta3.us_situs,
       role: update.role ?? "Watchlist / Satellite",
+      tier: update.tier ?? "active",
       last_ref_price: null,
       buy_zone_low: null,
       buy_zone_high: null,
@@ -34415,6 +37495,16 @@ ${killBullets}
   if (update.yf_symbol !== void 0) fm.yf_symbol = update.yf_symbol;
   if (update.currency !== void 0) fm.currency = update.currency;
   if (update.us_situs !== void 0) fm.us_situs = update.us_situs;
+  if (update.tier !== void 0) fm.tier = update.tier;
+  if (update.action_verdict !== void 0) fm.action_verdict = update.action_verdict;
+  if (update.takeaway !== void 0) fm.takeaway = update.takeaway;
+  if (update.last_audited_date !== void 0) fm.last_audited_date = update.last_audited_date;
+  if (update.price_at_audit !== void 0) fm.price_at_audit = update.price_at_audit;
+  if (update.sources !== void 0) fm.sources = update.sources;
+  if (update.rejection_reason !== void 0) fm.rejection_reason = update.rejection_reason;
+  if (update.reentry_trigger !== void 0) fm.reentry_trigger = update.reentry_trigger;
+  if (update.reentry_price !== void 0) fm.reentry_price = update.reentry_price;
+  if (update.theme_refs !== void 0) fm.theme_refs = update.theme_refs;
   if (update.clear_buy_zone) {
     fm.buy_zone_low = null;
     fm.buy_zone_high = null;
@@ -34476,6 +37566,23 @@ function parseHypothesesFromFrontmatter(raw) {
   const parsed = external_exports.array(HypothesisSchema).safeParse(raw);
   return parsed.success ? parsed.data : [];
 }
+function parseSourcesFromFrontmatter(raw) {
+  if (!Array.isArray(raw)) return [];
+  const parsed = external_exports.array(ProvenanceSourceSchema).safeParse(raw);
+  return parsed.success ? parsed.data : [];
+}
+function parseThemeRefsFromFrontmatter(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    try {
+      out.push(normalizeThemeSlug(item));
+    } catch {
+    }
+  }
+  return Array.from(new Set(out));
+}
 function countHypotheses(hypotheses) {
   let supported = 0;
   let weakened = 0;
@@ -34489,11 +37596,176 @@ function countHypotheses(hypotheses) {
   }
   return { total: hypotheses.length, supported, weakened, falsified, untested };
 }
-function saveOrMergeThesis(dataDir, profile, update) {
+function resolveCurrentVerdictForLog(fm) {
+  const v = fm?.verdict;
+  if (v === "HIGH_CONVICTION" || v === "WATCH" || v === "PROBATION" || v === "EXIT") return v;
+  return "WATCH";
+}
+function appendRuleChangeEntry(dataDir, profile, ticker, changes, rationale, existingFm) {
+  if (changes.length === 0) return;
+  const { iso } = formatTimestamp(/* @__PURE__ */ new Date(), profile.timezone);
+  const cleanRationale = rationale?.trim() ? ` | Rationale: ${rationale.trim()}` : "";
+  const summary = `[RULE CHANGE] ${changes.join(", ")}${cleanRationale}`.slice(0, 595);
+  appendThesisTestLog(dataDir, {
+    ticker: normalizeTicker(ticker),
+    tested_at: iso,
+    event_type: "rule_change",
+    verdict: resolveCurrentVerdictForLog(existingFm),
+    kill_switch_triggered: false,
+    summary,
+    hypotheses_tested: []
+  });
+}
+function saveOrMergeThesis(dataDir, profile, update, opts) {
   const { dateYmd } = formatTimestamp(/* @__PURE__ */ new Date(), profile.timezone);
   const existing = readThesisFile(dataDir, update.ticker);
+  const existingFm = existing ? parseThesisMarkdown(existing)?.fm ?? null : null;
   const nextMarkdown = upsertThesisMarkdown(existing, update, dateYmd);
-  return writeThesisFile(dataDir, update.ticker, nextMarkdown);
+  const writtenPath = writeThesisFile(dataDir, update.ticker, nextMarkdown);
+  if (existingFm && !opts?.skipRuleChangeLog) {
+    const changes = [];
+    if (update.clear_buy_zone && (existingFm.buy_zone_low != null || existingFm.buy_zone_high != null)) {
+      changes.push("cleared buy_zone");
+    } else {
+      if (update.buy_zone_low !== void 0 && update.buy_zone_low !== existingFm.buy_zone_low) {
+        changes.push(`buy_zone_low ${existingFm.buy_zone_low ?? "null"} -> ${update.buy_zone_low ?? "null"}`);
+      }
+      if (update.buy_zone_high !== void 0 && update.buy_zone_high !== existingFm.buy_zone_high) {
+        changes.push(`buy_zone_high ${existingFm.buy_zone_high ?? "null"} -> ${update.buy_zone_high ?? "null"}`);
+      }
+    }
+    if (update.clear_trim_zone && existingFm.trim_zone != null) {
+      changes.push("cleared trim_zone");
+    } else if (update.trim_zone !== void 0 && update.trim_zone !== existingFm.trim_zone) {
+      changes.push(`trim_zone ${existingFm.trim_zone ?? "null"} -> ${update.trim_zone ?? "null"}`);
+    }
+    if (update.gated !== void 0 && update.gated !== Boolean(existingFm.gated)) {
+      changes.push(`gated ${Boolean(existingFm.gated)} -> ${update.gated}`);
+    }
+    const prevMaxW = existingFm.max_weight_pct ?? existingFm.max_ibkr_weight_pct ?? null;
+    if (update.max_weight_pct !== void 0 && update.max_weight_pct !== prevMaxW) {
+      changes.push(`max_weight_pct ${prevMaxW ?? "null"} -> ${update.max_weight_pct ?? "null"}`);
+    }
+    if (update.reentry_price !== void 0 && update.reentry_price !== (existingFm.reentry_price ?? null)) {
+      changes.push(`reentry_price ${existingFm.reentry_price ?? "null"} -> ${update.reentry_price ?? "null"}`);
+    }
+    if (changes.length > 0) {
+      appendRuleChangeEntry(dataDir, profile, update.ticker, changes, update.rationale, existingFm);
+    }
+  }
+  return writtenPath;
+}
+function saveDossierModelWithAudit(dataDir, profile, ticker, rawModel, rationale) {
+  const sym = normalizeTicker(ticker);
+  const validated = DossierModelSchema.parse(rawModel);
+  const existingModel = loadDossierModel(dataDir, sym);
+  const saved = saveDossierModel(dataDir, sym, validated);
+  if (existingModel || rationale && rationale.trim()) {
+    const existingRaw = readThesisFile(dataDir, sym);
+    const existingFm = existingRaw ? parseThesisMarkdown(existingRaw)?.fm ?? null : null;
+    const changeBits = ["updated valuation model"];
+    if (saved.scenarios) {
+      changeBits.push(
+        `Bear/Base/Bull=${saved.scenarios.bear.target_price_5y}/${saved.scenarios.base.target_price_5y}/${saved.scenarios.bull.target_price_5y}`
+      );
+    }
+    if (saved.reverse_dcf) {
+      changeBits.push(`exit_multiple=${saved.reverse_dcf.exit_multiple}x`);
+    }
+    appendRuleChangeEntry(dataDir, profile, sym, changeBits, rationale, existingFm);
+  }
+  return saved;
+}
+function upsertDossier(dataDir, profile, rawInput) {
+  const parsed = DossierUpsertSchema.parse(rawInput);
+  const { model, memo_md, intel, ...thesisUpdate } = parsed;
+  const thesisPath = saveOrMergeThesis(dataDir, profile, thesisUpdate);
+  let savedModel = false;
+  let savedMemo = false;
+  let savedIntel = false;
+  if (model !== void 0) {
+    saveDossierModelWithAudit(dataDir, profile, parsed.ticker, model, parsed.rationale);
+    savedModel = true;
+  }
+  if (memo_md !== void 0) {
+    saveDossierMemo(dataDir, parsed.ticker, memo_md);
+    savedMemo = true;
+  }
+  if (intel !== void 0) {
+    saveDossierIntel(dataDir, parsed.ticker, intel);
+    savedIntel = true;
+  }
+  return { ticker: parsed.ticker, thesisPath, savedModel, savedMemo, savedIntel };
+}
+function upsertTheme(dataDir, profile, rawInput) {
+  const obj = typeof rawInput === "object" && rawInput !== null ? { ...rawInput } : {};
+  const memoMd = typeof obj.memo_md === "string" ? obj.memo_md : void 0;
+  delete obj.memo_md;
+  if (!obj.updated_at) {
+    obj.updated_at = formatTimestamp(/* @__PURE__ */ new Date(), profile.timezone).iso;
+  }
+  const validated = ThemeObjectSchema.parse(obj);
+  const saved = saveTheme(dataDir, validated);
+  let savedMemo = false;
+  if (memoMd !== void 0) {
+    saveThemeMemo(dataDir, saved.slug, memoMd);
+    savedMemo = true;
+  }
+  const linkedTickers = Array.from(new Set(saved.exposures.map((e) => e.ticker)));
+  return { theme: saved, savedMemo, linkedTickers };
+}
+function ingestResearchIntel(dataDir, rawInput) {
+  const rawObj = typeof rawInput === "object" && rawInput !== null ? rawInput : {};
+  const parsed = IntelIngestSchema.parse(rawInput);
+  let savedIntel = false;
+  let savedIntelHistory = false;
+  let savedSeriesCount = 0;
+  let savedPa = false;
+  if (parsed.intel && parsed.ticker) {
+    saveDossierIntel(dataDir, parsed.ticker, parsed.intel);
+    savedIntel = true;
+    const explicitHist = rawObj.intel_history_entry;
+    if (explicitHist && typeof explicitHist === "object") {
+      const parsedHist = IntelHistoryEntrySchema.parse({
+        recorded_at: parsed.intel.updated_at,
+        provider: parsed.intel.provider,
+        ...explicitHist
+      });
+      appendIntelHistory(dataDir, parsed.ticker, parsedHist);
+      savedIntelHistory = true;
+    } else if (parsed.intel.earnings_insight || parsed.intel.options_intel) {
+      appendIntelHistory(dataDir, parsed.ticker, {
+        recorded_at: parsed.intel.updated_at,
+        provider: parsed.intel.provider,
+        period: parsed.intel.earnings_insight?.period ?? null,
+        headline: parsed.intel.earnings_insight?.headline ?? null,
+        implied_move_pct: parsed.intel.options_intel?.implied_move_pct ?? null,
+        iv_30d_pct: parsed.intel.options_intel?.call_iv_pct ?? null,
+        iv_pct_52w: parsed.intel.options_intel?.iv_percentile_52w ?? null
+      });
+      savedIntelHistory = true;
+    }
+  }
+  if (parsed.history_series && parsed.history_series.length > 0) {
+    const cache = loadHistoryCache(dataDir);
+    for (const ser of parsed.history_series) {
+      cache.series[ser.symbol] = ser;
+      savedSeriesCount += 1;
+    }
+    cache.updated_at = (/* @__PURE__ */ new Date()).toISOString();
+    saveHistoryCache(dataDir, cache);
+  }
+  if (parsed.pa_performance) {
+    savePaPerformance(dataDir, parsed.pa_performance);
+    savedPa = true;
+  }
+  return {
+    ticker: parsed.ticker ?? null,
+    savedIntel,
+    savedIntelHistory,
+    savedSeriesCount,
+    savedPa
+  };
 }
 function upsertSingleHypothesis(dataDir, profile, ticker, rawHypothesis) {
   const sym = normalizeTicker(ticker);
@@ -34501,16 +37773,108 @@ function upsertSingleHypothesis(dataDir, profile, ticker, rawHypothesis) {
   const existingRaw = readThesisFile(dataDir, sym);
   const existingList = existingRaw ? parseHypothesesFromFrontmatter(parseThesisMarkdown(existingRaw)?.fm.hypotheses) : [];
   const merged = upsertHypothesesArray(existingList, [validated]);
-  return saveOrMergeThesis(dataDir, profile, {
-    ticker: sym,
-    hypotheses: merged
-  });
+  return saveOrMergeThesis(
+    dataDir,
+    profile,
+    {
+      ticker: sym,
+      hypotheses: merged
+    },
+    { skipRuleChangeLog: true }
+  );
+}
+function capturePitContextForTest(dataDir, profile, ticker, priceAtTest, existingFm) {
+  const sym = normalizeTicker(ticker);
+  const benchYf = profile.benchmark.yf_symbol || profile.benchmark.ticker;
+  const benchTicker = profile.benchmark.ticker.toUpperCase();
+  let marketCache = null;
+  try {
+    marketCache = loadMarketCache(dataDir);
+  } catch {
+    marketCache = null;
+  }
+  let macroRegime = null;
+  try {
+    macroRegime = loadMacroRegime(dataDir) ?? marketCache?.macro_regime ?? null;
+  } catch {
+    macroRegime = marketCache?.macro_regime ?? null;
+  }
+  const portfolio = loadPortfolio(dataDir);
+  const historyCache = loadHistoryCache(dataDir);
+  let benchmarkPrice = marketCache?.quotes[benchYf]?.price ?? marketCache?.quotes[benchTicker]?.price ?? portfolio?.positions.find((p) => p.ticker.toUpperCase() === benchTicker)?.ref_price ?? null;
+  if (benchmarkPrice === null) {
+    const dailySeries = historyCache.series[`daily:${benchYf}`] ?? historyCache.series[`daily:${benchTicker}`];
+    const weeklySeries = lookupHistorySeries(historyCache, benchYf, benchTicker);
+    const chosen = dailySeries?.points.length ? dailySeries : weeklySeries;
+    if (chosen && chosen.points.length > 0) {
+      benchmarkPrice = chosen.points[chosen.points.length - 1].close;
+    }
+  }
+  let portfolioWeightPct = null;
+  if (portfolio) {
+    const fxRates = { ...portfolio.fx_rates, ...marketCache?.fx_rates ?? {}, [profile.base_currency]: 1 };
+    const fxUsd = fxRates.USD ?? 1;
+    let totalPosBase = 0;
+    let symBase = 0;
+    for (const p of portfolio.positions) {
+      const mv = p.qty * p.ref_price * (fxRates[p.currency] ?? fxUsd);
+      totalPosBase += mv;
+      if (p.ticker.toUpperCase() === sym) symBase += mv;
+    }
+    const navBase = portfolio.reported_nav_base ?? totalPosBase + portfolio.cash_base + portfolio.accruals_base;
+    if (navBase > 0) {
+      portfolioWeightPct = round(symBase / navBase * 100, 2);
+    }
+  }
+  let expectedAfterTaxCagr = null;
+  let hurdleCagr = null;
+  let impliedRevCagr = null;
+  let model = null;
+  try {
+    model = loadDossierModel(dataDir, sym);
+  } catch {
+    model = null;
+  }
+  if (model && priceAtTest && priceAtTest > 0) {
+    const usSitus = Boolean(existingFm?.us_situs ?? true);
+    const taxInfo = computeAfterTaxHurdle(profile, usSitus, model.dividend_yield_pct ?? 0, 34, {
+      dividendWhtPctOverride: model.dividend_wht_pct,
+      accumulating: model.accumulating
+    });
+    const scen = computeScenarioSummary(priceAtTest, model, taxInfo);
+    const rdcf = computeReverseDcf(priceAtTest, model, taxInfo);
+    expectedAfterTaxCagr = scen?.expected_after_tax_cagr_pct ?? null;
+    hurdleCagr = taxInfo.hurdle_cagr_pct;
+    impliedRevCagr = rdcf?.implied_revenue_cagr_pct ?? null;
+  }
+  let fundamentalsPeriod = null;
+  try {
+    const fund = loadDossierFundamentals(dataDir, sym);
+    fundamentalsPeriod = fund?.quarterly[0]?.period_end ?? fund?.annual[0]?.period_end ?? null;
+  } catch {
+    fundamentalsPeriod = null;
+  }
+  return {
+    benchmarkPrice: benchmarkPrice !== null && benchmarkPrice > 0 ? round(benchmarkPrice, 4) : null,
+    pitSnapshot: {
+      vix: macroRegime?.vix ?? marketCache?.vix ?? null,
+      us10y_pct: macroRegime?.us10y_pct ?? null,
+      expected_after_tax_cagr_pct: expectedAfterTaxCagr,
+      hurdle_cagr_pct: hurdleCagr,
+      implied_revenue_cagr_pct: impliedRevCagr,
+      portfolio_weight_pct: portfolioWeightPct,
+      fundamentals_period: fundamentalsPeriod
+    }
+  };
 }
 function recordThesisTest(dataDir, profile, rawInput) {
   const { iso, dateYmd } = formatTimestamp(/* @__PURE__ */ new Date(), profile.timezone);
   const inputObj = typeof rawInput === "object" && rawInput !== null ? { ...rawInput } : {};
   if (!inputObj.tested_at) {
     inputObj.tested_at = iso;
+  }
+  if (!inputObj.event_type) {
+    inputObj.event_type = "thesis_test";
   }
   if (Array.isArray(inputObj.hypotheses_tested)) {
     inputObj.hypotheses_tested = inputObj.hypotheses_tested.map((h) => {
@@ -34520,21 +37884,36 @@ function recordThesisTest(dataDir, profile, rawInput) {
       return h;
     });
   }
-  const record2 = ThesisTestRecordSchema.parse(inputObj);
-  const existingRaw = readThesisFile(dataDir, record2.ticker);
-  const existingList = existingRaw ? parseHypothesesFromFrontmatter(parseThesisMarkdown(existingRaw)?.fm.hypotheses) : [];
-  const mergedHypotheses = record2.hypotheses_tested.length > 0 ? upsertHypothesesArray(existingList, record2.hypotheses_tested) : existingList;
+  const prelim = ThesisTestRecordSchema.parse(inputObj);
+  const existingRaw = readThesisFile(dataDir, prelim.ticker);
+  const existingFm = existingRaw ? parseThesisMarkdown(existingRaw)?.fm ?? null : null;
+  const existingList = existingFm ? parseHypothesesFromFrontmatter(existingFm.hypotheses) : [];
+  const mergedHypotheses = prelim.hypotheses_tested.length > 0 ? upsertHypothesesArray(existingList, prelim.hypotheses_tested) : existingList;
+  const pit = capturePitContextForTest(dataDir, profile, prelim.ticker, prelim.price_at_test ?? null, existingFm);
+  const record2 = ThesisTestRecordSchema.parse({
+    ...prelim,
+    benchmark_price_at_test: prelim.benchmark_price_at_test ?? pit.benchmarkPrice,
+    pit_snapshot: prelim.pit_snapshot ?? pit.pitSnapshot
+  });
   const killFlag = record2.kill_switch_triggered ? " \xB7 KILL-SWITCH TRIGGERED" : "";
   const note = `[THESIS TEST \xB7 ${record2.verdict}${killFlag}] ${record2.summary}`;
-  const thesisPath = saveOrMergeThesis(dataDir, profile, {
-    ticker: record2.ticker,
-    currency: record2.currency,
-    verdict: record2.verdict,
-    bear_case_summary: record2.bear_case ?? void 0,
-    last_tested_date: dateYmd,
-    hypotheses: mergedHypotheses,
-    decision_log_note: note
-  });
+  const thesisPath = saveOrMergeThesis(
+    dataDir,
+    profile,
+    {
+      ticker: record2.ticker,
+      currency: record2.currency,
+      verdict: record2.verdict,
+      action_verdict: record2.action_verdict ?? void 0,
+      bear_case_summary: record2.bear_case ?? void 0,
+      last_tested_date: dateYmd,
+      last_audited_date: dateYmd,
+      price_at_audit: record2.price_at_test ?? void 0,
+      hypotheses: mergedHypotheses,
+      decision_log_note: note
+    },
+    { skipRuleChangeLog: true }
+  );
   const savedRecord = appendThesisTestLog(dataDir, record2);
   return { thesisPath, record: savedRecord };
 }
@@ -34546,7 +37925,7 @@ function mergePortfolioPositions(existing, profile, input2) {
     source: input2.source ?? "agent_sync",
     cash_base: 0,
     accruals_base: 0,
-    fx_rates: { [baseCcy]: 1, USD: baseCcy === "USD" ? 1 : 1 },
+    fx_rates: { [baseCcy]: 1, USD: 1 },
     positions: []
   };
   const existingMap = new Map(current.positions.map((p) => [p.ticker, p]));
@@ -34595,9 +37974,25 @@ function mergePortfolioPositions(existing, profile, input2) {
 var DEMO_MARKET_CACHE = {
   vix: 18.4,
   vix_sparkline: [21.2, 20.8, 22.1, 21.5, 20.2, 19.7, 19.3, 18.9, 19.4, 18.7, 18.4],
+  macro_regime: {
+    updated_at: "2026-11-23T12:00:00Z",
+    vix: 18.4,
+    us10y_pct: 4.25,
+    us3m_pct: 4.15,
+    hy_credit_ratio: 0.832,
+    dxy: 103.8,
+    regime_label: "CALM",
+    notes: "10Y-3M slope +10 bps"
+  },
   quotes: {
     "VWRA.L": {
       price: 176.5,
+      regular_price: 176.5,
+      extended_price: null,
+      market_state: "CLOSED",
+      quote_time: "2026-11-23T16:30:00Z",
+      fifty_two_week_high: 182,
+      fifty_two_week_low: 145,
       currency: "USD",
       change_1d_pct: 0.74,
       change_1m_pct: 3.1,
@@ -34605,6 +38000,12 @@ var DEMO_MARKET_CACHE = {
     },
     VTI: {
       price: 348,
+      regular_price: 348,
+      extended_price: 348.6,
+      market_state: "POST",
+      quote_time: "2026-11-23T21:15:00Z",
+      fifty_two_week_high: 356,
+      fifty_two_week_low: 280,
       currency: "USD",
       change_1d_pct: 1.05,
       change_1m_pct: 4.18,
@@ -34612,6 +38013,12 @@ var DEMO_MARKET_CACHE = {
     },
     AAPL: {
       price: 230,
+      regular_price: 230,
+      extended_price: 231.15,
+      market_state: "POST",
+      quote_time: "2026-11-23T21:20:00Z",
+      fifty_two_week_high: 242,
+      fifty_two_week_low: 178,
       currency: "USD",
       change_1d_pct: 0.92,
       change_1m_pct: 5.02,
@@ -34619,18 +38026,88 @@ var DEMO_MARKET_CACHE = {
     },
     MSFT: {
       price: 495,
+      regular_price: 495,
+      extended_price: 498.4,
+      market_state: "POST",
+      quote_time: "2026-11-23T21:20:00Z",
+      fifty_two_week_high: 518,
+      fifty_two_week_low: 392,
       currency: "USD",
       change_1d_pct: -0.42,
       change_1m_pct: -1.78,
       sparkline: [504, 502.5, 501.2, 499.8, 500.4, 498.6, 497.9, 496.5, 497.8, 497.1, 495]
+    },
+    ACME: {
+      price: 112,
+      regular_price: 112,
+      extended_price: null,
+      market_state: "CLOSED",
+      quote_time: "2026-11-23T17:00:00Z",
+      fifty_two_week_high: 132,
+      fifty_two_week_low: 88,
+      currency: "USD",
+      change_1d_pct: -1.35,
+      change_1m_pct: -4.2,
+      sparkline: [118, 117.2, 116.5, 115.8, 116.1, 114.9, 114, 113.5, 113.8, 112.9, 112]
+    },
+    HYPE: {
+      price: 43.5,
+      regular_price: 43.5,
+      extended_price: 42.9,
+      market_state: "POST",
+      quote_time: "2026-11-23T21:20:00Z",
+      fifty_two_week_high: 78,
+      fifty_two_week_low: 41,
+      currency: "USD",
+      change_1d_pct: -3.12,
+      change_1m_pct: -18.6,
+      sparkline: [54, 52.8, 51.5, 50.9, 49.4, 48.2, 47, 46.1, 45.2, 44.4, 43.5]
     }
   }
 };
+function buildSyntheticWeeklySeries(endPrice, annualDrift, annualVol, seedInit, weeks = 260) {
+  let seed = seedInit >>> 0;
+  const nextRand = () => {
+    seed = seed * 1664525 + 1013904223 >>> 0;
+    return seed / 4294967296;
+  };
+  const endMs = Date.parse("2026-11-23T00:00:00Z");
+  const startMs = endMs - weeks * 7 * 86400 * 1e3;
+  const rawLevels = [100];
+  for (let i = 1; i <= weeks; i += 1) {
+    const dt = new Date(startMs + i * 7 * 86400 * 1e3).toISOString().slice(0, 10);
+    let regimeTilt = 0;
+    if (dt >= "2022-01-01" && dt <= "2022-10-15") regimeTilt = -55e-4;
+    else if (dt >= "2023-01-01" && dt <= "2024-12-31") regimeTilt = 18e-4;
+    const z2 = (nextRand() + nextRand() + nextRand() - 1.5) * 1.15;
+    const ret = annualDrift / 52 + regimeTilt + annualVol / Math.sqrt(52) * z2;
+    rawLevels.push(Math.max(1, rawLevels[i - 1] * (1 + ret)));
+  }
+  const scale = endPrice / rawLevels[rawLevels.length - 1];
+  const points = [];
+  for (let i = 0; i <= weeks; i += 1) {
+    const date5 = new Date(startMs + i * 7 * 86400 * 1e3).toISOString().slice(0, 10);
+    points.push({ date: date5, close: round(rawLevels[i] * scale, 2) });
+  }
+  return points;
+}
 function buildDemoState() {
   const profile = ProfileSchema.parse({
     base_currency: "USD",
     timezone: "UTC",
     custody_label: "Sample Multi-Currency Brokerage",
+    benchmark: {
+      ticker: "VWRA",
+      yf_symbol: "VWRA.L",
+      label: "VWRA.L Core Global",
+      expected_cagr_pct: 8,
+      alpha_buffer_pct: 2.5,
+      estate_tax_drag_mode: "hedge",
+      estate_tax_hedge_bps: 35,
+      estate_tax_amortize_years: 20,
+      estate_tax_annual_drag_pct: null,
+      core_active_cap: 12
+    },
     tax_profile: {
       country_code: "INTL",
       nra_us_estate_tax_enabled: true,
@@ -34642,6 +38119,7 @@ function buildDemoState() {
       enabled: true,
       label: "Outside Employer Stock",
       ticker: "MSFT",
+      qty: null,
       amount_base: 4e4,
       vested_pct: 60,
       us_situs: true,
@@ -34678,7 +38156,8 @@ function buildDemoState() {
       { ticker: "VWRA", yf_symbol: "VWRA.L", name: "Vanguard FTSE All-World UCITS ETF", asset_type: "UCITS ETF", domicile: "Ireland", us_situs: false, currency: "USD", qty: 300, avg_cost: 165, ref_price: 176.5 },
       { ticker: "VTI", yf_symbol: "VTI", name: "Vanguard Total Stock Market ETF", asset_type: "US ETF", domicile: "US", us_situs: true, currency: "USD", qty: 75, avg_cost: 300, ref_price: 348 },
       { ticker: "AAPL", yf_symbol: "AAPL", name: "Apple Inc.", asset_type: "US Equity", domicile: "US", us_situs: true, currency: "USD", qty: 40, avg_cost: 210, ref_price: 230 },
-      { ticker: "MSFT", yf_symbol: "MSFT", name: "Microsoft Corporation", asset_type: "US Equity", domicile: "US", us_situs: true, currency: "USD", qty: 20, avg_cost: 410, ref_price: 495 }
+      { ticker: "MSFT", yf_symbol: "MSFT", name: "Microsoft Corporation", asset_type: "US Equity", domicile: "US", us_situs: true, currency: "USD", qty: 20, avg_cost: 410, ref_price: 495 },
+      { ticker: "HYPE", yf_symbol: "HYPE", name: "Hype Cloud Software Corp (Sample)", asset_type: "US Equity", domicile: "US", us_situs: true, currency: "USD", qty: 20, avg_cost: 56, ref_price: 43.5 }
     ]
   });
   const thesesRaw = [
@@ -34690,6 +38169,18 @@ yf_symbol: VWRA.L
 currency: USD
 us_situs: false
 role: Core Global Equity (50-70%)
+tier: active
+action_verdict: GO
+takeaway:
+  - "Ireland-domiciled FTSE All-World core wrapper avoids US NRA estate tax."
+  - "Serves as 8.0% expected CAGR opportunity-cost benchmark for active ideas."
+  - "Deploy surplus cash when active single-name spreads fail the 10.5% hurdle."
+last_audited_date: "2026-11-23"
+price_at_audit: 176.50
+sources:
+  - label: "Vanguard UCITS Factsheet"
+    kind: report
+    date: "2026-10-31"
 last_ref_price: 176.50
 buy_zone_low: 160.00
 buy_zone_high: 180.00
@@ -34698,6 +38189,7 @@ max_weight_pct: 70.0
 next_catalyst_date: "2026-12-31"
 next_catalyst: "Global cap-weighted compounding"
 gated: false
+verdict: HIGH_CONVICTION
 ---
 
 # Sample Global Core ETF (VWRA)
@@ -34720,6 +38212,27 @@ yf_symbol: MSFT
 currency: USD
 us_situs: true
 role: Enterprise Compounder
+tier: active
+action_verdict: WAIT
+takeaway:
+  - "Cloud backlog remains durable but AI capex intensity compresses near-term FCF conversion."
+  - "After-tax hurdle requires disciplined capital efficiency under hedge estate-tax drag."
+  - "Hold existing core shares; wait for $420-$455 buy zone before adding."
+last_audited_date: "2026-11-23"
+price_at_audit: 495.00
+theme_refs:
+  - "cloud-capex-vs-software-roi"
+sources:
+  - label: "FY27 Q1 Form 10-Q"
+    kind: sec
+    date: "2026-10-30"
+    url: "https://www.sec.gov/edgar/browse/?CIK=0000789019"
+  - label: "Sample Broker Earnings Recap"
+    kind: ibkr
+    date: "2026-11-05"
+  - label: "5Y Reverse DCF Model"
+    kind: model
+    date: "2026-11-23"
 last_ref_price: 495.00
 buy_zone_low: 420.00
 buy_zone_high: 455.00
@@ -34733,17 +38246,30 @@ last_tested_date: "2026-11-23"
 bear_case_summary: "Rising AI data-center capex outpaces seat-based software ARPU uplift if autonomous agents compress legacy licenses."
 hypotheses:
   - id: azure-ai-margin
-    claim: "Cloud backlog converts into accelerating gross-profit growth above capex depreciation drag"
-    metric: "Cloud revenue YoY > 22% with flat+ operating margin"
+    claim: "Cloud backlog converts into durable >65% gross margin despite AI capex depreciation"
+    metric: "GAAP gross_margin_pct >= 65%"
     status: supported
     confidence: high
-    evidence: "Recent quarterly cloud growth held mid-20s with commercial remaining performance obligations expanding."
+    is_core: true
+    rule:
+      source: xbrl
+      metric: gross_margin_pct
+      op: ">="
+      threshold: 65
+      period: latest_q
+    evidence: "Latest 10-Q XBRL confirmed 68.8% GAAP gross margin alongside accelerating commercial RPO."
     last_tested: "2026-11-23"
   - id: seat-pricing-resilience
     claim: "AI agent workflows expand per-user enterprise revenue rather than cannibalizing seat licenses"
-    metric: "Productivity suite ARPU + net seat retention >= 100%"
+    metric: "OCF/NI cash quality >= 100%"
     status: weakened
     confidence: medium
+    rule:
+      source: xbrl
+      metric: ocf_to_ni_pct
+      op: ">="
+      threshold: 100
+      period: latest_q
     evidence: "Enterprise pilot upgrades show mixed displacement vs. copilot upsell across knowledge workers."
     last_tested: "2026-11-23"
 ---
@@ -34757,8 +38283,597 @@ hypotheses:
 1. Sustained cloud growth deceleration alongside widening FCF dilution from capex.
 
 ## 4. Decision Log
+- **2026-10-01:** Initial watchlist entry.
 - **2026-11-23:** Sample single-name trigger & systematic hypothesis test baseline.
 `
+    },
+    {
+      ticker: "AAPL",
+      content: `---
+ticker: AAPL
+yf_symbol: AAPL
+currency: USD
+us_situs: true
+role: Cash-Flow Ecosystem Core
+tier: active
+action_verdict: WAIT
+takeaway:
+  - "Installed base & Services mix underpin >70% Services gross margins and steady buybacks."
+  - "Current 30x+ multiple implies modest after-tax spread versus 10.5% hurdle."
+  - "Await pullback toward $195-$212 before expanding direct weight."
+last_audited_date: "2026-10-15"
+price_at_audit: 196.00
+theme_refs:
+  - "cloud-capex-vs-software-roi"
+sources:
+  - label: "FY26 Form 10-K"
+    kind: sec
+    date: "2026-11-01"
+    url: "https://www.sec.gov/edgar/browse/?CIK=0000320193"
+  - label: "5Y Scenarios Model"
+    kind: model
+    date: "2026-10-15"
+last_ref_price: 230.00
+buy_zone_low: 195.00
+buy_zone_high: 212.00
+trim_zone: 255.00
+max_weight_pct: 12.0
+next_catalyst_date: "2027-02-02"
+next_catalyst: "Holiday quarter Services margin check"
+gated: false
+verdict: HIGH_CONVICTION
+last_tested_date: "2026-10-15"
+bear_case_summary: "Regulatory pressure on App Store take rates and elongated handset upgrade cycles cap multi-year EPS growth."
+hypotheses:
+  - id: services-gross-margin
+    claim: "Consolidated gross margin holds >= 45% underpinned by recurring Services mix"
+    metric: "Consolidated GM >= 45%"
+    status: supported
+    confidence: high
+    is_core: true
+    rule:
+      source: xbrl
+      metric: gross_margin_pct
+      op: ">="
+      threshold: 45
+      period: latest_q
+    evidence: "FY26 Services grew low-teens keeping consolidated GM at 46.5%."
+    last_tested: "2026-10-15"
+---
+
+# Sample Ecosystem Core (AAPL)
+
+## 1. Core Thesis
+- High-retention hardware ecosystem monetized through recurring Services and disciplined capital return.
+
+## 3. Hard Kill-Switches
+1. Structural loss of ecosystem lock-in or sustained Services deceleration below 6% YoY.
+
+## 4. Decision Log
+- **2026-10-15:** Sample baseline audit.
+`
+    },
+    {
+      ticker: "ACME",
+      content: `---
+ticker: ACME
+yf_symbol: ACME
+currency: USD
+us_situs: false
+role: Industrial Automation Bench
+tier: bench
+action_verdict: GO
+takeaway:
+  - "Non-US industrial robotics leader with 28% ROIC and recurring software service backlog."
+  - "Entered buy zone ($105-$115) with positive after-tax CAGR spread above hurdle."
+  - "Low correlation to mega-cap tech cluster; strong candidate for staged 3-tranche entry."
+last_audited_date: "2026-11-23"
+price_at_audit: 112.00
+theme_refs:
+  - "cloud-capex-vs-software-roi"
+sources:
+  - label: "Sample Annual Report"
+    kind: report
+    date: "2026-11-10"
+  - label: "Reverse DCF & Scenarios"
+    kind: model
+    date: "2026-11-23"
+last_ref_price: 112.00
+buy_zone_low: 102.00
+buy_zone_high: 115.00
+trim_zone: 165.00
+max_weight_pct: 6.0
+next_catalyst_date: "2027-02-18"
+next_catalyst: "FY26 order book & software attach rate"
+gated: false
+verdict: HIGH_CONVICTION
+last_tested_date: "2026-11-23"
+bear_case_summary: "Factory capex downturn in Europe and Asia could delay robotics deliveries by 2-3 quarters."
+hypotheses:
+  - id: software-attach-rate
+    claim: "Recurring fleet orchestration software expands above 30% of gross profit"
+    metric: "Software GP share >= 30% by FY28"
+    status: supported
+    confidence: medium
+    evidence: "Latest semi-annual report showed 24% software GP share, up 320 bps YoY."
+    last_tested: "2026-11-23"
+---
+
+# Sample Bench Compounder (ACME)
+
+## 1. Core Thesis
+- Synthetic open-source sample bench candidate demonstrating non-US industrial diversification.
+
+## 3. Hard Kill-Switches
+1. Order cancellation rate exceeding 15% or gross margin falling below 42%.
+
+## 4. Decision Log
+- **2026-11-23:** Added to Bench tier after passing after-tax hurdle.
+`
+    },
+    {
+      ticker: "HYPE",
+      content: `---
+ticker: HYPE
+yf_symbol: HYPE
+currency: USD
+us_situs: true
+role: Passed Speculative Cloud
+tier: passed
+action_verdict: PASS
+takeaway:
+  - "Passed on excessive dilution (>8% annual SBC) and negative GAAP operating leverage."
+  - "Expected after-tax CAGR trails the 10.5% hurdle unless valuation resets materially."
+  - "Re-entry watch triggered below $45 only if SBC drops under 4% of revenue."
+last_audited_date: "2026-11-20"
+price_at_audit: 54.00
+sources:
+  - label: "Red-Team Rejection Memo"
+    kind: report
+    date: "2026-11-20"
+  - label: "Reverse DCF Model"
+    kind: model
+    date: "2026-11-20"
+rejection_reason: "Chronic share dilution (>8% SBC/rev) and decelerating net dollar retention fail quality and hurdle screens."
+reentry_trigger: "Price <= $45 AND GAAP operating margin > 5% with SBC < 4% of revenue"
+reentry_price: 45.00
+last_ref_price: 43.50
+buy_zone_low: null
+buy_zone_high: null
+trim_zone: null
+max_weight_pct: 0
+next_catalyst_date: null
+next_catalyst: null
+gated: false
+verdict: EXIT
+last_tested_date: "2026-11-20"
+bear_case_summary: "Valuation compression compounds with ongoing equity dilution, eroding per-share intrinsic value."
+hypotheses:
+  - id: gaap-inflection
+    claim: "Company reaches sustainable GAAP operating profitability without decelerating growth"
+    metric: "GAAP EBIT margin > 5% and SBC < 4% of rev"
+    status: falsified
+    confidence: high
+    is_core: true
+    evidence: "Trailing four quarters showed widening GAAP loss and 8.6% SBC/revenue."
+    last_tested: "2026-11-20"
+---
+
+# Sample Passed Opportunity (HYPE)
+
+## 1. Core Thesis
+- Synthetic open-source passed idea illustrating explicit rejection audit trail, mandatory held exit queue, and re-entry price alert.
+
+## 3. Hard Kill-Switches
+1. Persistent negative GAAP FCF net of stock-based compensation.
+
+## 4. Decision Log
+- **2026-11-20:** Passed on valuation and dilution; set $45 conditional re-entry watch.
+`
+    }
+  ];
+  const dossierModels = {
+    MSFT: DossierModelSchema.parse({
+      as_of: "2026-11-23",
+      horizon_years: 5,
+      dividend_yield_pct: 0.7,
+      accumulating: false,
+      reverse_dcf: {
+        basis: "fcf",
+        current_metric_per_share: 12.1,
+        current_revenue_b: 280,
+        shares_diluted_m: 7450,
+        target_margin_pct: 32,
+        exit_multiple: 28,
+        base_revenue_cagr_pct: 12.5,
+        net_cash_b: 32,
+        annual_dilution_pct: -0.5,
+        linked_hypothesis_ids: ["azure-ai-margin", "seat-pricing-resilience"],
+        notes: "Includes 35 bps hedge US estate-tax drag plus 0.21% dividend WHT drag."
+      },
+      scenarios: {
+        bear: { probability: 0.25, target_price_5y: 415, multiple: 22, metric_cagr_pct: 5.5, summary: "AI capex overhangs FCF conversion while seat growth stalls." },
+        base: { probability: 0.5, target_price_5y: 780, multiple: 28, metric_cagr_pct: 12.5, summary: "Cloud scales efficiently and enterprise ARPU holds steady." },
+        bull: { probability: 0.25, target_price_5y: 980, multiple: 31, metric_cagr_pct: 16, summary: "Autonomous agent monetization expands gross margins." }
+      }
+    }),
+    AAPL: DossierModelSchema.parse({
+      as_of: "2026-10-15",
+      horizon_years: 5,
+      dividend_yield_pct: 0.45,
+      accumulating: false,
+      reverse_dcf: {
+        basis: "eps",
+        current_metric_per_share: 7.4,
+        current_revenue_b: 410,
+        shares_diluted_m: 15100,
+        target_margin_pct: 27,
+        exit_multiple: 26,
+        base_revenue_cagr_pct: 6.5,
+        net_cash_b: 48,
+        annual_dilution_pct: -2.2,
+        linked_hypothesis_ids: ["services-gross-margin"],
+        notes: "Buybacks contribute ~2.2% annual EPS accretion on top of revenue growth."
+      },
+      scenarios: {
+        bear: { probability: 0.25, target_price_5y: 190, multiple: 20, metric_cagr_pct: 3.5, summary: "App Store fee reset and flat hardware replacement cycle." },
+        base: { probability: 0.5, target_price_5y: 345, multiple: 26, metric_cagr_pct: 9, summary: "Steady Services compounding and disciplined share retirements." },
+        bull: { probability: 0.25, target_price_5y: 420, multiple: 28, metric_cagr_pct: 11.5, summary: "On-device AI cycle accelerates upgrades across installed base." }
+      }
+    }),
+    ACME: DossierModelSchema.parse({
+      as_of: "2026-11-23",
+      horizon_years: 5,
+      dividend_yield_pct: 1.2,
+      accumulating: false,
+      reverse_dcf: {
+        basis: "fcf",
+        current_metric_per_share: 4.2,
+        current_revenue_b: 8.5,
+        shares_diluted_m: 410,
+        target_margin_pct: 24,
+        exit_multiple: 24,
+        base_revenue_cagr_pct: 14,
+        net_cash_b: 2.1,
+        annual_dilution_pct: 0.2,
+        linked_hypothesis_ids: ["software-attach-rate"],
+        notes: "Non-US domicile eliminates US estate-tax drag, lowering required gross CAGR."
+      },
+      scenarios: {
+        bear: { probability: 0.2, target_price_5y: 92, multiple: 17, metric_cagr_pct: 4, summary: "Prolonged industrial capex recession delays robot deployments." },
+        base: { probability: 0.55, target_price_5y: 235, multiple: 24, metric_cagr_pct: 15, summary: "Factory automation backlog converts with rising software margins." },
+        bull: { probability: 0.25, target_price_5y: 315, multiple: 28, metric_cagr_pct: 19.5, summary: "Global reshoring accelerates multi-year fleet adoption." }
+      }
+    }),
+    HYPE: DossierModelSchema.parse({
+      as_of: "2026-11-20",
+      horizon_years: 5,
+      dividend_yield_pct: 0,
+      accumulating: false,
+      reverse_dcf: {
+        basis: "fcf",
+        current_metric_per_share: 0.85,
+        current_revenue_b: 2.1,
+        shares_diluted_m: 320,
+        target_margin_pct: 18,
+        exit_multiple: 25,
+        base_revenue_cagr_pct: 14,
+        net_cash_b: 0.4,
+        annual_dilution_pct: 6.5,
+        linked_hypothesis_ids: ["gaap-inflection"],
+        notes: "High SBC dilution requires unrealistic terminal margin to clear hurdle."
+      },
+      scenarios: {
+        bear: { probability: 0.35, target_price_5y: 22, multiple: 15, metric_cagr_pct: 3, summary: "Growth slows into teens while dilution persists." },
+        base: { probability: 0.45, target_price_5y: 58, multiple: 22, metric_cagr_pct: 11, summary: "Gradual GAAP breakeven leaves sub-hurdle after-tax compounding." },
+        bull: { probability: 0.2, target_price_5y: 90, multiple: 28, metric_cagr_pct: 18, summary: "Clean operating leverage turnaround." }
+      }
+    })
+  };
+  const dossierMemos = {
+    MSFT: `# MSFT \u2014 Primary-Source Underwriting Memo (Demo)
+
+## Executive Takeaway
+Microsoft combines durable enterprise distribution with massive cloud backlog, but rising data-center depreciation raises the bar on incremental capital efficiency.
+
+## Valuation & Reverse DCF
+At **$495/sh**, clearing the **10.5% after-tax hurdle** (plus hedge estate & dividend tax drag) is decomposed across multiple expansion, margin bridge, and residual revenue CAGR.
+
+| Scenario | Prob | 5Y Target | Exit Mult | Key Driver |
+| :--- | :---: | :---: | :---: | :--- |
+| Bear | 25% | $415 | 22x | Capex drag + seat compression |
+| Base | 50% | $780 | 28x | Steady cloud scale + stable ARPU |
+| Bull | 25% | $980 | 31x | High-margin autonomous agent uplift |
+`,
+    ACME: `# ACME \u2014 Industrial Automation Bench Memo (Demo)
+
+## Executive Takeaway
+Synthetic open-source sample dossier illustrating a **Bench** candidate with non-US domicile, strong ROIC, and positive after-tax spread.
+`,
+    HYPE: `# HYPE \u2014 Red-Team Rejection Memo (Demo)
+
+## Why We Passed
+- Stock-based compensation exceeded 8% of revenue for four straight quarters.
+- Held residual shares are queued under **Mandatory Exits** until liquidated.
+`
+  };
+  const dossierIntels = {
+    MSFT: {
+      updated_at: "2026-11-23T12:00:00Z",
+      provider: "demo_broker_intel",
+      contract_id: 272093,
+      earnings_insight: {
+        period: "Q1 FY27",
+        published_at: "2026-11-05",
+        kind: "recap",
+        headline: "Cloud backlog accelerated while AI infrastructure capex stepped higher",
+        summary: "Commercial remaining performance obligations grew strongly; management guided elevated data-center spend through FY27.",
+        key_metrics: ["Cloud YoY: +24%", "Operating Margin: 44.6%", "Capex / Revenue: 28%"]
+      },
+      options_intel: {
+        as_of: "2026-11-23",
+        underlying_price: 495,
+        expiry: "2027-01-29",
+        atm_strike: 495,
+        straddle_price: 29.7,
+        implied_move_pct: 6,
+        call_iv_pct: 25.4,
+        put_iv_pct: 27.1,
+        iv_skew_pct: 1.7,
+        note: "Sample post-earnings ATM straddle pricing \xB16.0% implied move."
+      },
+      themes: ["Enterprise Cloud Infrastructure", "AI Productivity Software", "Hyperscale Data Centers"],
+      connections: [
+        { ticker: "AMZN", name: "Amazon Web Services", relation: "competitor" },
+        { ticker: "GOOGL", name: "Google Cloud", relation: "competitor" },
+        { ticker: "NVDA", name: "NVIDIA Corp", relation: "supplier" }
+      ]
+    }
+  };
+  const dossierIntelHistory = {
+    MSFT: [
+      {
+        recorded_at: "2026-11-23T12:00:00Z",
+        provider: "demo_broker_intel",
+        period: "Q1 FY27",
+        eps_actual: 3.48,
+        eps_est: 3.31,
+        rev_actual_b: 72.4,
+        rev_est_b: 70.8,
+        implied_move_pct: 6,
+        iv_30d_pct: 25.4,
+        iv_pct_52w: 44,
+        headline: "Cloud backlog accelerated while AI capex stepped higher"
+      },
+      {
+        recorded_at: "2026-08-05T12:00:00Z",
+        provider: "demo_broker_intel",
+        period: "Q4 FY26",
+        eps_actual: 3.35,
+        eps_est: 3.22,
+        rev_actual_b: 70.1,
+        rev_est_b: 69.2,
+        implied_move_pct: 5.4,
+        iv_30d_pct: 22.8,
+        iv_pct_52w: 38,
+        headline: "Commercial cloud topped $40B quarterly run-rate"
+      }
+    ]
+  };
+  const dossierFundamentals = {
+    MSFT: {
+      ticker: "MSFT",
+      cik: "0000789019",
+      updated_at: "2026-11-23T12:00:00Z",
+      source: "sec_xbrl",
+      currency: "USD",
+      latest_periodic_accession: "0000789019-26-000088",
+      quarterly: [
+        { period_end: "2026-09-30", filed_date: "2026-10-30", fiscal_year: 2027, fiscal_period: "Q1", form: "10-Q", revenue_m: 72400, gross_profit_m: 49811, operating_income_m: 32290, net_income_m: 26e3, ocf_m: 34200, capex_m: 16500, fcf_m: 17700, sbc_m: 2850, diluted_shares_m: 7450, eps_diluted: 3.49, dso_days: 54.2, gross_margin_pct: 68.8, operating_margin_pct: 44.6, fcf_margin_pct: 24.45, ocf_to_ni_pct: 131.54, sbc_pct_rev: 3.94, net_cash_b: 32 },
+        { period_end: "2026-06-30", filed_date: "2026-07-30", fiscal_year: 2026, fiscal_period: "Q4", form: "10-K", revenue_m: 70100, gross_profit_m: 48439, operating_income_m: 31120, net_income_m: 25e3, ocf_m: 33100, capex_m: 15200, fcf_m: 17900, sbc_m: 2790, diluted_shares_m: 7460, eps_diluted: 3.35, dso_days: 55, gross_margin_pct: 69.1, operating_margin_pct: 44.39, fcf_margin_pct: 25.53, ocf_to_ni_pct: 132.4, sbc_pct_rev: 3.98, net_cash_b: 30.8 },
+        { period_end: "2026-03-31", filed_date: "2026-04-30", fiscal_year: 2026, fiscal_period: "Q3", form: "10-Q", revenue_m: 67800, gross_profit_m: 47053, operating_income_m: 30100, net_income_m: 24100, ocf_m: 31800, capex_m: 14100, fcf_m: 17700, sbc_m: 2710, diluted_shares_m: 7470, eps_diluted: 3.23, dso_days: 53.1, gross_margin_pct: 69.4, operating_margin_pct: 44.4, fcf_margin_pct: 26.11, ocf_to_ni_pct: 131.95, sbc_pct_rev: 4, net_cash_b: 29.4 },
+        { period_end: "2025-12-31", filed_date: "2026-01-30", fiscal_year: 2026, fiscal_period: "Q2", form: "10-Q", revenue_m: 66200, gross_profit_m: 45876, operating_income_m: 29250, net_income_m: 23400, ocf_m: 30900, capex_m: 13400, fcf_m: 17500, sbc_m: 2680, diluted_shares_m: 7480, eps_diluted: 3.13, dso_days: 52.8, gross_margin_pct: 69.3, operating_margin_pct: 44.18, fcf_margin_pct: 26.44, ocf_to_ni_pct: 132.05, sbc_pct_rev: 4.05, net_cash_b: 28.5 },
+        { period_end: "2025-09-30", filed_date: "2025-10-30", fiscal_year: 2026, fiscal_period: "Q1", form: "10-Q", revenue_m: 64100, gross_profit_m: 44678, operating_income_m: 28400, net_income_m: 22600, ocf_m: 29800, capex_m: 12500, fcf_m: 17300, sbc_m: 2600, diluted_shares_m: 7490, eps_diluted: 3.02, dso_days: 52, gross_margin_pct: 69.7, operating_margin_pct: 44.31, fcf_margin_pct: 26.99, ocf_to_ni_pct: 131.86, sbc_pct_rev: 4.06, net_cash_b: 27.6 }
+      ],
+      annual: [
+        { period_end: "2026-06-30", filed_date: "2026-07-30", fiscal_year: 2026, fiscal_period: "FY", form: "10-K", revenue_m: 268200, gross_profit_m: 186046, operating_income_m: 118870, net_income_m: 95100, ocf_m: 125600, capex_m: 55200, fcf_m: 70400, sbc_m: 10780, diluted_shares_m: 7460, eps_diluted: 12.75, gross_margin_pct: 69.37, operating_margin_pct: 44.32, fcf_margin_pct: 26.25, ocf_to_ni_pct: 132.07, sbc_pct_rev: 4.02, net_cash_b: 30.8 },
+        { period_end: "2025-06-30", filed_date: "2025-07-30", fiscal_year: 2025, fiscal_period: "FY", form: "10-K", revenue_m: 245100, gross_profit_m: 171080, operating_income_m: 109400, net_income_m: 88100, ocf_m: 118500, capex_m: 44500, fcf_m: 74e3, sbc_m: 10100, diluted_shares_m: 7490, eps_diluted: 11.76, gross_margin_pct: 69.8, operating_margin_pct: 44.63, fcf_margin_pct: 30.19, ocf_to_ni_pct: 134.51, sbc_pct_rev: 4.12, net_cash_b: 29 },
+        { period_end: "2024-06-30", filed_date: "2024-07-30", fiscal_year: 2024, fiscal_period: "FY", form: "10-K", revenue_m: 211900, gross_profit_m: 146e3, operating_income_m: 88500, net_income_m: 72400, ocf_m: 87600, capex_m: 28100, fcf_m: 59500, sbc_m: 9600, diluted_shares_m: 7510, eps_diluted: 9.64, gross_margin_pct: 68.9, operating_margin_pct: 41.76, fcf_margin_pct: 28.08, ocf_to_ni_pct: 120.99, sbc_pct_rev: 4.53, net_cash_b: 25 },
+        { period_end: "2023-06-30", filed_date: "2023-07-28", fiscal_year: 2023, fiscal_period: "FY", form: "10-K", revenue_m: 198300, gross_profit_m: 135600, operating_income_m: 83400, net_income_m: 67400, ocf_m: 89e3, capex_m: 23900, fcf_m: 65100, sbc_m: 8900, diluted_shares_m: 7540, eps_diluted: 8.94, gross_margin_pct: 68.38, operating_margin_pct: 42.06, fcf_margin_pct: 32.83, ocf_to_ni_pct: 132.05, sbc_pct_rev: 4.49, net_cash_b: 24 }
+      ],
+      latest_ratios: {
+        gross_margin_pct: 68.8,
+        operating_margin_pct: 44.6,
+        dso_days: 54.2,
+        dio_days: null,
+        ocf_to_ni_pct: 131.54,
+        fcf_margin_pct: 24.45,
+        sbc_pct_rev: 3.94,
+        net_cash_b: 32,
+        diluted_shares_yoy_pct: -0.53,
+        ttm_eps: 13.2,
+        ttm_fcf_per_share: 9.5,
+        ttm_rev_per_share: 37.11
+      }
+    },
+    AAPL: {
+      ticker: "AAPL",
+      cik: "0000320193",
+      updated_at: "2026-11-23T12:00:00Z",
+      source: "sec_xbrl",
+      currency: "USD",
+      latest_periodic_accession: "0000320193-26-000105",
+      quarterly: [
+        { period_end: "2026-09-26", filed_date: "2026-11-01", fiscal_year: 2026, fiscal_period: "Q4", form: "10-K", revenue_m: 102e3, gross_profit_m: 47430, operating_income_m: 32640, net_income_m: 27400, ocf_m: 30800, capex_m: 2900, fcf_m: 27900, sbc_m: 3e3, diluted_shares_m: 15100, eps_diluted: 1.81, dso_days: 28.4, gross_margin_pct: 46.5, operating_margin_pct: 32, fcf_margin_pct: 27.35, ocf_to_ni_pct: 112.41, sbc_pct_rev: 2.94, net_cash_b: 48 }
+      ],
+      annual: [
+        { period_end: "2026-09-26", filed_date: "2026-11-01", fiscal_year: 2026, fiscal_period: "FY", form: "10-K", revenue_m: 41e4, gross_profit_m: 190650, operating_income_m: 13e4, net_income_m: 111700, ocf_m: 122e3, capex_m: 11e3, fcf_m: 111e3, sbc_m: 11800, diluted_shares_m: 15100, eps_diluted: 7.4, gross_margin_pct: 46.5, operating_margin_pct: 31.71, fcf_margin_pct: 27.07, ocf_to_ni_pct: 109.22, sbc_pct_rev: 2.88, net_cash_b: 48 },
+        { period_end: "2025-09-27", filed_date: "2025-11-01", fiscal_year: 2025, fiscal_period: "FY", form: "10-K", revenue_m: 391e3, gross_profit_m: 180600, operating_income_m: 123200, net_income_m: 104e3, ocf_m: 118e3, capex_m: 10500, fcf_m: 107500, sbc_m: 11200, diluted_shares_m: 15400, eps_diluted: 6.75, gross_margin_pct: 46.19, operating_margin_pct: 31.51, fcf_margin_pct: 27.49, ocf_to_ni_pct: 113.46, sbc_pct_rev: 2.86, net_cash_b: 51 }
+      ],
+      latest_ratios: {
+        gross_margin_pct: 46.5,
+        operating_margin_pct: 32,
+        dso_days: 28.4,
+        dio_days: 10.2,
+        ocf_to_ni_pct: 112.41,
+        fcf_margin_pct: 27.35,
+        sbc_pct_rev: 2.94,
+        net_cash_b: 48,
+        diluted_shares_yoy_pct: -1.95,
+        ttm_eps: 7.4,
+        ttm_fcf_per_share: 7.35,
+        ttm_rev_per_share: 27.15
+      }
+    }
+  };
+  const dossierInsiders = {
+    MSFT: {
+      ticker: "MSFT",
+      cik: "0000789019",
+      updated_at: "2026-11-23T12:00:00Z",
+      cached_accessions: ["0000789019-26-000091"],
+      window_90d: {
+        disc_buy_usd: 0,
+        disc_sell_usd: 0,
+        plan_sell_usd: 425e4,
+        distinct_buyers: 0,
+        distinct_sellers: 0
+      },
+      window_12m: {
+        disc_buy_usd: 5e5,
+        disc_sell_usd: 12e5,
+        plan_sell_usd: 165e5,
+        distinct_buyers: 1,
+        distinct_sellers: 1
+      },
+      flags: [],
+      recent_filings: [
+        {
+          filing_date: "2026-11-08",
+          accession: "0000789019-26-000091",
+          form: "4",
+          owner_name: "SAMPLE EXECUTIVE",
+          title: "Executive Vice President",
+          is_director: false,
+          code: "S",
+          shares: 8500,
+          price: 500,
+          value_usd: 425e4,
+          is_10b5_1: true,
+          url: "https://www.sec.gov/edgar/browse/?CIK=0000789019"
+        }
+      ]
+    },
+    ACME: {
+      ticker: "ACME",
+      cik: "0001234567",
+      updated_at: "2026-11-23T12:00:00Z",
+      cached_accessions: ["0001234567-26-000012", "0001234567-26-000014"],
+      window_90d: {
+        disc_buy_usd: 84e4,
+        disc_sell_usd: 0,
+        plan_sell_usd: 0,
+        distinct_buyers: 2,
+        distinct_sellers: 0
+      },
+      window_12m: {
+        disc_buy_usd: 84e4,
+        disc_sell_usd: 0,
+        plan_sell_usd: 0,
+        distinct_buyers: 2,
+        distinct_sellers: 0
+      },
+      flags: [
+        "DISCRETIONARY_BUY_CLUSTER: 2 insiders bought $840,000 (90D)",
+        "C_SUITE_DISCRETIONARY_BUY: $640,000 open-market buy by senior executive (90D)"
+      ],
+      recent_filings: [
+        {
+          filing_date: "2026-11-12",
+          accession: "0001234567-26-000014",
+          form: "4",
+          owner_name: "SAMPLE CEO",
+          title: "Chief Executive Officer",
+          is_director: true,
+          code: "P",
+          shares: 5700,
+          price: 112.28,
+          value_usd: 64e4,
+          is_10b5_1: false
+        },
+        {
+          filing_date: "2026-11-10",
+          accession: "0001234567-26-000012",
+          form: "4",
+          owner_name: "SAMPLE DIRECTOR",
+          title: "Independent Director",
+          is_director: true,
+          code: "P",
+          shares: 1800,
+          price: 111.11,
+          value_usd: 2e5,
+          is_10b5_1: false
+        }
+      ]
+    }
+  };
+  const themes = [
+    ThemeObjectSchema.parse({
+      slug: "cloud-capex-vs-software-roi",
+      title: "Cloud Capex Intensity vs. Enterprise Software ROI",
+      updated_at: "2026-11-22T12:00:00Z",
+      relationship_mode: "symbiotic",
+      summary: "Tracks whether hyperscaler AI infrastructure depreciation converts into durable application-layer ARPU or shifts value toward edge devices and industrial automation.",
+      shared_assumptions: [
+        "Hyperscaler capex remains >24% of cloud revenue through FY27.",
+        "Enterprise software budgets consolidate toward bundled platforms with clear ROI.",
+        "Industrial robotics & edge hardware benefit from lower inference latency costs."
+      ],
+      exposures: [
+        { ticker: "MSFT", stance: "beneficiary", note: "Primary cloud scale winner, but FCF conversion carries near-term capex drag." },
+        { ticker: "AAPL", stance: "hedged_tollbooth", note: "Capital-light edge distribution capturing on-device AI upgrades without hyperscaler capex." },
+        { ticker: "ACME", stance: "beneficiary", note: "Industrial robotics automation enjoys falling edge-AI compute costs." }
+      ],
+      signposts: [
+        {
+          id: "cloud-roic-inflection",
+          metric: "Hyperscaler cloud gross profit growth outpaces depreciation growth YoY",
+          threshold: "Spread >= +200 bps",
+          status: "watching",
+          evidence: "Latest quarterly cloud growth +24% vs rising depreciation run-rate.",
+          last_checked: "2026-11-22"
+        }
+      ],
+      sources: [
+        { label: "Sample Quarterly Sector Synthesis", kind: "report", date: "2026-11-22" }
+      ]
+    })
+  ];
+  const themeMemos = {
+    "cloud-capex-vs-software-roi": "# Cloud Capex Intensity vs. Enterprise Software ROI (Demo Theme)\n\n## Core Thesis\nShared macro/sector research node linking hyperscaler infrastructure spend (`MSFT`), capital-light edge distribution (`AAPL`), and industrial automation beneficiaries (`ACME`).\n\n## Falsifiable Signposts\n- Monitor whether cloud gross-profit dollar growth stays ahead of incremental data-center depreciation over the next 4 quarters.\n"
+  };
+  const alerts = [
+    {
+      id: "demo-reentry-hype",
+      detected_at: "2026-11-23T11:30:00Z",
+      severity: "medium",
+      kind: "reentry_hit",
+      ticker: "HYPE",
+      theme_slug: null,
+      title: "HYPE Hit Passed Re-Entry Target ($43.50 <= $45.00)",
+      detail: "Verify whether GAAP operating margin > 5% and SBC < 4% before considering re-entry; residual held shares remain in Mandatory Exits.",
+      acknowledged: false
+    },
+    {
+      id: "demo-drift-aapl",
+      detected_at: "2026-11-23T11:30:00Z",
+      severity: "medium",
+      kind: "audit_drift",
+      ticker: "AAPL",
+      theme_slug: null,
+      title: "AAPL Audit Price Drift (+17.3%)",
+      detail: "Price moved from $196.00 at 2026-10-15 audit to $230.00; re-test valuation spread.",
+      acknowledged: false
     }
   ];
   const catalysts = [
@@ -34768,25 +38883,150 @@ hypotheses:
       title: "Sample Earnings & Cloud Capex Review",
       detail: "Example catalyst row \u2014 replace with your own portfolio watchlist dates.",
       urgency: "medium"
+    },
+    {
+      date: "2027-02-18",
+      ticker: "ACME",
+      title: "FY26 Automation Backlog & Software Attach Check",
+      detail: "Verify recurring fleet software share exceeds 26% of gross profit.",
+      urgency: "low"
     }
   ];
-  const testLogByTicker = {
-    MSFT: [
-      {
-        ticker: "MSFT",
-        tested_at: "2026-11-23T12:00:00+00:00",
-        verdict: "WATCH",
-        kill_switch_triggered: false,
-        summary: "Cloud demand remains healthy, though agent seat-compression risk keeps conviction at Watch.",
-        bear_case: "Capex depreciation cresting alongside seat consolidation could compress 2027\u20132028 FCF multiple.",
-        hypotheses_tested: [],
-        price_at_test: 495,
-        currency: "USD"
-      }
-    ]
+  const edgar = {
+    checked_at: "2026-11-23T12:00:00+00:00",
+    gate_evaluations: [],
+    filings_by_ticker: {
+      AAPL: [
+        {
+          form: "10-K",
+          filingDate: "2026-11-01",
+          accession: "0000320193-26-000105",
+          items: "",
+          url: "https://www.sec.gov/edgar/browse/?CIK=0000320193"
+        }
+      ],
+      MSFT: [
+        {
+          form: "10-Q",
+          filingDate: "2026-10-30",
+          accession: "0000789019-26-000088",
+          items: "",
+          url: "https://www.sec.gov/edgar/browse/?CIK=0000789019"
+        }
+      ]
+    }
   };
-  return { profile, portfolio, thesesRaw, catalysts, testLogByTicker };
+  const testLogAll = [
+    ThesisTestRecordSchema.parse({
+      ticker: "MSFT",
+      tested_at: "2026-11-23T12:00:00+00:00",
+      event_type: "thesis_test",
+      verdict: "WATCH",
+      action_verdict: "WAIT",
+      kill_switch_triggered: false,
+      summary: "Cloud demand remains healthy, though agent seat-compression risk keeps conviction at Watch.",
+      bear_case: "Capex depreciation cresting alongside seat consolidation could compress 2027\u20132028 FCF multiple.",
+      hypotheses_tested: [],
+      price_at_test: 495,
+      benchmark_price_at_test: 176.5,
+      currency: "USD",
+      pit_snapshot: { vix: 18.4, us10y_pct: 4.25, portfolio_weight_pct: 8.6, fundamentals_period: "2026-09-30" }
+    }),
+    ThesisTestRecordSchema.parse({
+      ticker: "HYPE",
+      tested_at: "2026-11-20T12:00:00+00:00",
+      event_type: "thesis_test",
+      verdict: "EXIT",
+      action_verdict: "PASS",
+      kill_switch_triggered: true,
+      summary: "Passed due to chronic >8% SBC dilution and sub-hurdle base-case compounding.",
+      bear_case: "Equity dilution steadily erodes per-share FCF value.",
+      hypotheses_tested: [],
+      price_at_test: 54,
+      benchmark_price_at_test: 175.2,
+      currency: "USD",
+      pit_snapshot: { vix: 18.7, us10y_pct: 4.22 }
+    }),
+    ThesisTestRecordSchema.parse({
+      ticker: "AAPL",
+      tested_at: "2026-10-15T12:00:00+00:00",
+      event_type: "thesis_test",
+      verdict: "HIGH_CONVICTION",
+      action_verdict: "GO",
+      kill_switch_triggered: false,
+      summary: "Services gross margin stability and steady buybacks uphold core conviction.",
+      bear_case: "Regulatory fee pressure and slower hardware upgrade cadence.",
+      hypotheses_tested: [],
+      price_at_test: 196,
+      benchmark_price_at_test: 170,
+      currency: "USD",
+      pit_snapshot: { vix: 19.5, us10y_pct: 4.18, fundamentals_period: "2026-09-26" }
+    })
+  ];
+  const testLogByTicker = {};
+  for (const row of testLogAll) {
+    if (!testLogByTicker[row.ticker]) testLogByTicker[row.ticker] = [];
+    testLogByTicker[row.ticker].push(row);
+  }
+  const historyCache = {
+    updated_at: "2026-11-23T12:00:00Z",
+    series: {
+      "VWRA.L": { symbol: "VWRA.L", currency: "USD", source: "manual", updated_at: "2026-11-23T12:00:00Z", points: buildSyntheticWeeklySeries(176.5, 0.095, 0.15, 101) },
+      VTI: { symbol: "VTI", currency: "USD", source: "manual", updated_at: "2026-11-23T12:00:00Z", points: buildSyntheticWeeklySeries(348, 0.11, 0.17, 202) },
+      AAPL: { symbol: "AAPL", currency: "USD", source: "manual", updated_at: "2026-11-23T12:00:00Z", points: buildSyntheticWeeklySeries(230, 0.135, 0.24, 303) },
+      MSFT: { symbol: "MSFT", currency: "USD", source: "manual", updated_at: "2026-11-23T12:00:00Z", points: buildSyntheticWeeklySeries(495, 0.155, 0.23, 404) },
+      ACME: { symbol: "ACME", currency: "USD", source: "manual", updated_at: "2026-11-23T12:00:00Z", points: buildSyntheticWeeklySeries(112, 0.165, 0.22, 505) },
+      HYPE: { symbol: "HYPE", currency: "USD", source: "manual", updated_at: "2026-11-23T12:00:00Z", points: buildSyntheticWeeklySeries(43.5, 0.03, 0.44, 606) }
+    }
+  };
+  const paPerformance = {
+    updated_at: "2026-11-23T12:00:00Z",
+    provider: "demo_pa",
+    base_currency: "USD",
+    periods: [
+      { period: "1M", twr_pct: 2.15, mwr_pct: 2.08, benchmark_pct: 1.9 },
+      { period: "YTD", twr_pct: 14.8, mwr_pct: 13.9, benchmark_pct: 12.1 },
+      { period: "1Y", twr_pct: 18.4, mwr_pct: 17.6, benchmark_pct: 15.2 }
+    ],
+    note: "Synthetic demo TWR/MWR strip."
+  };
+  return {
+    profile,
+    portfolio,
+    thesesRaw,
+    catalysts,
+    edgar,
+    testLogAll,
+    testLogByTicker,
+    dossierModels,
+    dossierMemos,
+    dossierIntels,
+    dossierIntelHistory,
+    dossierFundamentals,
+    dossierInsiders,
+    themes,
+    themeMemos,
+    alerts,
+    historyCache,
+    paPerformance
+  };
 }
+var READINESS_ORDER = {
+  READY: 0,
+  REENTRY_ALERT: 1,
+  GATED: 2,
+  WAIT: 3,
+  CAP_BLOCKED: 4,
+  PASSED: 5
+};
+var EMPTY_ROTATION_QUEUE = {
+  tax_swaps: [],
+  mandatory_exits: [],
+  cap_trims: [],
+  total_swap_base: 0,
+  total_freed_base: 0,
+  total_estate_tax_saved_base: 0
+};
 async function buildDashboardPayload(opts) {
   const isDemo = Boolean(opts.demo);
   const demoState = isDemo ? buildDemoState() : null;
@@ -34794,11 +39034,15 @@ async function buildDashboardPayload(opts) {
   const portfolio = demoState ? demoState.portfolio : loadPortfolio(opts.dataDir);
   const etfCfg = loadEtfWeights(opts.dataDir, opts.pluginRoot);
   const catalysts = demoState ? demoState.catalysts : loadCatalysts(opts.dataDir);
-  const edgarRaw = demoState ? { checked_at: null, gate_evaluations: [], filings_by_ticker: {} } : loadEdgarCache(opts.dataDir);
+  const edgarRaw = demoState ? demoState.edgar : loadEdgarCache(opts.dataDir);
   const thesisFiles = demoState ? demoState.thesesRaw.map((t) => ({ ...t, filePath: "" })) : listThesisFiles(opts.dataDir);
+  const themes = demoState ? demoState.themes : listThemes(opts.dataDir);
+  const alerts = demoState ? demoState.alerts : loadWatchdogAlerts(opts.dataDir, { limit: 100 });
   const { iso: nowIso } = formatTimestamp(/* @__PURE__ */ new Date(), profile.timezone);
   const activeTab = opts.activeTab ?? "overview";
+  const benchHurdle = computeAfterTaxHurdle(profile, false, 0, 34);
   if (!portfolio) {
+    const emptyMacro = isDemo ? DEMO_MARKET_CACHE.macro_regime : loadMacroRegime(opts.dataDir);
     return {
       initialized: false,
       is_demo: false,
@@ -34807,10 +39051,11 @@ async function buildDashboardPayload(opts) {
       base_currency: profile.base_currency,
       mode: "uninitialized",
       active_tab: activeTab,
-      usd_to_base_fx: profile.base_currency === "USD" ? 1 : 1,
+      usd_to_base_fx: 1,
       fx_rates: { [profile.base_currency]: 1 },
-      vix: null,
+      vix: emptyMacro?.vix ?? null,
       vix_sparkline: [],
+      macro_regime: emptyMacro,
       market_cache_updated_at: null,
       stale_tickers: [],
       profile,
@@ -34832,10 +39077,13 @@ async function buildDashboardPayload(opts) {
         total_liquid_wealth_base: profile.external_exposure.enabled ? profile.external_exposure.amount_base : 0,
         net_investable_base: 0,
         deployable_cash_base: 0,
+        available_funding_base: 0,
         reserve_shortfall_base: 0,
         ext_total_base: 0,
         ext_pct_wealth: 0,
         ext_portfolio_base: 0,
+        ext_live_marked: false,
+        ext_price_used: null,
         paired_exposure_base: 0,
         paired_exposure_pct_wealth: 0,
         paired_label: profile.external_exposure.paired_label ?? "Combined Cluster",
@@ -34857,9 +39105,54 @@ async function buildDashboardPayload(opts) {
       },
       lookthrough: [],
       risk_caps: [],
+      rotation_queue: EMPTY_ROTATION_QUEUE,
+      themes,
+      alerts,
+      sec_red_flags: extractSecRedFlags(edgarRaw.filings_by_ticker ?? {}),
       theses: [],
       catalysts,
-      edgar: edgarRaw
+      edgar: edgarRaw,
+      lab: {
+        benchmark_summary: benchHurdle,
+        active_count: 0,
+        active_cap: profile.benchmark.core_active_cap,
+        bench_count: 0,
+        passed_count: 0,
+        needs_retest_count: 0,
+        reentry_alert_count: 0,
+        dip_triage_queue: [],
+        scorecard: {
+          benchmark_symbol: profile.benchmark.yf_symbol || profile.benchmark.ticker,
+          total_tests: 0,
+          priced_tests: 0,
+          pending_count: 0,
+          matured_count: 0,
+          entries: [],
+          by_verdict: [
+            { verdict: "HIGH_CONVICTION", count: 0, pending_count: 0, evaluated_count: 0, avg_return_pct: null, avg_alpha_pct: null, hit_rate_pct: null },
+            { verdict: "WATCH", count: 0, pending_count: 0, evaluated_count: 0, avg_return_pct: null, avg_alpha_pct: null, hit_rate_pct: null },
+            { verdict: "PROBATION", count: 0, pending_count: 0, evaluated_count: 0, avg_return_pct: null, avg_alpha_pct: null, hit_rate_pct: null },
+            { verdict: "EXIT", count: 0, pending_count: 0, evaluated_count: 0, avg_return_pct: null, avg_alpha_pct: null, hit_rate_pct: null }
+          ],
+          horizon_buckets: [
+            { horizon: "90d", min_days: 90, count: 0, avg_alpha_pct: null, hit_rate_pct: null },
+            { horizon: "180d", min_days: 180, count: 0, avg_alpha_pct: null, hit_rate_pct: null },
+            { horizon: "1Y", min_days: 365, count: 0, avg_alpha_pct: null, hit_rate_pct: null }
+          ],
+          brier_calibration: {
+            resolved_total: 0,
+            overall_brier_score: null,
+            tiers: [
+              { confidence: "high", predicted_prob: 0.8, resolved_count: 0, supported_count: 0, falsified_count: 0, empirical_rate_pct: null, brier_score: null },
+              { confidence: "medium", predicted_prob: 0.6, resolved_count: 0, supported_count: 0, falsified_count: 0, empirical_rate_pct: null, brier_score: null },
+              { confidence: "low", predicted_prob: 0.4, resolved_count: 0, supported_count: 0, falsified_count: 0, empirical_rate_pct: null, brier_score: null }
+            ]
+          }
+        },
+        pa_performance: null,
+        last_backtest_tickers: [],
+        latest_backtest: null
+      }
     };
   }
   const parsedTheses = thesisFiles.map((f) => parseThesisMarkdown(f.content)).filter((x) => x !== null);
@@ -34871,27 +39164,36 @@ async function buildDashboardPayload(opts) {
   let liveQuotes = /* @__PURE__ */ new Map();
   let vixVal = isDemo ? DEMO_MARKET_CACHE.vix : existingMarketCache?.vix ?? null;
   let vixSparkline = isDemo ? DEMO_MARKET_CACHE.vix_sparkline : existingMarketCache?.vix_sparkline ?? [];
+  let macroRegime = isDemo ? DEMO_MARKET_CACHE.macro_regime : loadMacroRegime(opts.dataDir) ?? existingMarketCache?.macro_regime ?? null;
   let marketCacheUpdatedAt = isDemo ? nowIso : existingMarketCache?.updated_at ?? null;
   const staleTickers = /* @__PURE__ */ new Set();
   if (opts.live && !isDemo) {
-    const quoteSymbols = ["^VIX"];
+    const quoteSymbols = ["^VIX", profile.benchmark.yf_symbol || profile.benchmark.ticker];
     for (const p of portfolio.positions) {
       quoteSymbols.push(p.yf_symbol || p.ticker);
     }
     for (const t of parsedTheses) {
       quoteSymbols.push(t.fm.yf_symbol || t.fm.ticker);
     }
+    if (profile.external_exposure.enabled && profile.external_exposure.ticker) {
+      quoteSymbols.push(profile.external_exposure.ticker);
+    }
     const allCurrencies = /* @__PURE__ */ new Set(["USD", profile.base_currency]);
     for (const p of portfolio.positions) allCurrencies.add(p.currency);
     for (const t of parsedTheses) {
       if (t.fm.currency) allCurrencies.add(t.fm.currency.toUpperCase());
     }
-    const [qMap, updatedFx] = await Promise.all([
+    const [qMap, updatedFx, fetchedMacro] = await Promise.all([
       fetchQuotesBatch(quoteSymbols),
-      fetchFxRatesToBase(Array.from(allCurrencies), profile.base_currency, fxRates)
+      fetchFxRatesToBase(Array.from(allCurrencies), profile.base_currency, fxRates),
+      fetchMacroRegime({ nowIso }).catch(() => null)
     ]);
     liveQuotes = qMap;
     fxRates = updatedFx;
+    if (fetchedMacro) {
+      macroRegime = saveMacroRegime(opts.dataDir, fetchedMacro);
+      if (fetchedMacro.vix !== null) vixVal = fetchedMacro.vix;
+    }
     const vixQ = liveQuotes.get("^VIX");
     if (vixQ) {
       vixVal = round(vixQ.price, 2);
@@ -34906,6 +39208,12 @@ async function buildDashboardPayload(opts) {
       if (sym === "^VIX") continue;
       nextQuotesCache[sym] = {
         price: round(q.price, 4),
+        regular_price: round(q.regular_price, 4),
+        extended_price: q.extended_price !== null ? round(q.extended_price, 4) : null,
+        market_state: q.market_state,
+        quote_time: q.quote_time,
+        fifty_two_week_high: q.fifty_two_week_high,
+        fifty_two_week_low: q.fifty_two_week_low,
         currency: q.currency,
         sparkline: q.sparkline,
         change_1d_pct: q.change_1d_pct,
@@ -34917,10 +39225,16 @@ async function buildDashboardPayload(opts) {
       updated_at: nowIso,
       vix: vixVal,
       vix_sparkline: vixSparkline,
+      fx_rates: fxRates,
+      macro_regime: macroRegime,
       quotes: nextQuotesCache
     });
   }
   const cachedQuotesMap = isDemo ? DEMO_MARKET_CACHE.quotes : existingMarketCache?.quotes ?? {};
+  const useCachedLive = Boolean(opts.useCache && !opts.live && !isDemo && Object.keys(cachedQuotesMap).length > 0);
+  if (useCachedLive && existingMarketCache?.fx_rates) {
+    fxRates = { ...fxRates, ...existingMarketCache.fx_rates, [profile.base_currency]: 1 };
+  }
   const fxUsdToBase = fxRates.USD ?? 1;
   let totPosBase = 0;
   let totPosUsd = 0;
@@ -34929,6 +39243,10 @@ async function buildDashboardPayload(opts) {
     const yfSym = p.yf_symbol || p.ticker;
     const cachedQ = cachedQuotesMap[yfSym];
     let priceTrading = p.ref_price;
+    let regularPrice = p.ref_price;
+    let extendedPrice = cachedQ?.extended_price ?? null;
+    let marketState = cachedQ?.market_state ?? null;
+    let quoteTime = cachedQ?.quote_time ?? null;
     let tradingCcy = p.currency;
     let isStale = false;
     let sparkline = cachedQ?.sparkline ?? [];
@@ -34938,6 +39256,10 @@ async function buildDashboardPayload(opts) {
       const q = liveQuotes.get(yfSym);
       if (q) {
         priceTrading = q.price;
+        regularPrice = q.regular_price;
+        extendedPrice = q.extended_price;
+        marketState = q.market_state;
+        quoteTime = q.quote_time;
         tradingCcy = q.currency || p.currency;
         sparkline = q.sparkline;
         change1d = q.change_1d_pct;
@@ -34946,6 +39268,10 @@ async function buildDashboardPayload(opts) {
         isStale = true;
         staleTickers.add(p.ticker);
       }
+    } else if (useCachedLive && cachedQ && cachedQ.price > 0) {
+      priceTrading = cachedQ.price;
+      regularPrice = cachedQ.regular_price ?? cachedQ.price;
+      tradingCcy = cachedQ.currency || p.currency;
     }
     const ccyFxToBase = fxRates[tradingCcy] ?? fxUsdToBase;
     const mvTrading = p.qty * priceTrading;
@@ -34969,6 +39295,10 @@ async function buildDashboardPayload(opts) {
       qty: p.qty,
       avg_cost: round(p.avg_cost, 4),
       price: round(priceTrading, 4),
+      regular_price: round(regularPrice, 4),
+      extended_price: extendedPrice !== null ? round(extendedPrice, 4) : null,
+      market_state: marketState,
+      quote_time: quoteTime,
       stale: isStale,
       sparkline,
       change_1d_pct: change1d,
@@ -34983,14 +39313,20 @@ async function buildDashboardPayload(opts) {
   });
   const cashBase = portfolio.cash_base;
   const accrualsBase = portfolio.accruals_base;
-  const navBase = !opts.live && portfolio.reported_nav_base !== void 0 ? portfolio.reported_nav_base : round(totPosBase + cashBase + accrualsBase, 2);
+  const navBase = !opts.live && !useCachedLive && portfolio.reported_nav_base !== void 0 ? portfolio.reported_nav_base : round(totPosBase + cashBase + accrualsBase, 2);
   const navUsd = fxUsdToBase > 0 ? navBase / fxUsdToBase : 0;
+  const positionWeightMap = /* @__PURE__ */ new Map();
+  const positionAssetTypeMap = /* @__PURE__ */ new Map();
   for (const pos of positionsOut) {
     pos.weight_nav_pct = navBase > 0 ? round(pos.mv_base / navBase * 100, 2) : 0;
+    positionWeightMap.set(pos.ticker.toUpperCase(), pos.weight_nav_pct);
+    positionAssetTypeMap.set(pos.ticker.toUpperCase(), pos.asset_type);
   }
   const posUsdMap = /* @__PURE__ */ new Map();
+  const posPriceMap = /* @__PURE__ */ new Map();
   for (const pos of positionsOut) {
     posUsdMap.set(pos.ticker, (posUsdMap.get(pos.ticker) ?? 0) + pos.mv_usd);
+    posPriceMap.set(pos.ticker, pos.price);
   }
   const etfWeights = etfCfg.etf_weights ?? {};
   const etfMeta = etfCfg.etf_metadata ?? {};
@@ -35098,7 +39434,22 @@ async function buildDashboardPayload(opts) {
   });
   const ext = profile.external_exposure;
   const reserve = profile.liquidity_reserve;
-  const extAmountBase = ext.enabled ? ext.amount_base : 0;
+  let extAmountBase = ext.enabled ? ext.amount_base : 0;
+  let extLiveMarked = false;
+  let extPriceUsed = null;
+  if (ext.enabled && ext.qty !== null && ext.qty > 0 && ext.ticker) {
+    const extSym = ext.ticker.toUpperCase();
+    const liveQ = liveQuotes.get(extSym);
+    const cachedQ = cachedQuotesMap[extSym];
+    const resolvedExtPrice = opts.live && liveQ ? liveQ.price : (useCachedLive || extAmountBase === 0) && cachedQ && cachedQ.price > 0 ? cachedQ.price : posPriceMap.get(extSym) ?? (cachedQ && cachedQ.price > 0 ? cachedQ.price : null);
+    if (resolvedExtPrice !== null && resolvedExtPrice > 0) {
+      const extCcy = liveQ?.currency ?? cachedQ?.currency ?? "USD";
+      const extFx = fxRates[extCcy] ?? fxUsdToBase;
+      extAmountBase = round(ext.qty * resolvedExtPrice * extFx, 2);
+      extLiveMarked = true;
+      extPriceUsed = round(resolvedExtPrice, 4);
+    }
+  }
   const reserveAmountBase = reserve.enabled ? reserve.amount_base : 0;
   const totalLiquidWealthBase = navBase + extAmountBase;
   const netInvestableBase = Math.max(0, totalLiquidWealthBase - reserveAmountBase);
@@ -35132,43 +39483,325 @@ async function buildDashboardPayload(opts) {
   const portfolioEstate = estateEnabled ? computeUsEstateTaxNra(usSitusPortfolioUsd) : computeUsEstateTaxNra(0);
   const totalEstate = estateEnabled ? computeUsEstateTaxNra(totalUsSitusUsd) : computeUsEstateTaxNra(0);
   const afterUcitsEstate = estateEnabled ? computeUsEstateTaxNra(usSitusStocksUsd + extUsSitusUsd) : computeUsEstateTaxNra(0);
+  const edgarState = {
+    checked_at: edgarRaw.checked_at,
+    gate_evaluations: evaluateSecGates(catalysts, edgarRaw.filings_by_ticker ?? {}),
+    filings_by_ticker: edgarRaw.filings_by_ticker ?? {}
+  };
+  const secRedFlags = extractSecRedFlags(edgarState.filings_by_ticker);
+  const historyCache = isDemo ? demoState.historyCache : loadHistoryCache(opts.dataDir);
+  const paPerformance = isDemo ? demoState.paPerformance : loadPaPerformance(opts.dataDir);
+  const testLogAll = isDemo ? demoState.testLogAll : loadThesisTestLog(opts.dataDir, void 0, 500);
+  const testsByTickerAll = /* @__PURE__ */ new Map();
+  for (const row of testLogAll) {
+    const k = row.ticker.toUpperCase();
+    const list = testsByTickerAll.get(k) ?? [];
+    list.push(row);
+    testsByTickerAll.set(k, list);
+  }
+  const effectiveProfileForRotation = extLiveMarked ? { ...profile, external_exposure: { ...profile.external_exposure, amount_base: extAmountBase } } : profile;
+  const rotationThesesInput = parsedTheses.map(({ fm }) => {
+    const sym = String(fm.ticker).toUpperCase();
+    const tierParsed = DossierTierSchema.safeParse(fm.tier);
+    const tickerTests = (testsByTickerAll.get(sym) ?? []).filter((r) => r.event_type !== "rule_change");
+    const latestTest = tickerTests[0];
+    return {
+      ticker: sym,
+      tier: tierParsed.success ? tierParsed.data : "active",
+      verdict: typeof fm.verdict === "string" ? fm.verdict : null,
+      max_weight_pct: fm.max_weight_pct !== void 0 && fm.max_weight_pct !== null ? fm.max_weight_pct : fm.max_ibkr_weight_pct ?? null,
+      kill_switch_triggered: Boolean(latestTest?.kill_switch_triggered),
+      rejection_reason: typeof fm.rejection_reason === "string" ? fm.rejection_reason : null
+    };
+  });
+  const rotationQueue = computeCapitalRotationQueue(
+    portfolio,
+    ltRows,
+    riskCaps,
+    rotationThesesInput,
+    effectiveProfileForRotation,
+    fxUsdToBase,
+    {
+      positionsOut,
+      navBase,
+      etfWeights: etfCfg
+    }
+  );
+  const deployableCashBase = round(Math.max(0, cashBase - reserveAmountBase), 2);
+  const availableFundingBase = round(deployableCashBase + rotationQueue.total_freed_base, 2);
+  const themesBySlug = new Map(themes.map((th) => [th.slug, th]));
+  const themeSlugsByTicker = /* @__PURE__ */ new Map();
+  for (const th of themes) {
+    for (const exp of th.exposures) {
+      const sym = exp.ticker.toUpperCase();
+      const set3 = themeSlugsByTicker.get(sym) ?? /* @__PURE__ */ new Set();
+      set3.add(th.slug);
+      themeSlugsByTicker.set(sym, set3);
+    }
+  }
+  const currentPricesMap = new Map(posPriceMap);
+  const benchYf = profile.benchmark.yf_symbol || profile.benchmark.ticker;
+  const liveBenchQ = liveQuotes.get(benchYf);
+  if (liveBenchQ) {
+    currentPricesMap.set(benchYf, liveBenchQ.price);
+    currentPricesMap.set(profile.benchmark.ticker, liveBenchQ.price);
+  } else if (cachedQuotesMap[benchYf]) {
+    currentPricesMap.set(benchYf, cachedQuotesMap[benchYf].price);
+    currentPricesMap.set(profile.benchmark.ticker, cachedQuotesMap[benchYf].price);
+  }
   const thesesOut = parsedTheses.map(({ fm, body }) => {
     const sym = String(fm.ticker).toUpperCase();
     const yfSym = String(fm.yf_symbol || sym);
     const thesisCcy = String(fm.currency || "USD").toUpperCase();
     const refP = typeof fm.last_ref_price === "number" ? fm.last_ref_price : null;
     const cachedQ = cachedQuotesMap[yfSym];
+    const cachedPrice = cachedQ && Number.isFinite(cachedQ.price) ? round(cachedQ.price, 4) : null;
     let price = refP;
+    let regularPrice = cachedQ?.regular_price ?? refP;
+    let extendedPrice = cachedQ?.extended_price ?? null;
+    let marketState = cachedQ?.market_state ?? null;
+    let quoteTime = cachedQ?.quote_time ?? null;
+    let high52w = cachedQ?.fifty_two_week_high ?? null;
+    let low52w = cachedQ?.fifty_two_week_low ?? null;
     let ccy = thesisCcy;
     let isStale = false;
     let sparkline = cachedQ?.sparkline ?? [];
     let change1d = cachedQ?.change_1d_pct ?? null;
     let change1m = cachedQ?.change_1m_pct ?? null;
+    let marketEntryForRule = cachedQ ?? null;
     if (opts.live && !isDemo) {
       const q = liveQuotes.get(yfSym);
       if (q) {
         price = q.price;
+        regularPrice = q.regular_price;
+        extendedPrice = q.extended_price;
+        marketState = q.market_state;
+        quoteTime = q.quote_time;
+        high52w = q.fifty_two_week_high;
+        low52w = q.fifty_two_week_low;
         ccy = q.currency || thesisCcy;
         sparkline = q.sparkline;
         change1d = q.change_1d_pct;
         change1m = q.change_1m_pct;
+        marketEntryForRule = {
+          price: q.price,
+          regular_price: q.regular_price,
+          extended_price: q.extended_price,
+          market_state: q.market_state,
+          quote_time: q.quote_time,
+          fifty_two_week_high: q.fifty_two_week_high,
+          fifty_two_week_low: q.fifty_two_week_low,
+          currency: q.currency,
+          sparkline: q.sparkline,
+          change_1d_pct: q.change_1d_pct,
+          change_1m_pct: q.change_1m_pct
+        };
+      } else if (cachedQ && cachedQ.price > 0) {
+        price = cachedQ.price;
+        regularPrice = cachedQ.regular_price ?? cachedQ.price;
+        isStale = true;
+        staleTickers.add(sym);
       } else if (refP !== null) {
         isStale = true;
         staleTickers.add(sym);
       }
+    } else if (useCachedLive && cachedQ && cachedQ.price > 0) {
+      price = cachedQ.price;
+      regularPrice = cachedQ.regular_price ?? cachedQ.price;
+      ccy = cachedQ.currency || thesisCcy;
+    } else if (price === null) {
+      if (cachedQ && cachedQ.price > 0) {
+        price = cachedQ.price;
+        regularPrice = cachedQ.regular_price ?? cachedQ.price;
+        ccy = cachedQ.currency || thesisCcy;
+      } else if (posPriceMap.has(sym)) {
+        price = posPriceMap.get(sym);
+        regularPrice = price;
+      }
+    }
+    if (price !== null && Number.isFinite(price)) {
+      currentPricesMap.set(sym, price);
     }
     const ccyFxToBase = fxRates[ccy] ?? fxUsdToBase;
     const priceBase = price !== null ? round(price * ccyFxToBase, 2) : null;
     const maxWeight = fm.max_weight_pct !== void 0 && fm.max_weight_pct !== null ? fm.max_weight_pct : fm.max_ibkr_weight_pct ?? null;
-    const hypotheses = parseHypothesesFromFrontmatter(fm.hypotheses);
-    const recentTests = isDemo ? demoState?.testLogByTicker[sym] ?? [] : loadThesisTestLog(opts.dataDir, sym, 5);
+    const parsedTier = DossierTierSchema.safeParse(fm.tier);
+    const tier = parsedTier.success ? parsedTier.data : "active";
+    const status = classifyTriggerStatus(price, fm);
+    const parsedAction = ActionVerdictSchema.safeParse(fm.action_verdict);
+    const actionVerdict = parsedAction.success ? parsedAction.data : tier === "passed" ? "PASS" : Boolean(fm.gated) ? "WAIT" : status === "IN BUY ZONE" || status === "DEEP VALUE / CHECK THESIS" ? "GO" : "WAIT";
+    const coreSummary = extractSectionBullets(body, "## 1.", 3);
+    const takeaway = Array.isArray(fm.takeaway) && fm.takeaway.length > 0 ? fm.takeaway.map((s) => String(s).trim()).filter(Boolean).slice(0, 3) : coreSummary.slice(0, 3);
+    const allTickerLogs = isDemo ? demoState?.testLogByTicker[sym] ?? [] : testsByTickerAll.get(sym) ?? [];
+    const recentTests = allTickerLogs.filter((r) => r.event_type !== "rule_change").slice(0, 5);
+    const recentRuleChanges = allTickerLogs.filter((r) => r.event_type === "rule_change").slice(0, 5);
+    const killSwitchTriggered = Boolean(recentTests[0]?.kill_switch_triggered);
+    const model = isDemo ? demoState?.dossierModels[sym] ?? null : loadDossierModel(opts.dataDir, sym);
+    const hasMemo = isDemo ? Boolean(demoState?.dossierMemos[sym]) : hasDossierMemo(opts.dataDir, sym);
+    const intel = isDemo ? demoState?.dossierIntels[sym] ?? null : loadDossierIntel(opts.dataDir, sym);
+    const fundamentals = isDemo ? demoState?.dossierFundamentals[sym] ?? null : loadDossierFundamentals(opts.dataDir, sym);
+    const insiders = isDemo ? demoState?.dossierInsiders[sym] ?? null : loadDossierInsiders(opts.dataDir, sym);
+    const tickerFilings = edgarState.filings_by_ticker[sym] ?? [];
+    const rawHypotheses = parseHypothesesFromFrontmatter(fm.hypotheses);
+    const softeningWarnings = [];
+    const hypotheses = rawHypotheses.map((h) => {
+      const autoEval = h.rule ? evaluateHypothesisRule(h.rule, fundamentals, tickerFilings, insiders, marketEntryForRule) : null;
+      const breachedSoftened = Boolean(
+        autoEval && autoEval.passed === false && (h.status === "supported" || h.status === "weakened")
+      );
+      if (breachedSoftened) {
+        softeningWarnings.push(
+          `Anti-softening: "${h.id}" status is ${h.status} despite breached rule (${autoEval.detail}).`
+        );
+      }
+      if (h.is_core && autoEval?.passed === false && !h.waiver_reason && h.status !== "falsified") {
+        softeningWarnings.push(
+          `Core hypothesis "${h.id}" breached without waiver_reason; review falsification.`
+        );
+      }
+      return {
+        ...h,
+        auto_eval: autoEval,
+        observed_breach_softened: breachedSoftened
+      };
+    });
+    const hypothesisCounts = countHypotheses(rawHypotheses);
+    const usSitus = Boolean(fm.us_situs ?? true);
+    const assetType = positionAssetTypeMap.get(sym) ?? "";
+    const isEtf = etfTickersSet.has(sym) || assetType.toUpperCase().includes("ETF") || sym === profile.benchmark.ticker.toUpperCase();
+    const isAccumulating = model?.accumulating ?? (assetType.toUpperCase().includes("UCITS") || sym === "VWRA");
+    const taxInfo = computeAfterTaxHurdle(
+      profile,
+      usSitus,
+      model?.dividend_yield_pct ?? 0,
+      totalEstate.marginal_rate_pct,
+      {
+        dividendWhtPctOverride: model?.dividend_wht_pct ?? null,
+        accumulating: isAccumulating
+      }
+    );
+    const scenarioSummary = computeScenarioSummary(price, model, taxInfo, { isEtf, fundamentals });
+    const reverseDcf = computeReverseDcf(price, model, taxInfo);
+    const tickerSeries = lookupHistorySeries(historyCache, yfSym, sym);
+    const valuationBands = computeValuationBands(tickerSeries, fundamentals, price);
+    const reentryPrice = typeof fm.reentry_price === "number" && Number.isFinite(fm.reentry_price) ? fm.reentry_price : null;
+    const dipTriage = computeDipTriage(
+      {
+        ticker: sym,
+        tier,
+        us_situs: usSitus,
+        gated: Boolean(fm.gated),
+        max_weight_pct: maxWeight,
+        buy_zone_low: fm.buy_zone_low ?? null,
+        buy_zone_high: fm.buy_zone_high ?? null,
+        trim_zone: fm.trim_zone ?? null,
+        next_catalyst: fm.next_catalyst ?? null,
+        reentry_price: reentryPrice,
+        tranches: model?.tranches,
+        verdict: typeof fm.verdict === "string" ? fm.verdict : null,
+        kill_switch_triggered: killSwitchTriggered,
+        is_etf: isEtf
+      },
+      price,
+      scenarioSummary,
+      riskCaps,
+      profile,
+      edgarState.gate_evaluations,
+      catalysts,
+      navBase,
+      fxUsdToBase,
+      ltMap,
+      {
+        positionWeightMap,
+        availableFundingBase,
+        vix: vixVal
+      }
+    );
+    const lastAuditedDate = typeof fm.last_audited_date === "string" ? fm.last_audited_date : typeof fm.last_tested_date === "string" ? fm.last_tested_date : null;
+    const priceAtAudit = typeof fm.price_at_audit === "number" && Number.isFinite(fm.price_at_audit) ? fm.price_at_audit : typeof recentTests[0]?.price_at_test === "number" ? recentTests[0].price_at_test : refP;
+    const priceDriftPct = priceAtAudit && priceAtAudit > 0 && price !== null ? round((price - priceAtAudit) / priceAtAudit * 100, 2) : null;
+    const priceDriftAlert = priceDriftPct !== null && Math.abs(priceDriftPct) >= 15;
+    const newerSecRaw = lastAuditedDate ? tickerFilings.find((f) => f.filingDate > lastAuditedDate) ?? null : null;
+    const newerSecFiling = newerSecRaw ? { form: newerSecRaw.form, filingDate: newerSecRaw.filingDate, url: newerSecRaw.url } : null;
+    const mergedThemeSlugs = new Set(parseThemeRefsFromFrontmatter(fm.theme_refs));
+    for (const slug of themeSlugsByTicker.get(sym) ?? []) {
+      mergedThemeSlugs.add(slug);
+    }
+    const themeRefs = Array.from(mergedThemeSlugs).sort();
+    let themeUpdatedAfterAudit = false;
+    const retestReasons = [];
+    if (priceDriftAlert && priceDriftPct !== null) {
+      retestReasons.push(
+        `Price moved ${priceDriftPct >= 0 ? "+" : ""}${priceDriftPct.toFixed(1)}% since audit (${priceAtAudit})`
+      );
+    }
+    if (newerSecFiling) {
+      retestReasons.push(`Newer SEC ${newerSecFiling.form} filed ${newerSecFiling.filingDate}`);
+    }
+    if (lastAuditedDate) {
+      for (const slug of themeRefs) {
+        const th = themesBySlug.get(slug);
+        const thDate = th?.updated_at?.slice(0, 10);
+        if (th && thDate && thDate > lastAuditedDate) {
+          themeUpdatedAfterAudit = true;
+          retestReasons.push(`Linked theme "${th.slug}" updated ${thDate} after last audit`);
+        }
+      }
+    }
+    const needsRetest = priceDriftAlert || Boolean(newerSecFiling) || themeUpdatedAfterAudit;
+    const provenance = {
+      last_audited_date: lastAuditedDate,
+      price_at_audit: priceAtAudit !== null ? round(priceAtAudit, 4) : null,
+      live_price: price !== null ? round(price, 4) : null,
+      price_drift_pct: priceDriftPct,
+      price_drift_alert: priceDriftAlert,
+      newer_sec_filing: newerSecFiling,
+      theme_updated_after_audit: themeUpdatedAfterAudit,
+      needs_retest: needsRetest,
+      retest_reasons: retestReasons,
+      sources: parseSourcesFromFrontmatter(fm.sources)
+    };
+    const intelSummary = intel ? {
+      updated_at: intel.updated_at,
+      provider: intel.provider,
+      earnings_badge: intel.earnings_insight ? `${intel.earnings_insight.period ? `${intel.earnings_insight.period} ` : ""}${intel.earnings_insight.kind}` : null,
+      implied_move_pct: intel.options_intel?.implied_move_pct ?? null,
+      options_expiry: intel.options_intel?.expiry ?? null,
+      themes: intel.themes.slice(0, 4)
+    } : null;
+    const fundamentalsSummary = fundamentals ? {
+      updated_at: fundamentals.updated_at,
+      period_end: fundamentals.quarterly[0]?.period_end ?? fundamentals.annual[0]?.period_end ?? null,
+      currency: fundamentals.currency,
+      latest_ratios: fundamentals.latest_ratios
+    } : null;
+    const insidersSummary = insiders ? {
+      updated_at: insiders.updated_at,
+      window_90d: insiders.window_90d,
+      window_12m: insiders.window_12m,
+      flags: insiders.flags
+    } : null;
     return {
       ticker: sym,
       yf_symbol: yfSym,
       currency: ccy,
       role: String(fm.role ?? ""),
-      us_situs: Boolean(fm.us_situs ?? true),
+      us_situs: usSitus,
+      tier,
+      action_verdict: actionVerdict,
+      takeaway,
+      rejection_reason: typeof fm.rejection_reason === "string" ? fm.rejection_reason : null,
+      reentry_trigger: typeof fm.reentry_trigger === "string" ? fm.reentry_trigger : null,
+      reentry_price: reentryPrice,
+      reentry_alert: dipTriage.reentry_alert,
       price: price !== null ? round(price, 4) : null,
+      regular_price: regularPrice !== null ? round(regularPrice, 4) : null,
+      extended_price: extendedPrice !== null ? round(extendedPrice, 4) : null,
+      market_state: marketState,
+      quote_time: quoteTime,
+      fifty_two_week_high: high52w,
+      fifty_two_week_low: low52w,
+      cached_price: cachedPrice,
       price_base: priceBase,
       stale: isStale,
       sparkline,
@@ -35180,24 +39813,91 @@ async function buildDashboardPayload(opts) {
       trim_zone: fm.trim_zone ?? null,
       max_weight_pct: maxWeight,
       gated: Boolean(fm.gated),
-      status: classifyTriggerStatus(price, fm),
+      status,
       next_catalyst_date: fm.next_catalyst_date ?? null,
       next_catalyst: fm.next_catalyst ?? null,
-      core_summary: extractSectionBullets(body, "## 1.", 3),
+      core_summary: coreSummary,
       kill_switches: extractSectionBullets(body, "## 3.", 4),
-      latest_decision: extractSectionBullets(body, "## 4.", 1)[0] ?? "",
+      latest_decision: extractLatestDecision(body),
       verdict: typeof fm.verdict === "string" ? fm.verdict : null,
       bear_case_summary: typeof fm.bear_case_summary === "string" ? fm.bear_case_summary : null,
       last_tested_date: typeof fm.last_tested_date === "string" ? fm.last_tested_date : null,
       hypotheses,
-      hypothesis_counts: countHypotheses(hypotheses),
-      recent_tests: recentTests
+      hypothesis_counts: hypothesisCounts,
+      softening_warnings: softeningWarnings,
+      recent_tests: recentTests,
+      recent_rule_changes: recentRuleChanges,
+      provenance,
+      scenario_summary: scenarioSummary,
+      reverse_dcf: reverseDcf,
+      valuation_bands: valuationBands,
+      dip_triage: dipTriage,
+      theme_refs: themeRefs,
+      has_memo: hasMemo,
+      has_model: Boolean(model),
+      has_intel: Boolean(intel),
+      has_fundamentals: Boolean(fundamentals),
+      has_insiders: Boolean(insiders),
+      intel_summary: intelSummary,
+      fundamentals_summary: fundamentalsSummary,
+      insiders_summary: insidersSummary
     };
   });
-  const edgarState = {
-    checked_at: edgarRaw.checked_at,
-    gate_evaluations: evaluateSecGates(catalysts, edgarRaw.filings_by_ticker ?? {}),
-    filings_by_ticker: edgarRaw.filings_by_ticker ?? {}
+  const allLiveHypotheses = thesesOut.flatMap((t) => t.hypotheses);
+  const scorecard = computeForwardScorecard(
+    testLogAll,
+    currentPricesMap,
+    historyCache,
+    benchYf,
+    isDemo ? /* @__PURE__ */ new Date("2026-11-23T12:00:00Z") : /* @__PURE__ */ new Date(),
+    allLiveHypotheses
+  );
+  const dipTriageQueue = thesesOut.map((t) => ({
+    ticker: t.ticker,
+    tier: t.tier,
+    action_verdict: t.action_verdict,
+    status: t.status,
+    readiness: t.dip_triage.readiness,
+    price: t.price,
+    currency: t.currency,
+    buy_zone_low: t.buy_zone_low,
+    buy_zone_high: t.buy_zone_high,
+    reentry_price: t.reentry_price,
+    reentry_alert: t.reentry_alert,
+    cap_status: t.dip_triage.risk_cap_check.status,
+    single_name_room_pct: t.dip_triage.risk_cap_check.single_name_room_pct,
+    portfolio_cap_room_pct: t.dip_triage.risk_cap_check.portfolio_cap_room_pct,
+    available_funding_base: t.dip_triage.risk_cap_check.available_funding_base,
+    high_vol_staged: t.dip_triage.high_vol_staged,
+    gate_status: t.dip_triage.gate_check.status,
+    hurdle_status: t.dip_triage.hurdle_check.status,
+    spread_vs_hurdle_pct: t.dip_triage.hurdle_check.spread_vs_hurdle_pct,
+    next_tranche_price: t.dip_triage.tranche_plan[0]?.price ?? t.reentry_price ?? null,
+    next_tranche_base: t.dip_triage.tranche_plan[0]?.amount_base ?? null
+  })).sort((a, b) => {
+    const ord = READINESS_ORDER[a.readiness] - READINESS_ORDER[b.readiness];
+    if (ord !== 0) return ord;
+    const spA = a.spread_vs_hurdle_pct ?? -999;
+    const spB = b.spread_vs_hurdle_pct ?? -999;
+    if (spA !== spB) return spB - spA;
+    return a.ticker.localeCompare(b.ticker);
+  });
+  const backtestCandidates = /* @__PURE__ */ new Set();
+  for (const t of thesesOut) backtestCandidates.add(t.ticker);
+  for (const p of positionsOut) backtestCandidates.add(p.ticker);
+  const lab = {
+    benchmark_summary: computeAfterTaxHurdle(profile, false, 0, totalEstate.marginal_rate_pct, { accumulating: true }),
+    active_count: thesesOut.filter((t) => t.tier === "active").length,
+    active_cap: profile.benchmark.core_active_cap,
+    bench_count: thesesOut.filter((t) => t.tier === "bench").length,
+    passed_count: thesesOut.filter((t) => t.tier === "passed").length,
+    needs_retest_count: thesesOut.filter((t) => t.provenance.needs_retest).length,
+    reentry_alert_count: thesesOut.filter((t) => t.reentry_alert).length,
+    dip_triage_queue: dipTriageQueue,
+    scorecard,
+    pa_performance: paPerformance,
+    last_backtest_tickers: Array.from(backtestCandidates).sort(),
+    latest_backtest: null
   };
   const totalPnlUsd = totPosUsd - totCostUsd;
   const totalPnlPct = totCostUsd > 0 ? totalPnlUsd / totCostUsd * 100 : 0;
@@ -35207,12 +39907,13 @@ async function buildDashboardPayload(opts) {
     generated_at: nowIso,
     timezone: profile.timezone,
     base_currency: profile.base_currency,
-    mode: isDemo ? "demo_preview" : opts.live ? "live_yahoo" : `snapshot:${portfolio.as_of}`,
+    mode: isDemo ? "demo_preview" : opts.live || useCachedLive ? "live_yahoo" : `snapshot:${portfolio.as_of}`,
     active_tab: activeTab,
     usd_to_base_fx: round(fxUsdToBase, 5),
     fx_rates: fxRates,
     vix: vixVal,
     vix_sparkline: vixSparkline,
+    macro_regime: macroRegime,
     market_cache_updated_at: marketCacheUpdatedAt,
     stale_tickers: Array.from(staleTickers).sort(),
     profile,
@@ -35233,11 +39934,14 @@ async function buildDashboardPayload(opts) {
     summary: {
       total_liquid_wealth_base: round(totalLiquidWealthBase, 2),
       net_investable_base: round(netInvestableBase, 2),
-      deployable_cash_base: round(Math.max(0, cashBase - reserveAmountBase), 2),
+      deployable_cash_base: deployableCashBase,
+      available_funding_base: availableFundingBase,
       reserve_shortfall_base: round(Math.max(0, reserveAmountBase - cashBase), 2),
       ext_total_base: round(extTotalBase, 2),
       ext_pct_wealth: extPctWealth,
       ext_portfolio_base: round(extPortfolioBase, 2),
+      ext_live_marked: extLiveMarked,
+      ext_price_used: extPriceUsed,
       paired_exposure_base: round(pairedTotalBase, 2),
       paired_exposure_pct_wealth: pairedPctWealth,
       paired_label: pairedLabel,
@@ -35259,10 +39963,180 @@ async function buildDashboardPayload(opts) {
     },
     lookthrough: ltRows,
     risk_caps: riskCaps,
+    rotation_queue: rotationQueue,
+    themes,
+    alerts,
+    sec_red_flags: secRedFlags,
     theses: thesesOut,
     catalysts,
-    edgar: edgarState
+    edgar: edgarState,
+    lab
   };
+}
+async function getDossierDetail(opts) {
+  const sym = normalizeTicker(opts.ticker);
+  const payload = await buildDashboardPayload({
+    dataDir: opts.dataDir,
+    pluginRoot: opts.pluginRoot,
+    live: false,
+    useCache: opts.useCache,
+    demo: opts.demo
+  });
+  const thesis = payload.theses.find((t) => t.ticker === sym) ?? null;
+  const linkedSlugs = new Set(thesis?.theme_refs ?? []);
+  const linkedThemes = payload.themes.filter(
+    (th) => linkedSlugs.has(th.slug) || th.exposures.some((e) => e.ticker.toUpperCase() === sym)
+  );
+  if (opts.demo) {
+    const demoState = buildDemoState();
+    return {
+      ticker: sym,
+      memo_md: demoState.dossierMemos[sym] ?? null,
+      model: demoState.dossierModels[sym] ?? null,
+      intel: demoState.dossierIntels[sym] ?? null,
+      fundamentals: demoState.dossierFundamentals[sym] ?? null,
+      insiders: demoState.dossierInsiders[sym] ?? null,
+      intel_history: demoState.dossierIntelHistory[sym] ?? [],
+      valuation_bands: thesis?.valuation_bands ?? null,
+      linked_themes: linkedThemes,
+      thesis
+    };
+  }
+  return {
+    ticker: sym,
+    memo_md: loadDossierMemo(opts.dataDir, sym),
+    model: loadDossierModel(opts.dataDir, sym),
+    intel: loadDossierIntel(opts.dataDir, sym),
+    fundamentals: loadDossierFundamentals(opts.dataDir, sym),
+    insiders: loadDossierInsiders(opts.dataDir, sym),
+    intel_history: loadIntelHistory(opts.dataDir, sym, 30),
+    valuation_bands: thesis?.valuation_bands ?? null,
+    linked_themes: linkedThemes,
+    thesis
+  };
+}
+async function getThemeDetail(opts) {
+  const normSlug = normalizeThemeSlug(opts.slug);
+  const payload = await buildDashboardPayload({
+    dataDir: opts.dataDir,
+    pluginRoot: opts.pluginRoot,
+    live: false,
+    useCache: opts.useCache,
+    demo: opts.demo
+  });
+  let theme;
+  let memoMd;
+  if (opts.demo) {
+    const demoState = buildDemoState();
+    theme = demoState.themes.find((t) => t.slug === normSlug) ?? null;
+    memoMd = demoState.themeMemos[normSlug] ?? null;
+  } else {
+    theme = loadTheme(opts.dataDir, normSlug);
+    memoMd = loadThemeMemo(opts.dataDir, normSlug);
+  }
+  const thesisByTicker = new Map(payload.theses.map((t) => [t.ticker.toUpperCase(), t]));
+  const linkedMap = /* @__PURE__ */ new Map();
+  if (theme) {
+    for (const exp of theme.exposures) {
+      const sym = exp.ticker.toUpperCase();
+      const th = thesisByTicker.get(sym);
+      linkedMap.set(sym, {
+        ticker: sym,
+        stance: exp.stance,
+        note: exp.note,
+        tier: th?.tier ?? null,
+        verdict: th?.verdict ?? null,
+        price: th?.price ?? null,
+        currency: th?.currency ?? null,
+        needs_retest: Boolean(th?.provenance.needs_retest)
+      });
+    }
+  }
+  for (const th of payload.theses) {
+    if (th.theme_refs.includes(normSlug) && !linkedMap.has(th.ticker)) {
+      linkedMap.set(th.ticker, {
+        ticker: th.ticker,
+        stance: null,
+        note: th.takeaway[0] ?? "",
+        tier: th.tier,
+        verdict: th.verdict,
+        price: th.price,
+        currency: th.currency,
+        needs_retest: th.provenance.needs_retest
+      });
+    }
+  }
+  return {
+    slug: normSlug,
+    theme,
+    memo_md: memoMd,
+    linked_theses: Array.from(linkedMap.values())
+  };
+}
+async function executePortfolioBacktest(opts) {
+  const req = BacktestRequestSchema.parse(opts.rawRequest);
+  const isDemo = Boolean(req.demo);
+  const payload = await buildDashboardPayload({
+    dataDir: opts.dataDir,
+    pluginRoot: opts.pluginRoot,
+    live: false,
+    useCache: !isDemo,
+    activeTab: "lab",
+    demo: isDemo
+  });
+  if (!payload.initialized) {
+    throw new Error("Portfolio is not initialized yet. Save positions via update_portfolio_positions or use Demo Mode.");
+  }
+  const demoState = isDemo ? buildDemoState() : null;
+  const portfolio = demoState ? demoState.portfolio : loadPortfolio(opts.dataDir);
+  if (!portfolio) {
+    throw new Error("Portfolio file not found.");
+  }
+  const thesisMatch = payload.theses.find((t) => t.ticker === req.candidate_ticker);
+  const posMatch = portfolio.positions.find((p) => p.ticker === req.candidate_ticker);
+  const resolvedCandidateYf = req.candidate_yf_symbol || thesisMatch?.yf_symbol || posMatch?.yf_symbol || req.candidate_ticker;
+  const resolvedReq = {
+    ...req,
+    candidate_yf_symbol: resolvedCandidateYf
+  };
+  let historyCache;
+  if (isDemo) {
+    historyCache = demoState.historyCache;
+  } else {
+    const benchSym = payload.profile.benchmark.yf_symbol || payload.profile.benchmark.ticker;
+    const symbolsToEnsure = [resolvedCandidateYf, benchSym];
+    const fxCurrencies = /* @__PURE__ */ new Set();
+    if (thesisMatch?.currency && thesisMatch.currency !== "USD") fxCurrencies.add(thesisMatch.currency);
+    for (const p of portfolio.positions) {
+      symbolsToEnsure.push(p.yf_symbol || p.ticker);
+      if (p.currency && p.currency !== "USD") fxCurrencies.add(p.currency);
+    }
+    if (req.include_external_wealth && payload.profile.external_exposure.enabled && payload.profile.external_exposure.ticker) {
+      symbolsToEnsure.push(payload.profile.external_exposure.ticker);
+    }
+    historyCache = await ensureHistorySeries(opts.dataDir, symbolsToEnsure, {
+      fxCurrencies: Array.from(fxCurrencies),
+      dailyBenchmarkSymbol: benchSym
+    });
+  }
+  const effectiveProfile = payload.summary.ext_live_marked ? {
+    ...payload.profile,
+    external_exposure: {
+      ...payload.profile.external_exposure,
+      amount_base: payload.summary.ext_total_base - payload.summary.ext_portfolio_base
+    }
+  } : payload.profile;
+  const backtest = runDeterministicBacktest(
+    resolvedReq,
+    portfolio,
+    payload.lookthrough,
+    effectiveProfile,
+    historyCache,
+    payload.fx_rates,
+    { defaultRfPct: payload.macro_regime?.us3m_pct ?? 4 }
+  );
+  payload.lab.latest_backtest = backtest;
+  return { backtest, payload };
 }
 function buildSummaryText(payload) {
   if (!payload.initialized) {
@@ -35272,13 +40146,20 @@ function buildSummaryText(payload) {
   const p = payload.portfolio;
   const ccy = payload.base_currency;
   const breaches = payload.risk_caps.filter((c) => c.status === "BREACH").map((c) => c.label);
+  const unackAlerts = payload.alerts.filter((a) => !a.acknowledged).length;
   const lines = [
     `Investment OS Dashboard (${payload.mode} | Retrieved ${payload.generated_at}):`,
     `- Portfolio NAV: ${p.nav_base.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${ccy} (USD ${p.nav_usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${ccy !== "USD" ? ` @ ${payload.usd_to_base_fx.toFixed(4)}` : ""}) | Cash: ${p.cash_base.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${ccy} (${p.cash_pct.toFixed(2)}%)`
   ];
+  if (payload.macro_regime) {
+    const m = payload.macro_regime;
+    lines.push(
+      `- Macro Regime: ${m.regime_label} (VIX ${m.vix ?? "n/a"}, US10Y ${m.us10y_pct ?? "n/a"}%, 3M ${m.us3m_pct ?? "n/a"}%, HY/IEF ${m.hy_credit_ratio ?? "n/a"})`
+    );
+  }
   if (payload.profile.external_exposure.enabled) {
     lines.push(
-      `- Total Liquid Wealth: ${s.total_liquid_wealth_base.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${ccy} (${payload.profile.external_exposure.label}: ${payload.profile.external_exposure.amount_base.toLocaleString("en-US")} ${ccy}, Concentration: ${s.ext_pct_wealth.toFixed(2)}%)`
+      `- Total Liquid Wealth: ${s.total_liquid_wealth_base.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${ccy} (${payload.profile.external_exposure.label}: ${Math.round(s.ext_total_base - s.ext_portfolio_base).toLocaleString("en-US")} ${ccy}${s.ext_live_marked ? " live-marked" : ""}, Concentration: ${s.ext_pct_wealth.toFixed(2)}%)`
     );
   }
   if (s.us_situs_enabled) {
@@ -35286,6 +40167,15 @@ function buildSummaryText(payload) {
       `- US-Situs Portfolio Share: ${s.us_situs_portfolio_pct.toFixed(2)}% | Est. US NRA Estate Tax: ${s.total_estate_tax_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy} (${s.estate_tax_marginal_pct.toFixed(0)}% marginal; UCITS swap saves ${s.ucits_swap_savings_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy})`
     );
   }
+  const rq = payload.rotation_queue;
+  if (rq.tax_swaps.length > 0 || rq.mandatory_exits.length > 0 || rq.cap_trims.length > 0) {
+    lines.push(
+      `- Priority Sells & Swaps: ${rq.tax_swaps.length} tax swap(s) (${rq.total_swap_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy}) \xB7 ${rq.mandatory_exits.length} mandatory exit(s) \xB7 ${rq.cap_trims.length} cap trim(s) (Freed: ${rq.total_freed_base.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${ccy})`
+    );
+  }
+  lines.push(
+    `- Research Graph: Active ${payload.lab.active_count}/${payload.lab.active_cap} \xB7 Bench ${payload.lab.bench_count} \xB7 Passed ${payload.lab.passed_count} \xB7 Themes ${payload.themes.length} \xB7 Unack Alerts ${unackAlerts} \xB7 Needs Re-Test ${payload.lab.needs_retest_count}`
+  );
   lines.push(`- Risk Cap Breaches (${breaches.length}): ${breaches.length > 0 ? breaches.join(", ") : "None"}`);
   if (payload.stale_tickers.length > 0) {
     lines.push(`- Stale / Fallback Quotes: ${payload.stale_tickers.join(", ")}`);
@@ -35293,8 +40183,1398 @@ function buildSummaryText(payload) {
   return lines.join("\n");
 }
 
+// src/server/insiders.ts
+var MS_PER_DAY = 24 * 60 * 60 * 1e3;
+var DEFAULT_MAX_XMLS_PER_TICKER = 25;
+function round22(n) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+function decodeXmlEntities(raw) {
+  return raw.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#39;/g, "'").replace(/\s+/g, " ").trim();
+}
+function extractTagText(xml, tagName) {
+  const re = new RegExp(`<${tagName}\\b[^>]*>([\\s\\S]*?)<\\/${tagName}>`, "i");
+  const match = xml.match(re);
+  if (!match) return "";
+  const inner = match[1] ?? "";
+  const valMatch = inner.match(/<value\b[^>]*>([\s\S]*?)<\/value>/i);
+  const stripped = (valMatch ? valMatch[1] : inner).replace(/<[^>]+>/g, " ");
+  return decodeXmlEntities(stripped);
+}
+function parseBoolTag(raw) {
+  const norm = raw.trim().toLowerCase();
+  return norm === "1" || norm === "true" || norm === "yes";
+}
+function parseNumberTag(raw) {
+  const cleaned = raw.replace(/[$,\s]/g, "");
+  if (!cleaned) return null;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+function isIsoDate(val) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(val);
+}
+function parseFootnotes(xml) {
+  const map3 = /* @__PURE__ */ new Map();
+  const re = /<footnote\b[^>]*\bid\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/footnote>/gi;
+  let match;
+  while ((match = re.exec(xml)) !== null) {
+    const id = (match[1] ?? "").trim();
+    const text = decodeXmlEntities((match[2] ?? "").replace(/<[^>]+>/g, " "));
+    if (id) map3.set(id, text);
+  }
+  return map3;
+}
+function parseForm4Xml(xml, fallbackFilingDate = "") {
+  const ownerName = extractTagText(xml, "rptOwnerName") || extractTagText(xml, "reportingOwnerName") || "Unknown Reporting Owner";
+  const title = extractTagText(xml, "officerTitle");
+  const isDirector = parseBoolTag(extractTagText(xml, "isDirector"));
+  const isOfficer = parseBoolTag(extractTagText(xml, "isOfficer"));
+  const docAff10b5One = parseBoolTag(extractTagText(xml, "aff10b5One"));
+  const footnotes = parseFootnotes(xml);
+  const anyFootnote10b5 = Array.from(footnotes.values()).some((txt) => /10b5-?1|rule\s+10b5/i.test(txt));
+  const hasAnyFootnoteRefsInTx = /<nonDerivativeTransaction\b[\s\S]*?<footnoteId\b/i.test(xml);
+  const txMatches = [...xml.matchAll(/<nonDerivativeTransaction\b[^>]*>([\s\S]*?)<\/nonDerivativeTransaction>/gi)];
+  const out = [];
+  for (const match of txMatches) {
+    const block = match[1] ?? "";
+    const code = extractTagText(block, "transactionCode").toUpperCase();
+    if (code !== "P" && code !== "S") continue;
+    const rawDate = extractTagText(block, "transactionDate");
+    const txDate = isIsoDate(rawDate) ? rawDate : fallbackFilingDate;
+    const shares = parseNumberTag(extractTagText(block, "transactionShares")) ?? 0;
+    if (shares <= 0) continue;
+    const price = parseNumberTag(extractTagText(block, "transactionPricePerShare"));
+    const safePrice = price !== null && price >= 0 ? price : null;
+    const valueUsd = safePrice !== null ? round22(shares * safePrice) : 0;
+    let is10b51 = docAff10b5One;
+    if (!is10b51) {
+      const refIds = [...block.matchAll(/<footnoteId\b[^>]*\bid\s*=\s*["']([^"']+)["'][^>]*\/?>/gi)].map(
+        (m) => (m[1] ?? "").trim()
+      );
+      if (refIds.length > 0) {
+        is10b51 = refIds.some((id) => /10b5-?1|rule\s+10b5/i.test(footnotes.get(id) ?? ""));
+      } else if (!hasAnyFootnoteRefsInTx && anyFootnote10b5) {
+        is10b51 = true;
+      }
+    }
+    if (!is10b51 && /10b5-?1|rule\s+10b5/i.test(block)) {
+      is10b51 = true;
+    }
+    out.push({
+      owner_name: ownerName,
+      title,
+      is_director: isDirector,
+      is_officer: isOfficer,
+      code,
+      transaction_date: txDate,
+      shares: round22(shares),
+      price: safePrice !== null ? round22(safePrice) : null,
+      value_usd: valueUsd,
+      is_10b5_1: is10b51
+    });
+  }
+  return out;
+}
+function isCSuiteTitle(title) {
+  return /\b(ceo|chief\s+executive|cfo|chief\s+financial|coo|chief\s+operating|president|chair|founder)\b/i.test(
+    title
+  );
+}
+function computeWindow(rows, nowMs, days) {
+  let discBuy = 0;
+  let discSell = 0;
+  let planSell = 0;
+  const buyers = /* @__PURE__ */ new Set();
+  const sellers = /* @__PURE__ */ new Set();
+  for (const r of rows) {
+    const dtMs = Date.parse(`${r.filing_date}T00:00:00Z`);
+    if (!Number.isFinite(dtMs)) continue;
+    const ageDays = (nowMs - dtMs) / MS_PER_DAY;
+    if (ageDays < -2 || ageDays > days) continue;
+    const ownerKey = r.owner_name.trim().toUpperCase();
+    if (r.code === "P") {
+      if (!r.is_10b5_1) {
+        discBuy += r.value_usd;
+        buyers.add(ownerKey);
+      }
+    } else if (r.code === "S") {
+      if (r.is_10b5_1) {
+        planSell += r.value_usd;
+      } else {
+        discSell += r.value_usd;
+        sellers.add(ownerKey);
+      }
+    }
+  }
+  return {
+    disc_buy_usd: round22(discBuy),
+    disc_sell_usd: round22(discSell),
+    plan_sell_usd: round22(planSell),
+    distinct_buyers: buyers.size,
+    distinct_sellers: sellers.size
+  };
+}
+function aggregateInsiderFilings(ticker, filings, opts) {
+  const sym = normalizeTicker(ticker);
+  const nowIso = opts?.nowIso ?? (/* @__PURE__ */ new Date()).toISOString();
+  const nowMs = Date.parse(nowIso) || Date.now();
+  const recent = filings.filter((f) => {
+    const ms = Date.parse(`${f.filing_date}T00:00:00Z`);
+    return Number.isFinite(ms) && (nowMs - ms) / MS_PER_DAY <= 370;
+  }).sort((a, b) => b.filing_date.localeCompare(a.filing_date)).slice(0, 100);
+  const window90d = computeWindow(recent, nowMs, 90);
+  const window12m = computeWindow(recent, nowMs, 365);
+  const flags = [];
+  const recent90 = recent.filter((r) => {
+    const ms = Date.parse(`${r.filing_date}T00:00:00Z`);
+    return Number.isFinite(ms) && (nowMs - ms) / MS_PER_DAY <= 90;
+  });
+  const cSuiteBuy90 = recent90.filter(
+    (r) => r.code === "P" && !r.is_10b5_1 && isCSuiteTitle(r.title)
+  );
+  const cSuiteBuyUsd = cSuiteBuy90.reduce((sum, r) => sum + r.value_usd, 0);
+  if (window90d.distinct_buyers >= 2) {
+    flags.push(
+      `DISCRETIONARY_BUY_CLUSTER: ${window90d.distinct_buyers} insiders bought $${Math.round(window90d.disc_buy_usd).toLocaleString("en-US")} (90D)`
+    );
+  }
+  if (cSuiteBuyUsd >= 25e4) {
+    flags.push(
+      `C_SUITE_DISCRETIONARY_BUY: $${Math.round(cSuiteBuyUsd).toLocaleString("en-US")} open-market buy by senior executive (90D)`
+    );
+  }
+  if (window90d.disc_sell_usd >= 5e6 || window90d.distinct_sellers >= 2 && window90d.disc_sell_usd >= 1e6) {
+    flags.push(
+      `HEAVY_DISCRETIONARY_SELLING: ${window90d.distinct_sellers} insider(s) sold $${Math.round(window90d.disc_sell_usd).toLocaleString("en-US")} outside 10b5-1 (90D)`
+    );
+  }
+  const has13d = recent.some((r) => r.code === "13D" || r.form.toUpperCase().startsWith("SC 13D"));
+  if (has13d) {
+    flags.push("ACTIVIST_13D_FILING: Schedule 13D / 13D/A filed within 12M");
+  }
+  const cachedAccns = Array.from(
+    /* @__PURE__ */ new Set([...opts?.cachedAccessions ?? [], ...recent.map((r) => r.accession)])
+  ).slice(0, 100);
+  return InsidersSchema.parse({
+    ticker: sym,
+    cik: opts?.cik ?? null,
+    updated_at: nowIso,
+    cached_accessions: cachedAccns,
+    window_90d: window90d,
+    window_12m: window12m,
+    flags,
+    recent_filings: recent
+  });
+}
+async function syncInsidersForm4(dataDir, profile, tickers, opts) {
+  const fetchImpl = opts?.fetchImpl ?? fetch;
+  const nowIso = opts?.nowIso ?? (/* @__PURE__ */ new Date()).toISOString();
+  const nowMs = Date.parse(nowIso) || Date.now();
+  const maxXmls = Math.max(1, opts?.maxXmlsPerTicker ?? DEFAULT_MAX_XMLS_PER_TICKER);
+  const ua = resolveSecUserAgent(profile);
+  const tickerMap = await loadSecTickerMap(dataDir, ua, fetchImpl);
+  const updated = [];
+  const cached2 = [];
+  const skipped = [];
+  const errors = [];
+  const byTicker = {};
+  const uniqueTargets = Array.from(new Set(tickers.map((t) => normalizeTicker(t))));
+  let secReqCount = 0;
+  for (const sym of uniqueTargets) {
+    const cik = tickerMap.get(sym);
+    if (!cik) {
+      skipped.push(sym);
+      continue;
+    }
+    let existing = null;
+    try {
+      existing = loadDossierInsiders(dataDir, sym);
+    } catch {
+      existing = null;
+    }
+    const cachedAccnSet = new Set(opts?.force ? [] : existing?.cached_accessions ?? []);
+    const existingRowsByAccn = /* @__PURE__ */ new Map();
+    if (!opts?.force && existing) {
+      for (const row of existing.recent_filings) {
+        const list = existingRowsByAccn.get(row.accession) ?? [];
+        list.push(row);
+        existingRowsByAccn.set(row.accession, list);
+      }
+    }
+    try {
+      if (secReqCount > 0) await sleepMs(SEC_PACING_MS);
+      secReqCount += 1;
+      const submissions = await fetchSecSubmissions(cik, ua, fetchImpl);
+      const recent = submissions.filings?.recent;
+      if (!recent?.form || !recent.filingDate || !recent.accessionNumber || !recent.primaryDocument) {
+        const emptyAgg = aggregateInsiderFilings(sym, [], { cik, nowIso });
+        byTicker[sym] = saveDossierInsiders(dataDir, sym, emptyAgg);
+        updated.push(sym);
+        continue;
+      }
+      const cikInt = String(Number(cik));
+      const allRows = [];
+      const seenAccns = [];
+      let form4Candidates = 0;
+      let fetchedXmls = 0;
+      for (let i = 0; i < recent.form.length; i += 1) {
+        const form = (recent.form[i] ?? "").trim();
+        const formUpper = form.toUpperCase();
+        const filingDate = recent.filingDate[i] ?? "";
+        if (!isIsoDate(filingDate)) continue;
+        const ageDays = (nowMs - Date.parse(`${filingDate}T00:00:00Z`)) / MS_PER_DAY;
+        if (ageDays > 366) break;
+        const accn = recent.accessionNumber[i] ?? "";
+        const accnNoDash = accn.replace(/-/g, "");
+        const doc = recent.primaryDocument[i] ?? "";
+        if (!accn || !doc) continue;
+        if (formUpper === "SC 13D" || formUpper === "SC 13D/A") {
+          seenAccns.push(accn);
+          allRows.push({
+            filing_date: filingDate,
+            accession: accn,
+            form: formUpper,
+            owner_name: "Schedule 13D Beneficial Owner",
+            title: "5%+ / Activist Holder",
+            is_director: false,
+            code: "13D",
+            shares: 0,
+            price: null,
+            value_usd: 0,
+            is_10b5_1: false,
+            url: `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accnNoDash}/${doc}`
+          });
+          continue;
+        }
+        if (formUpper !== "4" && formUpper !== "4/A") continue;
+        if (form4Candidates >= maxXmls) continue;
+        form4Candidates += 1;
+        seenAccns.push(accn);
+        if (cachedAccnSet.has(accn)) {
+          const prevRows = existingRowsByAccn.get(accn);
+          if (prevRows) allRows.push(...prevRows);
+          continue;
+        }
+        const rawXmlDoc = doc.replace(/^xsl[^/]+\//i, "");
+        const xmlUrl = `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accnNoDash}/${rawXmlDoc}`;
+        const viewUrl = `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accnNoDash}/${doc}`;
+        if (secReqCount > 0) await sleepMs(SEC_PACING_MS);
+        secReqCount += 1;
+        fetchedXmls += 1;
+        try {
+          const resp = await fetchImpl(xmlUrl, {
+            headers: { "User-Agent": ua, Accept: "application/xml, text/xml, */*" },
+            signal: AbortSignal.timeout(1e4)
+          });
+          if (!resp.ok) continue;
+          const xmlText = await resp.text();
+          const txs = parseForm4Xml(xmlText, filingDate);
+          for (const tx of txs) {
+            allRows.push({
+              filing_date: tx.transaction_date || filingDate,
+              accession: accn,
+              form: formUpper,
+              owner_name: tx.owner_name,
+              title: tx.title,
+              is_director: tx.is_director,
+              code: tx.code,
+              shares: tx.shares,
+              price: tx.price,
+              value_usd: tx.value_usd,
+              is_10b5_1: tx.is_10b5_1,
+              url: viewUrl
+            });
+          }
+        } catch {
+        }
+      }
+      const aggregated = aggregateInsiderFilings(sym, allRows, {
+        cik,
+        nowIso,
+        cachedAccessions: seenAccns
+      });
+      const saved = saveDossierInsiders(dataDir, sym, aggregated);
+      byTicker[sym] = saved;
+      if (fetchedXmls === 0 && existing) {
+        cached2.push(sym);
+      } else {
+        updated.push(sym);
+      }
+    } catch (err) {
+      errors.push({ ticker: sym, error: err instanceof Error ? err.message : String(err) });
+      if (existing) {
+        byTicker[sym] = existing;
+      }
+    }
+  }
+  return { updated, cached: cached2, skipped, errors, byTicker };
+}
+
+// src/server/xbrl.ts
+var DEFAULT_XBRL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1e3;
+var MS_PER_DAY2 = 24 * 60 * 60 * 1e3;
+var REVENUE_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "RevenueFromContractWithCustomerExcludingAssessedTax" },
+  { taxonomy: "us-gaap", tag: "Revenues" },
+  { taxonomy: "us-gaap", tag: "SalesRevenueNet" },
+  { taxonomy: "us-gaap", tag: "RevenueFromContractWithCustomerIncludingAssessedTax" },
+  { taxonomy: "us-gaap", tag: "SalesRevenueGoodsNet" },
+  { taxonomy: "ifrs-full", tag: "Revenue" },
+  { taxonomy: "ifrs-full", tag: "RevenueFromContractsWithCustomers" }
+];
+var COGS_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "CostOfGoodsAndServicesSold" },
+  { taxonomy: "us-gaap", tag: "CostOfRevenue" },
+  { taxonomy: "us-gaap", tag: "CostOfGoodsSold" },
+  { taxonomy: "us-gaap", tag: "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization" },
+  { taxonomy: "ifrs-full", tag: "CostOfSales" }
+];
+var GROSS_PROFIT_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "GrossProfit" },
+  { taxonomy: "ifrs-full", tag: "GrossProfit" }
+];
+var OP_INCOME_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "OperatingIncomeLoss" },
+  { taxonomy: "ifrs-full", tag: "ProfitLossFromOperatingActivities" }
+];
+var NET_INCOME_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "NetIncomeLoss" },
+  { taxonomy: "us-gaap", tag: "ProfitLoss" },
+  { taxonomy: "us-gaap", tag: "NetIncomeLossAvailableToCommonStockholdersBasic" },
+  { taxonomy: "ifrs-full", tag: "ProfitLossAttributableToOwnersOfParent" },
+  { taxonomy: "ifrs-full", tag: "ProfitLoss" }
+];
+var OCF_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "NetCashProvidedByUsedInOperatingActivities" },
+  { taxonomy: "us-gaap", tag: "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations" },
+  { taxonomy: "ifrs-full", tag: "CashFlowsFromUsedInOperatingActivities" }
+];
+var CAPEX_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "PaymentsToAcquirePropertyPlantAndEquipment" },
+  { taxonomy: "us-gaap", tag: "PaymentsToAcquireProductiveAssets" },
+  { taxonomy: "ifrs-full", tag: "PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities" },
+  { taxonomy: "ifrs-full", tag: "PurchaseOfPropertyPlantAndEquipment" }
+];
+var SBC_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "ShareBasedCompensation" },
+  { taxonomy: "us-gaap", tag: "AllocatedShareBasedCompensationExpense" },
+  { taxonomy: "us-gaap", tag: "EmployeeBenefitsAndShareBasedCompensation" },
+  { taxonomy: "ifrs-full", tag: "ExpenseFromSharebasedPaymentTransactionsWithEmployees" }
+];
+var DILUTED_SHARES_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "WeightedAverageNumberOfDilutedSharesOutstanding" },
+  { taxonomy: "us-gaap", tag: "WeightedAverageNumberOfShareOutstandingBasicAndDiluted" },
+  { taxonomy: "ifrs-full", tag: "AdjustedWeightedAverageShares" },
+  { taxonomy: "ifrs-full", tag: "WeightedAverageShares" }
+];
+var INSTANT_SHARES_CONCEPTS = [
+  { taxonomy: "dei", tag: "EntityCommonStockSharesOutstanding" },
+  { taxonomy: "us-gaap", tag: "CommonStockSharesOutstanding" }
+];
+var EPS_DILUTED_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "EarningsPerShareDiluted" },
+  { taxonomy: "us-gaap", tag: "EarningsPerShareBasicAndDiluted" },
+  { taxonomy: "ifrs-full", tag: "DilutedEarningsLossPerShare" }
+];
+var AR_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "AccountsReceivableNetCurrent" },
+  { taxonomy: "us-gaap", tag: "ReceivablesNetCurrent" },
+  { taxonomy: "us-gaap", tag: "AccountsReceivableNet" },
+  { taxonomy: "ifrs-full", tag: "TradeAndOtherCurrentReceivables" },
+  { taxonomy: "ifrs-full", tag: "CurrentTradeReceivables" }
+];
+var INVENTORY_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "InventoryNet" },
+  { taxonomy: "us-gaap", tag: "Inventories" },
+  { taxonomy: "ifrs-full", tag: "Inventories" }
+];
+var CASH_COMBINED_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "CashCashEquivalentsAndShortTermInvestments" },
+  { taxonomy: "us-gaap", tag: "CashCashEquivalentsAndMarketableSecurities" }
+];
+var CASH_ONLY_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "CashAndCashEquivalentsAtCarryingValue" },
+  { taxonomy: "us-gaap", tag: "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents" },
+  { taxonomy: "ifrs-full", tag: "CashAndCashEquivalents" }
+];
+var ST_INVESTMENTS_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "MarketableSecuritiesCurrent" },
+  { taxonomy: "us-gaap", tag: "ShortTermInvestments" },
+  { taxonomy: "us-gaap", tag: "AvailableForSaleSecuritiesDebtSecuritiesCurrent" },
+  { taxonomy: "us-gaap", tag: "OtherShortTermInvestments" }
+];
+var LT_DEBT_NONCURRENT_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "LongTermDebtNoncurrent" },
+  { taxonomy: "us-gaap", tag: "LongTermDebtAndCapitalLeaseObligations" },
+  { taxonomy: "us-gaap", tag: "LongTermDebt" },
+  { taxonomy: "ifrs-full", tag: "LongtermBorrowings" },
+  { taxonomy: "ifrs-full", tag: "NoncurrentFinancialLiabilities" }
+];
+var ST_DEBT_CONCEPTS = [
+  { taxonomy: "us-gaap", tag: "LongTermDebtCurrent" },
+  { taxonomy: "us-gaap", tag: "ShortTermBorrowings" },
+  { taxonomy: "us-gaap", tag: "DebtCurrent" },
+  { taxonomy: "us-gaap", tag: "CommercialPaper" },
+  { taxonomy: "ifrs-full", tag: "CurrentBorrowings" }
+];
+function round3(val, decimals = 2) {
+  const factor = 10 ** decimals;
+  return Math.round((val + Number.EPSILON) * factor) / factor;
+}
+function daysBetween(startIso, endIso) {
+  const s = Date.parse(`${startIso}T00:00:00Z`);
+  const e = Date.parse(`${endIso}T00:00:00Z`);
+  if (!Number.isFinite(s) || !Number.isFinite(e)) return -1;
+  return Math.round((e - s) / MS_PER_DAY2);
+}
+function isIsoDate2(val) {
+  return typeof val === "string" && /^\d{4}-\d{2}-\d{2}$/.test(val);
+}
+function detectPrimaryCurrency(payload) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const cand of [...REVENUE_CONCEPTS, ...NET_INCOME_CONCEPTS]) {
+    const units = payload.facts?.[cand.taxonomy]?.[cand.tag]?.units;
+    if (!units) continue;
+    for (const [unitKey, items] of Object.entries(units)) {
+      if (!/^[A-Z]{3}$/.test(unitKey)) continue;
+      counts.set(unitKey, (counts.get(unitKey) ?? 0) + (items?.length ?? 0));
+    }
+  }
+  let best = "USD";
+  let bestCount = -1;
+  for (const [ccy, cnt] of counts.entries()) {
+    if (cnt > bestCount) {
+      best = ccy;
+      bestCount = cnt;
+    }
+  }
+  return best;
+}
+function collectFlowFacts(payload, concepts, unitMatcher) {
+  const dedup = /* @__PURE__ */ new Map();
+  for (let pIdx = 0; pIdx < concepts.length; pIdx += 1) {
+    const cand = concepts[pIdx];
+    const units = payload.facts?.[cand.taxonomy]?.[cand.tag]?.units;
+    if (!units) continue;
+    for (const [unitKey, items] of Object.entries(units)) {
+      if (!unitMatcher(unitKey) || !Array.isArray(items)) continue;
+      for (const item of items) {
+        const form = (item.form ?? "").trim().toUpperCase();
+        if (!PERIODIC_FORMS.has(form)) continue;
+        if (!isIsoDate2(item.start) || !isIsoDate2(item.end)) continue;
+        if (typeof item.val !== "number" || !Number.isFinite(item.val)) continue;
+        const days = daysBetween(item.start, item.end);
+        if (days < 65 || days > 400) continue;
+        const filed = isIsoDate2(item.filed) ? item.filed : item.end;
+        const key = `${item.start}|${item.end}`;
+        const next = {
+          start: item.start,
+          end: item.end,
+          days,
+          val: item.val,
+          filed,
+          form,
+          accn: String(item.accn ?? ""),
+          fy: typeof item.fy === "number" && Number.isInteger(item.fy) && item.fy >= 1990 && item.fy <= 2100 ? item.fy : null,
+          fp: String(item.fp ?? "").trim().toUpperCase(),
+          priority: pIdx
+        };
+        const existing = dedup.get(key);
+        if (!existing) {
+          dedup.set(key, next);
+          continue;
+        }
+        if (next.priority < existing.priority) {
+          dedup.set(key, next);
+        } else if (next.priority === existing.priority && next.filed >= existing.filed) {
+          dedup.set(key, next);
+        }
+      }
+    }
+  }
+  return Array.from(dedup.values());
+}
+function collectInstantFacts(payload, concepts, unitMatcher) {
+  const dedup = /* @__PURE__ */ new Map();
+  for (let pIdx = 0; pIdx < concepts.length; pIdx += 1) {
+    const cand = concepts[pIdx];
+    const units = payload.facts?.[cand.taxonomy]?.[cand.tag]?.units;
+    if (!units) continue;
+    for (const [unitKey, items] of Object.entries(units)) {
+      if (!unitMatcher(unitKey) || !Array.isArray(items)) continue;
+      for (const item of items) {
+        const form = (item.form ?? "").trim().toUpperCase();
+        if (!PERIODIC_FORMS.has(form)) continue;
+        if (!isIsoDate2(item.end) || item.start) continue;
+        if (typeof item.val !== "number" || !Number.isFinite(item.val)) continue;
+        const filed = isIsoDate2(item.filed) ? item.filed : item.end;
+        const next = {
+          end: item.end,
+          val: item.val,
+          filed,
+          form,
+          accn: String(item.accn ?? ""),
+          priority: pIdx
+        };
+        const existing = dedup.get(item.end);
+        if (!existing) {
+          dedup.set(item.end, next);
+          continue;
+        }
+        if (next.priority < existing.priority) {
+          dedup.set(item.end, next);
+        } else if (next.priority === existing.priority && next.filed >= existing.filed) {
+          dedup.set(item.end, next);
+        }
+      }
+    }
+  }
+  return dedup;
+}
+function findInstantNear(map3, periodEnd) {
+  const exact = map3.get(periodEnd);
+  if (exact) return exact.val;
+  const targetMs = Date.parse(`${periodEnd}T00:00:00Z`);
+  if (!Number.isFinite(targetMs)) return null;
+  let best = null;
+  for (const [dt, fact] of map3.entries()) {
+    const ms = Date.parse(`${dt}T00:00:00Z`);
+    const dist = Math.abs(ms - targetMs) / MS_PER_DAY2;
+    if (dist <= 5 && (!best || dist < best.dist)) {
+      best = { dist, val: fact.val };
+    }
+  }
+  return best ? best.val : null;
+}
+function buildQuarterlyFlowMap(facts, allowYtdDifference = true) {
+  const byEnd = /* @__PURE__ */ new Map();
+  for (const f of facts) {
+    if (f.days < 70 || f.days > 115) continue;
+    const prev = byEnd.get(f.end);
+    if (!prev || f.priority < prev.priority || f.priority === prev.priority && f.filed >= prev.filed) {
+      byEnd.set(f.end, f);
+    }
+  }
+  if (!allowYtdDifference) {
+    return byEnd;
+  }
+  const sortedFacts = [...facts].sort((a, b) => a.end.localeCompare(b.end));
+  for (const longer of sortedFacts) {
+    if (byEnd.has(longer.end)) continue;
+    if (longer.days < 150 || longer.days > 395) continue;
+    let bestPrior = null;
+    for (const prior of sortedFacts) {
+      if (prior.end >= longer.end) continue;
+      const startDiff = Math.abs(daysBetween(prior.start, longer.start));
+      if (startDiff > 5) continue;
+      const deltaDays = daysBetween(prior.end, longer.end);
+      if (deltaDays < 70 || deltaDays > 115) continue;
+      if (!bestPrior) {
+        bestPrior = prior;
+        continue;
+      }
+      const sameConcept = prior.priority === longer.priority;
+      const bestSameConcept = bestPrior.priority === longer.priority;
+      if (sameConcept && !bestSameConcept || sameConcept === bestSameConcept && prior.filed >= bestPrior.filed) {
+        bestPrior = prior;
+      }
+    }
+    if (bestPrior) {
+      byEnd.set(longer.end, {
+        ...longer,
+        start: bestPrior.end,
+        days: daysBetween(bestPrior.end, longer.end),
+        val: longer.val - bestPrior.val,
+        fp: longer.days >= 330 ? "Q4" : longer.fp || "Q"
+      });
+    }
+  }
+  return byEnd;
+}
+function buildAnnualFlowMap(facts) {
+  const byEnd = /* @__PURE__ */ new Map();
+  for (const f of facts) {
+    if (f.days < 330 || f.days > 395) continue;
+    if (f.form !== "10-K" && f.form !== "10-K/A" && f.form !== "20-F" && f.form !== "20-F/A") continue;
+    const prev = byEnd.get(f.end);
+    if (!prev || f.priority < prev.priority || f.priority === prev.priority && f.filed >= prev.filed) {
+      byEnd.set(f.end, f);
+    }
+  }
+  return byEnd;
+}
+function computePeriodRatios(period, isAnnual) {
+  const rev = period.revenue_m ?? null;
+  let gp = period.gross_profit_m ?? null;
+  let cogs = period.cogs_m ?? null;
+  if (gp === null && rev !== null && cogs !== null) {
+    gp = round3(rev - cogs, 2);
+  }
+  if (cogs === null && rev !== null && gp !== null && rev >= gp) {
+    cogs = round3(rev - gp, 2);
+  }
+  const opInc = period.operating_income_m ?? null;
+  const ni = period.net_income_m ?? null;
+  const ocf = period.ocf_m ?? null;
+  const capex = period.capex_m ?? null;
+  const fcf = period.fcf_m ?? (ocf !== null && capex !== null ? round3(ocf - capex, 2) : null);
+  const sbc = period.sbc_m ?? null;
+  const ar = period.accounts_receivable_m ?? null;
+  const inv = period.inventory_m ?? null;
+  const cash = period.cash_and_st_inv_m ?? null;
+  const debt = period.total_debt_m ?? null;
+  const shares = period.diluted_shares_m ?? null;
+  const eps = period.eps_diluted ?? (ni !== null && shares !== null && shares > 0 ? round3(ni / shares, 2) : null);
+  const daysBasis = isAnnual ? 365 : 91.25;
+  const grossMarginPct = rev !== null && rev > 0 && gp !== null ? round3(gp / rev * 100, 2) : null;
+  const operatingMarginPct = rev !== null && rev > 0 && opInc !== null ? round3(opInc / rev * 100, 2) : null;
+  const fcfMarginPct = rev !== null && rev > 0 && fcf !== null ? round3(fcf / rev * 100, 2) : null;
+  const ocfToNiPct = ni !== null && ni > 0 && ocf !== null ? round3(ocf / ni * 100, 2) : null;
+  const sbcPctRev = rev !== null && rev > 0 && sbc !== null ? round3(sbc / rev * 100, 2) : null;
+  const dsoDays = rev !== null && rev > 0 && ar !== null ? round3(ar / rev * daysBasis, 1) : null;
+  const dioDays = cogs !== null && cogs > 0 && inv !== null ? round3(inv / cogs * daysBasis, 1) : null;
+  const netCashB = cash !== null ? round3((cash - (debt ?? 0)) / 1e3, 3) : null;
+  return {
+    ...period,
+    gross_profit_m: gp,
+    cogs_m: cogs,
+    fcf_m: fcf,
+    eps_diluted: eps,
+    net_cash_b: netCashB,
+    gross_margin_pct: grossMarginPct,
+    operating_margin_pct: operatingMarginPct,
+    fcf_margin_pct: fcfMarginPct,
+    ocf_to_ni_pct: ocfToNiPct,
+    sbc_pct_rev: sbcPctRev,
+    dso_days: dsoDays,
+    dio_days: dioDays
+  };
+}
+function deriveLatestRatios(quarterly, annual, overrides) {
+  const latest = quarterly[0] ?? annual[0] ?? null;
+  let dilutedSharesYoyPct = null;
+  if (quarterly.length >= 2 && quarterly[0]?.diluted_shares_m) {
+    const latestMs = Date.parse(`${quarterly[0].period_end}T00:00:00Z`);
+    const yearAgo = quarterly.find((q, idx) => {
+      if (idx === 0 || !q.diluted_shares_m) return false;
+      const diff = (latestMs - Date.parse(`${q.period_end}T00:00:00Z`)) / MS_PER_DAY2;
+      return diff >= 320 && diff <= 410;
+    });
+    if (yearAgo?.diluted_shares_m && yearAgo.diluted_shares_m > 0) {
+      dilutedSharesYoyPct = round3(
+        (quarterly[0].diluted_shares_m - yearAgo.diluted_shares_m) / yearAgo.diluted_shares_m * 100,
+        2
+      );
+    }
+  }
+  if (dilutedSharesYoyPct === null && annual.length >= 2 && annual[0]?.diluted_shares_m && annual[1]?.diluted_shares_m) {
+    dilutedSharesYoyPct = round3(
+      (annual[0].diluted_shares_m - annual[1].diluted_shares_m) / annual[1].diluted_shares_m * 100,
+      2
+    );
+  }
+  let ttmEps = null;
+  let ttmFcfPerShare = null;
+  let ttmRevPerShare = null;
+  if (quarterly.length >= 4) {
+    const q4 = quarterly.slice(0, 4);
+    const shares = q4[0]?.diluted_shares_m ?? annual[0]?.diluted_shares_m ?? null;
+    if (q4.every((q) => typeof q.eps_diluted === "number")) {
+      ttmEps = round3(q4.reduce((acc, q) => acc + (q.eps_diluted ?? 0), 0), 2);
+    } else if (shares && shares > 0 && q4.every((q) => typeof q.net_income_m === "number")) {
+      const ttmNi = q4.reduce((acc, q) => acc + (q.net_income_m ?? 0), 0);
+      ttmEps = round3(ttmNi / shares, 2);
+    }
+    if (shares && shares > 0 && q4.every((q) => typeof q.fcf_m === "number")) {
+      const ttmFcf = q4.reduce((acc, q) => acc + (q.fcf_m ?? 0), 0);
+      ttmFcfPerShare = round3(ttmFcf / shares, 2);
+    }
+    if (shares && shares > 0 && q4.every((q) => typeof q.revenue_m === "number")) {
+      const ttmRev = q4.reduce((acc, q) => acc + (q.revenue_m ?? 0), 0);
+      ttmRevPerShare = round3(ttmRev / shares, 2);
+    }
+  } else if (annual[0]) {
+    const fy = annual[0];
+    const shares = fy.diluted_shares_m ?? null;
+    ttmEps = fy.eps_diluted ?? null;
+    if (shares && shares > 0) {
+      ttmFcfPerShare = fy.fcf_m != null ? round3(fy.fcf_m / shares, 2) : null;
+      ttmRevPerShare = fy.revenue_m != null ? round3(fy.revenue_m / shares, 2) : null;
+    }
+  }
+  const ratios = {
+    gross_margin_pct: latest?.gross_margin_pct ?? null,
+    operating_margin_pct: latest?.operating_margin_pct ?? null,
+    dso_days: latest?.dso_days ?? null,
+    dio_days: latest?.dio_days ?? null,
+    ocf_to_ni_pct: latest?.ocf_to_ni_pct ?? null,
+    fcf_margin_pct: latest?.fcf_margin_pct ?? null,
+    sbc_pct_rev: latest?.sbc_pct_rev ?? null,
+    net_cash_b: latest?.net_cash_b ?? null,
+    diluted_shares_yoy_pct: dilutedSharesYoyPct,
+    ttm_eps: ttmEps,
+    ttm_fcf_per_share: ttmFcfPerShare,
+    ttm_rev_per_share: ttmRevPerShare
+  };
+  if (overrides) {
+    const numericKeys = [
+      "gross_margin_pct",
+      "operating_margin_pct",
+      "dso_days",
+      "dio_days",
+      "ocf_to_ni_pct",
+      "fcf_margin_pct",
+      "sbc_pct_rev",
+      "net_cash_b",
+      "diluted_shares_yoy_pct",
+      "ttm_eps",
+      "ttm_fcf_per_share",
+      "ttm_rev_per_share"
+    ];
+    for (const k of numericKeys) {
+      const ov = overrides[k];
+      if (typeof ov === "number" && Number.isFinite(ov)) {
+        ratios[k] = ov;
+      }
+    }
+  }
+  return ratios;
+}
+function parseCompanyFactsToFundamentals(ticker, payload, opts) {
+  const sym = normalizeTicker(ticker);
+  const nowIso = opts?.nowIso ?? (/* @__PURE__ */ new Date()).toISOString();
+  const currency = detectPrimaryCurrency(payload);
+  const ccyMatcher = (u) => u === currency;
+  const shareMatcher = (u) => u === "shares";
+  const epsMatcher = (u) => u === `${currency}/shares` || u.endsWith("/shares");
+  const revFacts = collectFlowFacts(payload, REVENUE_CONCEPTS, ccyMatcher);
+  const cogsFacts = collectFlowFacts(payload, COGS_CONCEPTS, ccyMatcher);
+  const gpFacts = collectFlowFacts(payload, GROSS_PROFIT_CONCEPTS, ccyMatcher);
+  const opFacts = collectFlowFacts(payload, OP_INCOME_CONCEPTS, ccyMatcher);
+  const niFacts = collectFlowFacts(payload, NET_INCOME_CONCEPTS, ccyMatcher);
+  const ocfFacts = collectFlowFacts(payload, OCF_CONCEPTS, ccyMatcher);
+  const capexFacts = collectFlowFacts(payload, CAPEX_CONCEPTS, ccyMatcher);
+  const sbcFacts = collectFlowFacts(payload, SBC_CONCEPTS, ccyMatcher);
+  const shareFlowFacts = collectFlowFacts(payload, DILUTED_SHARES_CONCEPTS, shareMatcher);
+  const epsFacts = collectFlowFacts(payload, EPS_DILUTED_CONCEPTS, epsMatcher);
+  const instantShares = collectInstantFacts(payload, INSTANT_SHARES_CONCEPTS, shareMatcher);
+  const arInstants = collectInstantFacts(payload, AR_CONCEPTS, ccyMatcher);
+  const invInstants = collectInstantFacts(payload, INVENTORY_CONCEPTS, ccyMatcher);
+  const cashCombinedInstants = collectInstantFacts(payload, CASH_COMBINED_CONCEPTS, ccyMatcher);
+  const cashOnlyInstants = collectInstantFacts(payload, CASH_ONLY_CONCEPTS, ccyMatcher);
+  const stInvInstants = collectInstantFacts(payload, ST_INVESTMENTS_CONCEPTS, ccyMatcher);
+  const ltDebtInstants = collectInstantFacts(payload, LT_DEBT_NONCURRENT_CONCEPTS, ccyMatcher);
+  const stDebtInstants = collectInstantFacts(payload, ST_DEBT_CONCEPTS, ccyMatcher);
+  const qRev = buildQuarterlyFlowMap(revFacts, true);
+  const qCogs = buildQuarterlyFlowMap(cogsFacts, true);
+  const qGp = buildQuarterlyFlowMap(gpFacts, true);
+  const qOp = buildQuarterlyFlowMap(opFacts, true);
+  const qNi = buildQuarterlyFlowMap(niFacts, true);
+  const qOcf = buildQuarterlyFlowMap(ocfFacts, true);
+  const qCapex = buildQuarterlyFlowMap(capexFacts, true);
+  const qSbc = buildQuarterlyFlowMap(sbcFacts, true);
+  const qShares = buildQuarterlyFlowMap(shareFlowFacts, false);
+  const qEps = buildQuarterlyFlowMap(epsFacts, true);
+  const aRev = buildAnnualFlowMap(revFacts);
+  const aCogs = buildAnnualFlowMap(cogsFacts);
+  const aGp = buildAnnualFlowMap(gpFacts);
+  const aOp = buildAnnualFlowMap(opFacts);
+  const aNi = buildAnnualFlowMap(niFacts);
+  const aOcf = buildAnnualFlowMap(ocfFacts);
+  const aCapex = buildAnnualFlowMap(capexFacts);
+  const aSbc = buildAnnualFlowMap(sbcFacts);
+  const aShares = buildAnnualFlowMap(shareFlowFacts);
+  const aEps = buildAnnualFlowMap(epsFacts);
+  const toM = (val) => typeof val === "number" && Number.isFinite(val) ? round3(val / 1e6, 2) : null;
+  const toSharesM = (val) => {
+    if (typeof val !== "number" || !Number.isFinite(val) || val <= 0) return null;
+    const millions = round3(val / 1e6, 4);
+    return millions > 0 ? millions : null;
+  };
+  const resolveCashM = (periodEnd) => {
+    const comb = findInstantNear(cashCombinedInstants, periodEnd);
+    if (comb !== null) return toM(comb);
+    const cashOnly = findInstantNear(cashOnlyInstants, periodEnd);
+    const stInv = findInstantNear(stInvInstants, periodEnd);
+    if (cashOnly === null && stInv === null) return null;
+    return toM((cashOnly ?? 0) + (stInv ?? 0));
+  };
+  const resolveDebtM = (periodEnd) => {
+    const lt = findInstantNear(ltDebtInstants, periodEnd);
+    const st = findInstantNear(stDebtInstants, periodEnd);
+    if (lt === null && st === null) return null;
+    return toM((lt ?? 0) + (st ?? 0));
+  };
+  const qDates = Array.from(/* @__PURE__ */ new Set([...qRev.keys(), ...qNi.keys(), ...qOcf.keys()])).sort(
+    (a, b) => b.localeCompare(a)
+  );
+  const quarterly = qDates.slice(0, 16).map((periodEnd) => {
+    const anchor2 = qRev.get(periodEnd) ?? qNi.get(periodEnd) ?? qOcf.get(periodEnd);
+    const rawCapex = qCapex.get(periodEnd)?.val;
+    const rawShares = qShares.get(periodEnd)?.val ?? aShares.get(periodEnd)?.val ?? findInstantNear(instantShares, periodEnd);
+    const base = {
+      period_end: periodEnd,
+      filed_date: anchor2.filed,
+      fiscal_year: anchor2.fy,
+      fiscal_period: anchor2.fp && anchor2.fp !== "FY" ? anchor2.fp : "Q4",
+      form: anchor2.form,
+      accession: anchor2.accn || void 0,
+      revenue_m: toM(qRev.get(periodEnd)?.val),
+      gross_profit_m: toM(qGp.get(periodEnd)?.val),
+      operating_income_m: toM(qOp.get(periodEnd)?.val),
+      net_income_m: toM(qNi.get(periodEnd)?.val),
+      ocf_m: toM(qOcf.get(periodEnd)?.val),
+      capex_m: typeof rawCapex === "number" ? toM(Math.abs(rawCapex)) : null,
+      sbc_m: toM(qSbc.get(periodEnd)?.val),
+      diluted_shares_m: toSharesM(rawShares),
+      eps_diluted: typeof qEps.get(periodEnd)?.val === "number" ? round3(qEps.get(periodEnd).val, 2) : null,
+      accounts_receivable_m: toM(findInstantNear(arInstants, periodEnd)),
+      inventory_m: toM(findInstantNear(invInstants, periodEnd)),
+      cogs_m: toM(qCogs.get(periodEnd)?.val),
+      cash_and_st_inv_m: resolveCashM(periodEnd),
+      total_debt_m: resolveDebtM(periodEnd)
+    };
+    return computePeriodRatios(base, false);
+  });
+  const aDates = Array.from(/* @__PURE__ */ new Set([...aRev.keys(), ...aNi.keys(), ...aOcf.keys()])).sort(
+    (a, b) => b.localeCompare(a)
+  );
+  const annual = aDates.slice(0, 5).map((periodEnd) => {
+    const anchor2 = aRev.get(periodEnd) ?? aNi.get(periodEnd) ?? aOcf.get(periodEnd);
+    const rawCapex = aCapex.get(periodEnd)?.val;
+    const rawShares = aShares.get(periodEnd)?.val ?? findInstantNear(instantShares, periodEnd);
+    const base = {
+      period_end: periodEnd,
+      filed_date: anchor2.filed,
+      fiscal_year: anchor2.fy,
+      fiscal_period: "FY",
+      form: anchor2.form,
+      accession: anchor2.accn || void 0,
+      revenue_m: toM(aRev.get(periodEnd)?.val),
+      gross_profit_m: toM(aGp.get(periodEnd)?.val),
+      operating_income_m: toM(aOp.get(periodEnd)?.val),
+      net_income_m: toM(aNi.get(periodEnd)?.val),
+      ocf_m: toM(aOcf.get(periodEnd)?.val),
+      capex_m: typeof rawCapex === "number" ? toM(Math.abs(rawCapex)) : null,
+      sbc_m: toM(aSbc.get(periodEnd)?.val),
+      diluted_shares_m: toSharesM(rawShares),
+      eps_diluted: typeof aEps.get(periodEnd)?.val === "number" ? round3(aEps.get(periodEnd).val, 2) : null,
+      accounts_receivable_m: toM(findInstantNear(arInstants, periodEnd)),
+      inventory_m: toM(findInstantNear(invInstants, periodEnd)),
+      cogs_m: toM(aCogs.get(periodEnd)?.val),
+      cash_and_st_inv_m: resolveCashM(periodEnd),
+      total_debt_m: resolveDebtM(periodEnd)
+    };
+    return computePeriodRatios(base, true);
+  });
+  const latestPeriodicAccn = quarterly[0]?.accession ?? annual[0]?.accession ?? null;
+  const cikStr = opts?.cik ?? (payload.cik !== void 0 && payload.cik !== null ? String(payload.cik).padStart(10, "0") : null);
+  const hasOverrides = opts?.existingOverrides && Object.keys(opts.existingOverrides).length > 0;
+  const latestRatios = deriveLatestRatios(quarterly, annual, opts?.existingOverrides);
+  return FundamentalsSchema.parse({
+    ticker: sym,
+    cik: cikStr,
+    updated_at: nowIso,
+    source: hasOverrides ? "hybrid" : "sec_xbrl",
+    currency,
+    latest_periodic_accession: latestPeriodicAccn,
+    quarterly,
+    annual,
+    latest_ratios: latestRatios,
+    ...hasOverrides ? { overrides: opts.existingOverrides } : {}
+  });
+}
+async function syncFundamentalsXbrl(dataDir, profile, tickers, opts) {
+  const fetchImpl = opts?.fetchImpl ?? fetch;
+  const nowIso = opts?.nowIso ?? (/* @__PURE__ */ new Date()).toISOString();
+  const nowMs = Date.parse(nowIso) || Date.now();
+  const maxAgeMs = opts?.maxAgeMs ?? DEFAULT_XBRL_MAX_AGE_MS;
+  const ua = resolveSecUserAgent(profile);
+  const tickerMap = await loadSecTickerMap(dataDir, ua, fetchImpl);
+  const updated = [];
+  const cached2 = [];
+  const skipped = [];
+  const errors = [];
+  const byTicker = {};
+  const uniqueTargets = Array.from(new Set(tickers.map((t) => normalizeTicker(t))));
+  let fetchCount = 0;
+  for (const sym of uniqueTargets) {
+    const cik = tickerMap.get(sym);
+    if (!cik) {
+      skipped.push(sym);
+      continue;
+    }
+    let existing = null;
+    try {
+      existing = loadDossierFundamentals(dataDir, sym);
+    } catch {
+      existing = null;
+    }
+    if (!opts?.force && existing) {
+      const updatedMs = Date.parse(existing.updated_at);
+      const isFresh = Number.isFinite(updatedMs) && nowMs - updatedMs < maxAgeMs;
+      const latestEdgarPeriodic = (opts?.edgarFilingsByTicker?.[sym] ?? []).find(
+        (f) => PERIODIC_FORMS.has(f.form.toUpperCase())
+      );
+      const hasNewerPeriodic = Boolean(latestEdgarPeriodic?.accession) && latestEdgarPeriodic.accession !== existing.latest_periodic_accession;
+      if (isFresh && !hasNewerPeriodic) {
+        cached2.push(sym);
+        byTicker[sym] = existing;
+        continue;
+      }
+    }
+    if (fetchCount > 0) await sleepMs(SEC_PACING_MS);
+    fetchCount += 1;
+    try {
+      const url2 = `https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`;
+      const resp = await fetchImpl(url2, {
+        headers: { "User-Agent": ua, Accept: "application/json" },
+        signal: AbortSignal.timeout(15e3)
+      });
+      if (!resp.ok) {
+        throw new Error(`SEC XBRL companyfacts fetch failed (${resp.status}) for ${sym} (CIK ${cik})`);
+      }
+      const payload = await resp.json();
+      const parsed = parseCompanyFactsToFundamentals(sym, payload, {
+        cik,
+        nowIso,
+        existingOverrides: existing?.overrides
+      });
+      const saved = saveDossierFundamentals(dataDir, sym, parsed);
+      updated.push(sym);
+      byTicker[sym] = saved;
+    } catch (err) {
+      errors.push({ ticker: sym, error: err instanceof Error ? err.message : String(err) });
+      if (existing) {
+        byTicker[sym] = existing;
+      }
+    }
+  }
+  return { updated, cached: cached2, skipped, errors, byTicker };
+}
+
+// src/server/watchdog.ts
+function evaluatePortfolioRiskCapsQuick(dataDir, pluginRoot, quotesMap, fxRates) {
+  const profile = loadProfile(dataDir);
+  const portfolio = loadPortfolio(dataDir);
+  if (!portfolio) return [];
+  const etfCfg = loadEtfWeights(dataDir, pluginRoot);
+  const fxUsdToBase = fxRates.USD ?? 1;
+  let totPosBase = 0;
+  const posUsdMap = /* @__PURE__ */ new Map();
+  let usSitusUsd = 0;
+  for (const p of portfolio.positions) {
+    const yfSym = p.yf_symbol || p.ticker;
+    const cachedQ = quotesMap[yfSym];
+    const price = cachedQ && cachedQ.price > 0 ? cachedQ.price : p.ref_price;
+    const ccy = cachedQ?.currency || p.currency;
+    const ccyFx = fxRates[ccy] ?? fxUsdToBase;
+    const mvTrading = p.qty * price;
+    const mvBase = mvTrading * ccyFx;
+    const mvUsd = ccy === "USD" ? mvTrading : mvBase / fxUsdToBase;
+    totPosBase += mvBase;
+    posUsdMap.set(p.ticker, (posUsdMap.get(p.ticker) ?? 0) + mvUsd);
+    if (p.us_situs) usSitusUsd += mvUsd;
+  }
+  const navBase = totPosBase + portfolio.cash_base + portfolio.accruals_base;
+  if (navBase <= 0) return [];
+  const etfWeights = etfCfg.etf_weights ?? {};
+  const etfMeta = etfCfg.etf_metadata ?? {};
+  const etfTickersSet = new Set(Object.keys(etfWeights).map((k) => k.toUpperCase()));
+  const canonicalMembers = /* @__PURE__ */ new Map();
+  const register = (sym) => {
+    const canon = canonicalAssetName(sym);
+    if (!canonicalMembers.has(canon)) {
+      canonicalMembers.set(canon, new Set(memberTickersForCanonical(canon)));
+    }
+  };
+  for (const p of portfolio.positions) {
+    if (!etfTickersSet.has(p.ticker)) register(p.ticker);
+  }
+  for (const [etfSym, weights] of Object.entries(etfWeights)) {
+    if ((posUsdMap.get(etfSym) ?? 0) <= 0) continue;
+    for (const [constituent, w] of Object.entries(weights)) {
+      if (typeof w === "number" && w > 0) register(constituent);
+    }
+  }
+  const ltPctMap = /* @__PURE__ */ new Map();
+  const ltUsdMap = /* @__PURE__ */ new Map();
+  let maxSinglePct = 0;
+  for (const [canon, members2] of canonicalMembers.entries()) {
+    let directUsd = 0;
+    for (const m of members2) directUsd += posUsdMap.get(m) ?? 0;
+    let viaEtfsUsd = 0;
+    for (const [etfSym, weights] of Object.entries(etfWeights)) {
+      const etfMv = posUsdMap.get(etfSym) ?? 0;
+      if (etfMv <= 0) continue;
+      let share = 0;
+      for (const m of members2) {
+        const w = weights[m];
+        if (typeof w === "number") share += w;
+      }
+      viaEtfsUsd += etfMv * share;
+    }
+    const totUsd = directUsd + viaEtfsUsd;
+    if (totUsd <= 0.01) continue;
+    const pct = round(totUsd * fxUsdToBase / navBase * 100, 2);
+    ltUsdMap.set(canon, totUsd);
+    ltPctMap.set(canon, pct);
+    if (pct > maxSinglePct) maxSinglePct = pct;
+  }
+  const usSitusPct = round(usSitusUsd * fxUsdToBase / navBase * 100, 2);
+  const evalBucketUsd = (rule) => {
+    const seen = /* @__PURE__ */ new Set();
+    let sum = 0;
+    for (const rawT of rule.tickers ?? []) {
+      const canon = canonicalAssetName(rawT);
+      if (seen.has(canon)) continue;
+      seen.add(canon);
+      sum += ltUsdMap.get(canon) ?? 0;
+    }
+    if (rule.include_etf_residual_key) {
+      for (const etfSym of Object.keys(etfWeights)) {
+        const etfMv = posUsdMap.get(etfSym) ?? 0;
+        if (etfMv <= 0) continue;
+        const res = etfMeta[etfSym]?.[rule.include_etf_residual_key];
+        if (typeof res === "number") sum += etfMv * res;
+      }
+    }
+    return sum;
+  };
+  return profile.risk_caps.map((rule) => {
+    let valPct = 0;
+    if (rule.kind === "single_name_max") valPct = maxSinglePct;
+    else if (rule.kind === "ticker" && rule.ticker) valPct = ltPctMap.get(canonicalAssetName(rule.ticker)) ?? 0;
+    else if (rule.kind === "us_situs") valPct = usSitusPct;
+    else if (rule.kind === "bucket") valPct = round(evalBucketUsd(rule) * fxUsdToBase / navBase * 100, 2);
+    return {
+      id: rule.id,
+      label: rule.label,
+      value_pct: valPct,
+      cap_pct: rule.cap_pct,
+      status: valPct <= rule.cap_pct ? "PASS" : "BREACH"
+    };
+  });
+}
+async function runWatchdogSweep(dataDir, pluginRoot, opts) {
+  const fetchImpl = opts?.fetchImpl ?? fetch;
+  const includeQuotes = opts?.includeQuotes ?? true;
+  const includeMacro = opts?.includeMacro ?? true;
+  const includeEdgar = opts?.includeEdgar ?? true;
+  const includeXbrl = opts?.includeXbrl ?? true;
+  const includeInsiders = opts?.includeInsiders ?? true;
+  const profile = loadProfile(dataDir);
+  const portfolio = loadPortfolio(dataDir);
+  const catalysts = loadCatalysts(dataDir);
+  const thesisFiles = listThesisFiles(dataDir);
+  const parsedTheses = thesisFiles.map((f) => parseThesisMarkdown(f.content)).filter((x) => x !== null);
+  const nowDate = opts?.nowDate ?? /* @__PURE__ */ new Date();
+  const { iso: nowIso, dateYmd } = formatTimestamp(nowDate, profile.timezone);
+  const ymTag = dateYmd.slice(0, 7);
+  const priorEdgar = loadEdgarCache(dataDir);
+  const priorMarket = loadMarketCache(dataDir);
+  const priorAlerts = loadWatchdogAlerts(dataDir, { limit: 500 });
+  const existingAlertIds = new Set(priorAlerts.map((a) => a.id));
+  const priorOpenGates = new Set(
+    priorEdgar.gate_evaluations.filter((g) => !g.cleared).map((g) => `${g.ticker.toUpperCase()}:${g.form.toUpperCase()}:${g.filed_after}`)
+  );
+  const priorFx = {
+    ...portfolio?.fx_rates ?? {},
+    ...priorMarket.fx_rates ?? {},
+    [profile.base_currency]: 1
+  };
+  const priorRiskCaps = new Map(
+    evaluatePortfolioRiskCapsQuick(dataDir, pluginRoot, priorMarket.quotes, priorFx).map((c) => [c.id, c.status])
+  );
+  const secTargetSet = /* @__PURE__ */ new Set();
+  if (opts?.tickers && opts.tickers.length > 0) {
+    for (const t of opts.tickers) secTargetSet.add(normalizeTicker(t));
+  } else {
+    if (portfolio) {
+      for (const p of portfolio.positions) {
+        if (p.us_situs || p.asset_type.includes("ADR")) secTargetSet.add(p.ticker);
+      }
+    }
+    for (const c of catalysts) secTargetSet.add(c.ticker);
+    for (const t of parsedTheses) secTargetSet.add(normalizeTicker(t.fm.ticker));
+    if (profile.external_exposure.enabled && profile.external_exposure.ticker) {
+      secTargetSet.add(normalizeTicker(profile.external_exposure.ticker));
+    }
+  }
+  const secTargets = Array.from(secTargetSet).sort();
+  let fxRates = { ...priorFx };
+  let nextQuotesCache = { ...priorMarket.quotes };
+  let vixVal = priorMarket.vix;
+  let vixSparkline = [...priorMarket.vix_sparkline];
+  let macroRegime = priorMarket.macro_regime ?? null;
+  if (includeQuotes || includeMacro) {
+    const quoteSymbols = /* @__PURE__ */ new Set(["^VIX", profile.benchmark.yf_symbol || profile.benchmark.ticker]);
+    const currencies = /* @__PURE__ */ new Set(["USD", profile.base_currency]);
+    if (portfolio) {
+      for (const p of portfolio.positions) {
+        quoteSymbols.add(p.yf_symbol || p.ticker);
+        currencies.add(p.currency);
+      }
+    }
+    for (const t of parsedTheses) {
+      quoteSymbols.add(t.fm.yf_symbol || t.fm.ticker);
+      if (t.fm.currency) currencies.add(t.fm.currency.toUpperCase());
+    }
+    if (profile.external_exposure.enabled && profile.external_exposure.ticker) {
+      quoteSymbols.add(profile.external_exposure.ticker);
+    }
+    const [qMap, updatedFx, fetchedMacro] = await Promise.all([
+      includeQuotes ? fetchQuotesBatch(Array.from(quoteSymbols), 4, fetchImpl) : Promise.resolve(/* @__PURE__ */ new Map()),
+      includeQuotes ? fetchFxRatesToBase(Array.from(currencies), profile.base_currency, fxRates, fetchImpl) : Promise.resolve(fxRates),
+      includeMacro ? fetchMacroRegime({ nowIso, fetchImpl }) : Promise.resolve(macroRegime)
+    ]);
+    fxRates = updatedFx;
+    if (fetchedMacro) {
+      macroRegime = saveMacroRegime(dataDir, fetchedMacro);
+      if (fetchedMacro.vix !== null) vixVal = fetchedMacro.vix;
+    }
+    const vixQ = qMap.get("^VIX");
+    if (vixQ) {
+      vixVal = round(vixQ.price, 2);
+      if (vixQ.sparkline.length > 0) vixSparkline = vixQ.sparkline;
+    }
+    for (const [sym, q] of qMap.entries()) {
+      if (sym === "^VIX") continue;
+      nextQuotesCache[sym] = {
+        price: round(q.price, 4),
+        regular_price: round(q.regular_price, 4),
+        extended_price: q.extended_price !== null ? round(q.extended_price, 4) : null,
+        market_state: q.market_state,
+        quote_time: q.quote_time,
+        fifty_two_week_high: q.fifty_two_week_high,
+        fifty_two_week_low: q.fifty_two_week_low,
+        currency: q.currency,
+        sparkline: q.sparkline,
+        change_1d_pct: q.change_1d_pct,
+        change_1m_pct: q.change_1m_pct
+      };
+    }
+    saveMarketCache(dataDir, {
+      updated_at: nowIso,
+      vix: vixVal,
+      vix_sparkline: vixSparkline,
+      fx_rates: fxRates,
+      macro_regime: macroRegime,
+      quotes: nextQuotesCache
+    });
+  }
+  let latestEdgar = priorEdgar;
+  let edgarChecked = 0;
+  if (includeEdgar && secTargets.length > 0) {
+    try {
+      const edgarRes = await pollEdgarFilings(dataDir, profile, secTargets, catalysts, nowIso, fetchImpl);
+      latestEdgar = edgarRes.cache;
+      edgarChecked = secTargets.length - edgarRes.skippedTickers.length;
+    } catch {
+    }
+  }
+  let xbrlUpdated = [];
+  const xbrlByTicker = {};
+  if (includeXbrl && secTargets.length > 0) {
+    try {
+      const xbrlRes = await syncFundamentalsXbrl(dataDir, profile, secTargets, {
+        force: opts?.forceXbrl,
+        nowIso,
+        edgarFilingsByTicker: latestEdgar.filings_by_ticker,
+        fetchImpl
+      });
+      xbrlUpdated = xbrlRes.updated;
+      Object.assign(xbrlByTicker, xbrlRes.byTicker);
+    } catch {
+    }
+  }
+  let insidersUpdated = [];
+  const insidersByTicker = {};
+  if (includeInsiders && secTargets.length > 0) {
+    try {
+      const insRes = await syncInsidersForm4(dataDir, profile, secTargets, {
+        force: opts?.forceInsiders,
+        nowIso,
+        fetchImpl
+      });
+      insidersUpdated = insRes.updated;
+      Object.assign(insidersByTicker, insRes.byTicker);
+    } catch {
+    }
+  }
+  const pendingAlerts = [];
+  const enqueueAlert = (alert) => {
+    if (existingAlertIds.has(alert.id)) return;
+    existingAlertIds.add(alert.id);
+    pendingAlerts.push(alert);
+  };
+  for (const g of latestEdgar.gate_evaluations) {
+    if (!g.cleared) continue;
+    const gateKey = `${g.ticker.toUpperCase()}:${g.form.toUpperCase()}:${g.filed_after}`;
+    if (priorOpenGates.size === 0 || priorOpenGates.has(gateKey)) {
+      enqueueAlert({
+        id: `sec-gate-cleared:${g.ticker.toUpperCase()}:${g.form.toUpperCase()}:${g.latest_matching_date ?? dateYmd}`,
+        detected_at: nowIso,
+        severity: "high",
+        kind: "sec_gate_cleared",
+        ticker: g.ticker.toUpperCase(),
+        title: `${g.ticker} SEC ${g.form} Gate Cleared`,
+        detail: `${g.form} filed ${g.latest_matching_date ?? "recently"} \u2014 ${g.description}`,
+        acknowledged: false
+      });
+    }
+  }
+  const redFlags = extractSecRedFlags(latestEdgar.filings_by_ticker);
+  for (const rf of redFlags) {
+    enqueueAlert({
+      id: `sec-red-flag:${rf.ticker.toUpperCase()}:${rf.code}:${rf.accession}`,
+      detected_at: nowIso,
+      severity: rf.severity,
+      kind: "sec_red_flag",
+      ticker: rf.ticker.toUpperCase(),
+      title: `${rf.ticker} ${rf.code} Forensic Filing Alert`,
+      detail: `${rf.label} (${rf.form} filed ${rf.filingDate})`,
+      acknowledged: false
+    });
+  }
+  for (const { fm } of parsedTheses) {
+    const sym = normalizeTicker(fm.ticker);
+    const yfSym = String(fm.yf_symbol || sym);
+    const quoteEntry = nextQuotesCache[yfSym] ?? nextQuotesCache[sym] ?? null;
+    const curPrice = quoteEntry?.price ?? (typeof fm.last_ref_price === "number" ? fm.last_ref_price : null);
+    const tier = DossierTierSchema.safeParse(fm.tier).success ? fm.tier : "active";
+    let fundamentals = xbrlByTicker[sym] ?? null;
+    if (!fundamentals) {
+      try {
+        fundamentals = loadDossierFundamentals(dataDir, sym);
+      } catch {
+        fundamentals = null;
+      }
+    }
+    let insiders = insidersByTicker[sym] ?? null;
+    if (!insiders) {
+      try {
+        insiders = loadDossierInsiders(dataDir, sym);
+      } catch {
+        insiders = null;
+      }
+    }
+    const tickerFilings = latestEdgar.filings_by_ticker[sym] ?? [];
+    const parsedHyps = Array.isArray(fm.hypotheses) ? external_exports.array(HypothesisSchema).safeParse(fm.hypotheses) : null;
+    const hypotheses = parsedHyps?.success ? parsedHyps.data : [];
+    for (const h of hypotheses) {
+      if (!h.rule) continue;
+      const evalRes = evaluateHypothesisRule(h.rule, fundamentals, tickerFilings, insiders, quoteEntry);
+      if (evalRes.passed === false) {
+        enqueueAlert({
+          id: `rule-breach:${sym}:${h.id}:${evalRes.period ?? dateYmd}`,
+          detected_at: nowIso,
+          severity: h.is_core ? "high" : "medium",
+          kind: "hypothesis_rule_breach",
+          ticker: sym,
+          title: `${sym} Rule Breached: ${h.id}`,
+          detail: evalRes.detail,
+          acknowledged: false
+        });
+      }
+    }
+    if (tier === "passed" && typeof fm.reentry_price === "number" && Number.isFinite(fm.reentry_price) && curPrice !== null && curPrice <= fm.reentry_price) {
+      enqueueAlert({
+        id: `reentry-hit:${sym}:${fm.reentry_price}:${ymTag}`,
+        detected_at: nowIso,
+        severity: "medium",
+        kind: "reentry_hit",
+        ticker: sym,
+        title: `${sym} Hit Passed Re-Entry Target (${curPrice} <= ${fm.reentry_price})`,
+        detail: fm.reentry_trigger ? `Re-entry criteria: ${fm.reentry_trigger}` : `Price ${curPrice} crossed re-entry level ${fm.reentry_price}.`,
+        acknowledged: false
+      });
+    }
+    const priceAtAudit = typeof fm.price_at_audit === "number" && fm.price_at_audit > 0 ? fm.price_at_audit : null;
+    if (priceAtAudit !== null && curPrice !== null) {
+      const driftPct = round((curPrice - priceAtAudit) / priceAtAudit * 100, 1);
+      if (Math.abs(driftPct) >= 15) {
+        const bucket = Math.floor(Math.abs(driftPct) / 15) * 15;
+        enqueueAlert({
+          id: `audit-drift:${sym}:${fm.last_audited_date ?? "none"}:${bucket}`,
+          detected_at: nowIso,
+          severity: "medium",
+          kind: "audit_drift",
+          ticker: sym,
+          title: `${sym} Audit Price Drift (${driftPct >= 0 ? "+" : ""}${driftPct}%)`,
+          detail: `Price moved from ${priceAtAudit} at audit (${fm.last_audited_date ?? "n/a"}) to ${curPrice}; thesis needs re-test.`,
+          acknowledged: false
+        });
+      }
+    }
+    if (insiders && insiders.flags.length > 0) {
+      for (const flag of insiders.flags) {
+        const code = flag.split(":")[0]?.trim() || "INSIDER_SIGNAL";
+        const isHigh = code === "ACTIVIST_13D_FILING" || code === "C_SUITE_DISCRETIONARY_BUY";
+        enqueueAlert({
+          id: `insider-flag:${sym}:${code}:${ymTag}`,
+          detected_at: nowIso,
+          severity: isHigh ? "high" : "medium",
+          kind: "insider_signal",
+          ticker: sym,
+          title: `${sym} ${code.replace(/_/g, " ")}`,
+          detail: flag,
+          acknowledged: false
+        });
+      }
+    }
+  }
+  const nextCaps = evaluatePortfolioRiskCapsQuick(dataDir, pluginRoot, nextQuotesCache, fxRates);
+  for (const cap of nextCaps) {
+    if (cap.status === "BREACH" && priorRiskCaps.get(cap.id) !== "BREACH") {
+      enqueueAlert({
+        id: `risk-cap-breach:${cap.id}:${ymTag}`,
+        detected_at: nowIso,
+        severity: "high",
+        kind: "risk_cap_breach",
+        title: `Risk Cap Breached: ${cap.label}`,
+        detail: `Exposure rose to ${cap.value_pct.toFixed(1)}% vs ${cap.cap_pct.toFixed(1)}% cap.`,
+        acknowledged: false
+      });
+    }
+  }
+  if (macroRegime && macroRegime.vix !== null && macroRegime.vix >= 28) {
+    enqueueAlert({
+      id: `macro-high-vol:${macroRegime.regime_label}:${dateYmd}`,
+      detected_at: nowIso,
+      severity: macroRegime.regime_label === "STRESS" ? "high" : "medium",
+      kind: "macro_regime",
+      title: `Macro Regime ${macroRegime.regime_label} (VIX ${macroRegime.vix.toFixed(1)})`,
+      detail: macroRegime.notes ?? "Elevated volatility regime \u2014 stage buys 2-3 weeks apart and guard liquidity reserve.",
+      acknowledged: false
+    });
+  }
+  const savedNewAlerts = appendWatchdogAlerts(dataDir, pendingAlerts);
+  const totalUnack = loadWatchdogAlerts(dataDir, { limit: 200, onlyUnacknowledged: true }).length;
+  const summaryParts = [
+    `Watchdog sweep complete (${nowIso}): ${savedNewAlerts.length} new alert(s), ${totalUnack} unacknowledged.`,
+    `EDGAR checked: ${edgarChecked} | XBRL updated: ${xbrlUpdated.length} | Form 4 updated: ${insidersUpdated.length}.`
+  ];
+  if (macroRegime) {
+    summaryParts.push(
+      `Macro: ${macroRegime.regime_label} (VIX ${macroRegime.vix ?? "n/a"}, US10Y ${macroRegime.us10y_pct ?? "n/a"}%, 3M ${macroRegime.us3m_pct ?? "n/a"}%).`
+    );
+  }
+  return {
+    checked_at: nowIso,
+    new_alerts: savedNewAlerts,
+    total_unacknowledged: totalUnack,
+    macro_regime: macroRegime,
+    edgar_checked: edgarChecked,
+    xbrl_updated: xbrlUpdated,
+    insiders_updated: insidersUpdated,
+    summary: summaryParts.join(" ")
+  };
+}
+
 // src/server/index.ts
-var APP_URI = "ui://investment-os/v3/dashboard.html";
+var APP_URI = "ui://investment-os/v5/dashboard.html";
 var APP_MIME = "text/html;profile=mcp-app";
 var currentDir = typeof __dirname !== "undefined" ? __dirname : import_node_path2.default.dirname(import_node_path2.default.resolve(process.argv[1] || process.cwd()));
 var inferredRoot = import_node_path2.default.basename(currentDir) === "dist" ? import_node_path2.default.resolve(currentDir, "..") : import_node_path2.default.resolve(currentDir, "..", "..");
@@ -35318,22 +41598,106 @@ var PANE_META = {
   }
 };
 var APP_ONLY_META = { ui: { visibility: ["app"] } };
+var HYPOTHESIS_ITEM_SCHEMA = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    claim: { type: "string" },
+    metric: { type: "string" },
+    status: { type: "string", enum: ["untested", "supported", "weakened", "falsified"] },
+    confidence: { type: "string", enum: ["low", "medium", "high"] },
+    evidence: { type: "string" },
+    last_tested: { type: ["string", "null"] },
+    source_url: { type: ["string", "null"] },
+    is_core: { type: "boolean" },
+    waiver_reason: { type: ["string", "null"] },
+    waiver_expires: { type: ["string", "null"] },
+    rule: {
+      type: ["object", "null"],
+      properties: {
+        source: { type: "string", enum: ["xbrl", "edgar", "market", "insiders"] },
+        metric: { type: "string" },
+        op: { type: "string", enum: ["<=", "<", ">=", ">", "=="] },
+        threshold: { type: "number" },
+        period: { type: "string", enum: ["latest_q", "ttm", "latest_fy"] }
+      },
+      required: ["metric", "op", "threshold"]
+    }
+  },
+  required: ["id", "claim"]
+};
+var THESIS_BASE_PROPERTIES = {
+  ticker: { type: "string" },
+  role: { type: "string" },
+  yf_symbol: { type: "string" },
+  currency: { type: "string" },
+  us_situs: { type: "boolean" },
+  tier: { type: "string", enum: ["active", "bench", "passed"] },
+  action_verdict: { type: ["string", "null"], enum: ["GO", "WAIT", "PASS", null] },
+  takeaway: { type: "array", items: { type: "string" }, maxItems: 3 },
+  last_audited_date: { type: ["string", "null"] },
+  price_at_audit: { type: ["number", "null"] },
+  sources: {
+    type: "array",
+    items: {
+      type: "object",
+      properties: {
+        label: { type: "string" },
+        kind: { type: "string", enum: ["sec", "ibkr", "model", "market", "report"] },
+        date: { type: ["string", "null"] },
+        url: { type: ["string", "null"] }
+      },
+      required: ["label", "kind"]
+    }
+  },
+  rejection_reason: { type: ["string", "null"] },
+  reentry_trigger: { type: ["string", "null"] },
+  reentry_price: { type: ["number", "null"] },
+  buy_zone_low: { type: ["number", "null"] },
+  buy_zone_high: { type: ["number", "null"] },
+  trim_zone: { type: ["number", "null"] },
+  clear_buy_zone: { type: "boolean" },
+  clear_trim_zone: { type: "boolean" },
+  gated: { type: "boolean" },
+  max_weight_pct: { type: ["number", "null"] },
+  next_catalyst_date: { type: ["string", "null"] },
+  next_catalyst: { type: ["string", "null"] },
+  theme_refs: { type: "array", items: { type: "string" }, maxItems: 12 },
+  rationale: { type: "string", description: "Optional rationale logged as an immutable rule_change event when triggers/gates/caps change." },
+  core_thesis: { type: "array", items: { type: "string" } },
+  kill_switches: { type: "array", items: { type: "string" } },
+  decision_log_note: { type: "string" },
+  verdict: {
+    type: ["string", "null"],
+    enum: ["HIGH_CONVICTION", "WATCH", "PROBATION", "EXIT", null]
+  },
+  bear_case_summary: { type: ["string", "null"] },
+  last_tested_date: { type: ["string", "null"] },
+  hypotheses: {
+    type: "array",
+    items: HYPOTHESIS_ITEM_SCHEMA
+  }
+};
 var TOOLS = [
   {
     name: "open_dashboard",
     title: "Investment OS",
-    description: "Open or refresh the interactive Investment OS sidecar dashboard showing portfolio valuation, look-through exposures, configurable risk caps, optional US NRA estate tax, thesis trigger zones, and SEC EDGAR catalysts.",
+    description: "Open or refresh the interactive Investment OS v0.5 Quantamental Personal CIO sidecar dashboard showing portfolio valuation, look-through exposures, Priority Sells & Tax Swaps, Macro Strip, Shared Themes, Watchdog Alerts, living dossiers (Reverse DCF bridge, XBRL, Form 4, 5Y scenarios, dip triage), SEC EDGAR filings, and the Backtest & Judgment Lab.",
     inputSchema: {
       type: "object",
       properties: {
         tab: {
           type: "string",
-          enum: ["overview", "holdings", "theses", "edgar"],
+          enum: ["overview", "holdings", "theses", "edgar", "lab"],
           description: "Initial dashboard tab to focus."
         },
         live: {
           type: "boolean",
-          description: "If true, fetch live quotes, VIX, and FX rates via Yahoo Finance."
+          description: "If true, fetch live quotes (including extended hours), macro strip, VIX, and FX rates via Yahoo Finance."
+        },
+        use_cache: {
+          type: "boolean",
+          description: "If true (when live is false), preserve cached live market prices and FX rates instead of reverting to snapshot reference prices."
         },
         demo: {
           type: "boolean",
@@ -35346,7 +41710,7 @@ var TOOLS = [
   {
     name: "update_profile",
     title: "Update Investor Profile & Risk Caps",
-    description: "Configure base currency, timezone, tax residency / US NRA estate tax toggle, external equity / cash reserve settings, and custom risk caps inside ${PLUGIN_DATA}/profile.yaml.",
+    description: "Configure base currency, timezone, benchmark/hurdle assumptions (including hedge vs amortized estate-tax drag mode), tax residency / US NRA estate tax toggle, external equity (amount or live share qty) / cash reserve settings, and custom risk caps inside ${PLUGIN_DATA}/profile.yaml.",
     inputSchema: {
       type: "object",
       properties: {
@@ -35354,6 +41718,21 @@ var TOOLS = [
         timezone: { type: "string", description: "IANA timezone string (e.g., America/New_York, Asia/Singapore, Europe/London)." },
         edgar_user_agent: { type: "string" },
         custody_label: { type: "string" },
+        benchmark: {
+          type: "object",
+          properties: {
+            ticker: { type: "string" },
+            yf_symbol: { type: "string" },
+            label: { type: "string" },
+            expected_cagr_pct: { type: "number" },
+            alpha_buffer_pct: { type: "number" },
+            estate_tax_drag_mode: { type: "string", enum: ["hedge", "amortized"] },
+            estate_tax_hedge_bps: { type: "number" },
+            estate_tax_amortize_years: { type: "integer" },
+            estate_tax_annual_drag_pct: { type: ["number", "null"] },
+            core_active_cap: { type: "integer" }
+          }
+        },
         tax_profile: {
           type: "object",
           properties: {
@@ -35370,6 +41749,7 @@ var TOOLS = [
             enabled: { type: "boolean" },
             label: { type: "string" },
             ticker: { type: ["string", "null"] },
+            qty: { type: ["number", "null"] },
             amount_base: { type: "number" },
             vested_pct: { type: ["number", "null"] },
             us_situs: { type: "boolean" },
@@ -35410,7 +41790,7 @@ var TOOLS = [
   {
     name: "update_portfolio_positions",
     title: "Update Portfolio Positions",
-    description: "Persist multi-currency holdings, cash, accruals, or FX rates into ${PLUGIN_DATA}/portfolio.json (e.g., synced from ibkr-mcp or parsed from statements) and refresh dashboard metrics.",
+    description: "Persist multi-currency holdings, cash, accruals, or FX rates into ${PLUGIN_DATA}/portfolio.json (e.g., synced read-only from ibkr-mcp or parsed from statements) and refresh dashboard metrics.",
     inputSchema: {
       type: "object",
       properties: {
@@ -35450,13 +41830,36 @@ var TOOLS = [
     _meta: INLINE_META
   },
   {
+    name: "update_etf_weights",
+    title: "Update ETF Look-Through Weights",
+    description: "Validate and persist custom ETF constituent weights and metadata into ${PLUGIN_DATA}/etf_weights.json for accurate look-through aggregation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        as_of: { type: "string" },
+        note: { type: "string" },
+        etf_weights: {
+          type: "object",
+          description: "Map of ETF ticker -> map of constituent ticker -> fractional weight (0..1)."
+        },
+        etf_metadata: {
+          type: "object",
+          description: "Map of ETF ticker -> metadata object (isin, domicile, us_situs, ocf_pct, other_semis_residual, etc.)."
+        }
+      },
+      required: ["etf_weights"]
+    },
+    _meta: INLINE_META
+  },
+  {
     name: "update_external_wealth",
     title: "Update External Exposure & Cash Reserve",
-    description: "Update external equity exposure, vested percentage, near-term liquidity reserve, or custody label inside ${PLUGIN_DATA}/profile.yaml and refresh the Investment OS dashboard.",
+    description: "Update external equity exposure (amount or live share qty), vested percentage, near-term liquidity reserve, or custody label inside ${PLUGIN_DATA}/profile.yaml and refresh the Investment OS dashboard.",
     inputSchema: {
       type: "object",
       properties: {
         external_amount_base: { type: "number" },
+        external_qty: { type: ["number", "null"] },
         external_enabled: { type: "boolean" },
         external_label: { type: "string" },
         external_ticker: { type: ["string", "null"] },
@@ -35473,52 +41876,182 @@ var TOOLS = [
   {
     name: "update_thesis",
     title: "Create or Update Stock Thesis Card",
-    description: "Create or update a living thesis card (${PLUGIN_DATA}/theses/<TICKER>.md) with pre-set buy/trim zones, binary gates, catalyst dates, kill-switches, and dated decision log notes.",
+    description: "Create or update a living thesis card (${PLUGIN_DATA}/theses/<TICKER>.md) with tier, action verdict, 3-line takeaway, theme_refs, provenance sources, buy/trim zones, re-entry triggers, binary gates, rule-backed hypotheses, kill-switches, and dated decision log notes.",
+    inputSchema: {
+      type: "object",
+      properties: THESIS_BASE_PROPERTIES,
+      required: ["ticker"]
+    },
+    _meta: INLINE_META
+  },
+  {
+    name: "upsert_dossier",
+    title: "Create or Update Full Research Dossier",
+    description: "Atomically upsert a stock's living thesis card (${PLUGIN_DATA}/theses/<TICKER>.md) plus optional Reverse DCF & Bear/Base/Bull valuation model (dossiers/<TICKER>/model.json), primary-source markdown research memo (dossiers/<TICKER>/memo.md), and external market intelligence (dossiers/<TICKER>/intel.json).",
     inputSchema: {
       type: "object",
       properties: {
-        ticker: { type: "string" },
-        role: { type: "string" },
-        yf_symbol: { type: "string" },
-        currency: { type: "string" },
-        us_situs: { type: "boolean" },
-        buy_zone_low: { type: ["number", "null"] },
-        buy_zone_high: { type: ["number", "null"] },
-        trim_zone: { type: ["number", "null"] },
-        clear_buy_zone: { type: "boolean" },
-        clear_trim_zone: { type: "boolean" },
-        gated: { type: "boolean" },
-        max_weight_pct: { type: ["number", "null"] },
-        next_catalyst_date: { type: ["string", "null"] },
-        next_catalyst: { type: ["string", "null"] },
-        core_thesis: { type: "array", items: { type: "string" } },
-        kill_switches: { type: "array", items: { type: "string" } },
-        decision_log_note: { type: "string" },
-        verdict: {
-          type: ["string", "null"],
-          enum: ["HIGH_CONVICTION", "WATCH", "PROBATION", "EXIT", null]
+        ...THESIS_BASE_PROPERTIES,
+        model: {
+          type: "object",
+          description: "Optional 5Y valuation model (DossierModelSchema): reverse_dcf (with net_cash_b, annual_dilution_pct), scenarios, dividend_yield_pct, accumulating, dividend_wht_pct, tranches."
         },
-        bear_case_summary: { type: ["string", "null"] },
-        last_tested_date: { type: ["string", "null"] },
-        hypotheses: {
+        memo_md: {
+          type: "string",
+          description: "Optional full primary-source markdown research memo saved to dossiers/<TICKER>/memo.md."
+        },
+        intel: {
+          type: "object",
+          description: "Optional structured broker/market intelligence saved to dossiers/<TICKER>/intel.json."
+        }
+      },
+      required: ["ticker"]
+    },
+    _meta: INLINE_META
+  },
+  {
+    name: "upsert_theme",
+    title: "Create or Update Shared Research Theme",
+    description: "Create or update a Layer-1 shared macro/sector Theme Object (${PLUGIN_DATA}/themes/<slug>.yaml + optional <slug>.md) linking multiple stock dossiers via exposures[] and falsifiable signposts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        slug: { type: "string", description: "Kebab-case identifier (e.g., ai-compute-gpu-vs-tpu)." },
+        title: { type: "string" },
+        updated_at: { type: "string" },
+        relationship_mode: { type: "string", enum: ["zero_sum", "symbiotic", "cyclical", "structural"] },
+        summary: { type: "string" },
+        shared_assumptions: { type: "array", items: { type: "string" } },
+        exposures: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              ticker: { type: "string" },
+              stance: { type: "string", enum: ["beneficiary", "hedged_tollbooth", "at_risk", "watch"] },
+              note: { type: "string" }
+            },
+            required: ["ticker", "stance", "note"]
+          }
+        },
+        signposts: {
           type: "array",
           items: {
             type: "object",
             properties: {
               id: { type: "string" },
-              claim: { type: "string" },
               metric: { type: "string" },
-              status: { type: "string", enum: ["untested", "supported", "weakened", "falsified"] },
-              confidence: { type: "string", enum: ["low", "medium", "high"] },
-              evidence: { type: "string" },
-              last_tested: { type: ["string", "null"] },
-              source_url: { type: ["string", "null"] }
+              threshold: { type: "string" },
+              status: { type: "string", enum: ["watching", "confirmed", "falsified"] },
+              evidence: { type: ["string", "null"] },
+              last_checked: { type: ["string", "null"] }
             },
-            required: ["id", "claim"]
+            required: ["id", "metric"]
           }
-        }
+        },
+        sources: { type: "array", items: { type: "object" } },
+        memo_md: { type: "string", description: "Optional companion markdown synthesis saved to themes/<slug>.md." }
       },
-      required: ["ticker"]
+      required: ["slug", "title", "summary"]
+    },
+    _meta: INLINE_META
+  },
+  {
+    name: "ingest_research_intel",
+    title: "Ingest Read-Only Broker & Market Intelligence",
+    description: "Persist read-only external intelligence (e.g., from ibkr-mcp) into dossiers/<TICKER>/intel.json AND append numeric snapshots to dossiers/<TICKER>/intel_history.jsonl, history_cache.json, and/or pa_performance.json.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Required when ingesting ticker-level intel." },
+        intel: {
+          type: "object",
+          description: "DossierIntelSchema payload: updated_at, provider, contract_id?, earnings_insight?, options_intel?, themes?, connections?."
+        },
+        intel_history_entry: {
+          type: "object",
+          description: "Optional explicit numeric snapshot appended to dossiers/<TICKER>/intel_history.jsonl."
+        },
+        history_series: {
+          type: "array",
+          description: "Optional array of weekly historical price series merged into history_cache.json.",
+          items: { type: "object" }
+        },
+        pa_performance: {
+          type: "object",
+          description: "Optional account TWR/MWR summary saved to pa_performance.json."
+        }
+      }
+    },
+    _meta: INLINE_META
+  },
+  {
+    name: "sync_fundamentals_xbrl",
+    title: "Sync SEC XBRL Fundamentals",
+    description: "Fetch official SEC EDGAR XBRL companyfacts (quarterly + annual financials and forensic ratios: GM%, DSO, DIO, OCF/NI, SBC%, Net Cash, TTM EPS/FCF) into dossiers/<TICKER>/fundamentals.json while preserving custom overrides.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tickers: { type: "array", items: { type: "string" } },
+        ticker: { type: "string" },
+        force: { type: "boolean", description: "Force refresh even if cache is fresh (<7d) and no newer periodic filing landed." }
+      }
+    },
+    _meta: INLINE_META
+  },
+  {
+    name: "sync_insiders_form4",
+    title: "Sync SEC Form 4 / 13D Insiders",
+    description: "Fetch incremental SEC Form 4 XML filings and Schedule 13D events separating discretionary buys/sales from 10b5-1 plans into dossiers/<TICKER>/insiders.json.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tickers: { type: "array", items: { type: "string" } },
+        ticker: { type: "string" },
+        force: { type: "boolean", description: "Re-parse cached Form 4 accessions instead of incremental delta fetch." }
+      }
+    },
+    _meta: INLINE_META
+  },
+  {
+    name: "run_watchdog_sweep",
+    title: "Run CIO Delta Watchdog Sweep",
+    description: "Execute a quiet delta-only CIO Watchdog sweep: refreshes extended quotes, FX, 4-indicator macro regime, hardened SEC EDGAR across all dossiers, conditional XBRL, and incremental Form 4 insiders, appending only genuine actionable deltas to alerts_log.jsonl.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tickers: { type: "array", items: { type: "string" } },
+        include_quotes: { type: "boolean" },
+        include_macro: { type: "boolean" },
+        include_edgar: { type: "boolean" },
+        include_xbrl: { type: "boolean" },
+        include_insiders: { type: "boolean" },
+        force_xbrl: { type: "boolean" },
+        force_insiders: { type: "boolean" }
+      }
+    },
+    _meta: INLINE_META
+  },
+  {
+    name: "run_portfolio_backtest",
+    title: "Run Deterministic Portfolio-Impact Backtest",
+    description: "Simulate adding or sizing a candidate ticker into the current portfolio (with hybrid drift rebalancing, FX conversion, risk-free cash yield, Sharpe \xB1 SE, and optional external wealth) across overlapping 5Y weekly history and benchmark regimes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        candidate_ticker: { type: "string", description: "Candidate stock or ETF ticker symbol." },
+        candidate_yf_symbol: { type: "string", description: "Optional Yahoo Finance symbol override (e.g., ENR.DE, VWRA.L)." },
+        target_weight_pct: { type: "number", description: "Target portfolio weight % (0.5 to 50, default 5)." },
+        funding_source: {
+          type: "string",
+          description: 'Funding source: "cash", "pro_rata", or "swap:<HELD_TICKER>".'
+        },
+        rebalance_band_pct: { type: "number", description: "Relative drift rebalancing threshold % (default 25, floored at 2% absolute NAV drift)." },
+        include_external_wealth: { type: "boolean", description: "Include configured external equity ticker in weights & cluster correlation (default true)." },
+        rf_pct: { type: "number", description: "Annual risk-free rate % for Sharpe/Sortino and cash yield (defaults to cached 3M T-bill or 4.0%)." },
+        demo: { type: "boolean", description: "If true, simulate against Demo Preview portfolio and synthetic histories." }
+      },
+      required: ["candidate_ticker"]
     },
     _meta: INLINE_META
   },
@@ -35565,20 +42098,47 @@ var TOOLS = [
   {
     name: "check_sec_edgar",
     title: "Poll SEC EDGAR Filings",
-    description: "Fetch recent official SEC EDGAR filings (10-K, 10-Q, 8-K, 20-F, 6-K, DEF 14A) for any US-listed tickers and evaluate configured filing gates.",
+    description: "Fetch recent official SEC EDGAR filings (4 periodic + 10 event filings per ticker, including NT 10-Q/K and 8-K forensic red-flag item codes) across US holdings and all dossiers, and evaluate configured filing gates.",
     inputSchema: {
       type: "object",
       properties: {
         tickers: {
           type: "array",
           items: { type: "string" },
-          description: "Optional list of tickers (defaults to US-situs portfolio holdings + catalyst watchlist)."
+          description: "Optional list of tickers (defaults to US/ADR holdings, catalysts, and all Active/Bench/Passed dossiers)."
         },
         ticker: {
           type: "string",
           description: "Optional single ticker shorthand."
         }
       }
+    },
+    _meta: INLINE_META
+  },
+  {
+    name: "record_thesis_test",
+    title: "Record Systematic Thesis Test",
+    description: "Record a systematic Red-Team thesis test for a stock: score falsifiable hypotheses, auto-capture Point-in-Time macro/model snapshot & benchmark price, update conviction verdict in theses/<TICKER>.md, and append an immutable entry to test_log.jsonl.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        verdict: { type: "string", enum: ["HIGH_CONVICTION", "WATCH", "PROBATION", "EXIT"] },
+        action_verdict: { type: ["string", "null"], enum: ["GO", "WAIT", "PASS", null] },
+        kill_switch_triggered: { type: "boolean" },
+        summary: { type: "string" },
+        bear_case: { type: "string" },
+        tested_at: { type: "string" },
+        price_at_test: { type: ["number", "null"] },
+        benchmark_price_at_test: { type: ["number", "null"] },
+        currency: { type: "string" },
+        pit_snapshot: { type: ["object", "null"] },
+        hypotheses_tested: {
+          type: "array",
+          items: HYPOTHESIS_ITEM_SCHEMA
+        }
+      },
+      required: ["ticker", "verdict", "summary"]
     },
     _meta: INLINE_META
   },
@@ -35591,7 +42151,8 @@ var TOOLS = [
       type: "object",
       properties: {
         live: { type: "boolean" },
-        tab: { type: "string" },
+        use_cache: { type: "boolean" },
+        tab: { type: "string", enum: ["overview", "holdings", "theses", "edgar", "lab"] },
         demo: { type: "boolean" }
       }
     },
@@ -35604,7 +42165,52 @@ var TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        tickers: { type: "array", items: { type: "string" } }
+        tickers: { type: "array", items: { type: "string" } },
+        use_cache: { type: "boolean" }
+      }
+    },
+    _meta: APP_ONLY_META
+  },
+  {
+    name: "app_run_watchdog",
+    title: "App Run Delta Watchdog Sweep",
+    description: "Internal UI tool to run a silent delta-only CIO Watchdog sweep (quotes, macro, EDGAR, XBRL, Form 4) and return the refreshed DashboardPayload.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        include_xbrl: { type: "boolean" },
+        include_insiders: { type: "boolean" },
+        tab: { type: "string", enum: ["overview", "holdings", "theses", "edgar", "lab"] }
+      }
+    },
+    _meta: APP_ONLY_META
+  },
+  {
+    name: "app_get_theme_detail",
+    title: "App Load Shared Theme Detail",
+    description: "Internal UI tool to lazy-load themes/<slug>.yaml, themes/<slug>.md, and linked dossier statuses for inspection.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        slug: { type: "string" },
+        demo: { type: "boolean" },
+        use_cache: { type: "boolean" }
+      },
+      required: ["slug"]
+    },
+    _meta: APP_ONLY_META
+  },
+  {
+    name: "app_ack_alert",
+    title: "App Acknowledge Watchdog Alert",
+    description: "Internal UI tool to acknowledge one or more watchdog alerts (or '*' for all) in alerts_log.jsonl and return the refreshed DashboardPayload.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string" },
+        ids: { type: "array", items: { type: "string" } },
+        use_cache: { type: "boolean" },
+        tab: { type: "string", enum: ["overview", "holdings", "theses", "edgar", "lab"] }
       }
     },
     _meta: APP_ONLY_META
@@ -35617,8 +42223,10 @@ var TOOLS = [
       type: "object",
       properties: {
         external_amount_base: { type: "number" },
+        external_qty: { type: ["number", "null"] },
         reserve_amount_base: { type: "number" },
-        vested_pct: { type: ["number", "null"] }
+        vested_pct: { type: ["number", "null"] },
+        use_cache: { type: "boolean" }
       },
       required: ["external_amount_base", "reserve_amount_base"]
     },
@@ -35627,7 +42235,7 @@ var TOOLS = [
   {
     name: "app_save_trigger",
     title: "App Save Trigger Zones",
-    description: "Internal UI tool to update thesis frontmatter buy/trim trigger zones.",
+    description: "Internal UI tool to update thesis frontmatter buy/trim trigger zones, gated state, and rule_change rationale.",
     inputSchema: {
       type: "object",
       properties: {
@@ -35635,73 +42243,77 @@ var TOOLS = [
         buy_zone_low: { type: ["number", "null"] },
         buy_zone_high: { type: ["number", "null"] },
         trim_zone: { type: ["number", "null"] },
-        gated: { type: "boolean" }
+        gated: { type: "boolean" },
+        rationale: { type: "string" },
+        use_cache: { type: "boolean" }
       },
       required: ["ticker"]
     },
     _meta: APP_ONLY_META
   },
   {
-    name: "record_thesis_test",
-    title: "Record Systematic Thesis Test",
-    description: "Record a systematic Red-Team thesis test for a stock: score falsifiable hypotheses (supported/weakened/falsified/untested), update conviction verdict (HIGH_CONVICTION/WATCH/PROBATION/EXIT), log bear-case rebuttal, update ${PLUGIN_DATA}/theses/<TICKER>.md, and append an immutable entry to ${PLUGIN_DATA}/test_log.jsonl.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string" },
-        verdict: { type: "string", enum: ["HIGH_CONVICTION", "WATCH", "PROBATION", "EXIT"] },
-        kill_switch_triggered: { type: "boolean" },
-        summary: { type: "string" },
-        bear_case: { type: "string" },
-        tested_at: { type: "string" },
-        price_at_test: { type: ["number", "null"] },
-        currency: { type: "string" },
-        hypotheses_tested: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              id: { type: "string" },
-              claim: { type: "string" },
-              metric: { type: "string" },
-              status: { type: "string", enum: ["untested", "supported", "weakened", "falsified"] },
-              confidence: { type: "string", enum: ["low", "medium", "high"] },
-              evidence: { type: "string" },
-              last_tested: { type: ["string", "null"] },
-              source_url: { type: ["string", "null"] }
-            },
-            required: ["id", "claim"]
-          }
-        }
-      },
-      required: ["ticker", "verdict", "summary"]
-    },
-    _meta: INLINE_META
-  },
-  {
     name: "app_upsert_hypothesis",
     title: "App Upsert Falsifiable Hypothesis",
-    description: "Internal UI tool to add or update a single falsifiable hypothesis inside a thesis card.",
+    description: "Internal UI tool to add or update a single falsifiable hypothesis (with optional machine-checkable rule) inside a thesis card.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: { type: "string" },
-        hypothesis: {
-          type: "object",
-          properties: {
-            id: { type: "string" },
-            claim: { type: "string" },
-            metric: { type: "string" },
-            status: { type: "string", enum: ["untested", "supported", "weakened", "falsified"] },
-            confidence: { type: "string", enum: ["low", "medium", "high"] },
-            evidence: { type: "string" },
-            last_tested: { type: ["string", "null"] },
-            source_url: { type: ["string", "null"] }
-          },
-          required: ["id", "claim"]
-        }
+        use_cache: { type: "boolean" },
+        hypothesis: HYPOTHESIS_ITEM_SCHEMA
       },
       required: ["ticker", "hypothesis"]
+    },
+    _meta: APP_ONLY_META
+  },
+  {
+    name: "app_get_dossier_detail",
+    title: "App Load Full Dossier Detail",
+    description: "Internal UI tool to lazy-load dossiers/<TICKER>/{memo.md, model.json, intel.json, fundamentals.json, insiders.json, intel_history.jsonl}, valuation bands, and linked themes for the Stock Inspector drawer.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        demo: { type: "boolean" },
+        use_cache: { type: "boolean" }
+      },
+      required: ["ticker"]
+    },
+    _meta: APP_ONLY_META
+  },
+  {
+    name: "app_save_dossier_model",
+    title: "App Save Dossier Valuation Model",
+    description: "Internal UI tool to persist dossiers/<TICKER>/model.json edits (logging rule_change rationale) and return the refreshed dashboard payload.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        model: { type: "object" },
+        rationale: { type: "string" },
+        use_cache: { type: "boolean" }
+      },
+      required: ["ticker", "model"]
+    },
+    _meta: APP_ONLY_META
+  },
+  {
+    name: "app_run_backtest",
+    title: "App Run Deterministic Backtest",
+    description: "Internal UI tool to fetch missing Yahoo weekly history (+ FX & daily benchmark) if needed and run the deterministic portfolio-impact backtest.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        candidate_ticker: { type: "string" },
+        candidate_yf_symbol: { type: "string" },
+        target_weight_pct: { type: "number" },
+        funding_source: { type: "string" },
+        rebalance_band_pct: { type: "number" },
+        include_external_wealth: { type: "boolean" },
+        rf_pct: { type: "number" },
+        demo: { type: "boolean" }
+      },
+      required: ["candidate_ticker"]
     },
     _meta: APP_ONLY_META
   }
@@ -35710,6 +42322,7 @@ function collectDefaultEdgarTickers(dataDir) {
   const portfolio = loadPortfolio(dataDir);
   const catalysts = loadCatalysts(dataDir);
   const profile = loadProfile(dataDir);
+  const theses = listThesisFiles(dataDir);
   const set3 = /* @__PURE__ */ new Set();
   if (portfolio) {
     for (const p of portfolio.positions) {
@@ -35720,6 +42333,12 @@ function collectDefaultEdgarTickers(dataDir) {
   }
   for (const c of catalysts) {
     set3.add(c.ticker);
+  }
+  for (const th of theses) {
+    try {
+      set3.add(normalizeTicker(th.ticker));
+    } catch {
+    }
   }
   if (profile.external_exposure.enabled && profile.external_exposure.ticker) {
     set3.add(profile.external_exposure.ticker.toUpperCase());
@@ -35734,6 +42353,12 @@ function mergeProfileUpdate(current, args) {
     next.edgar_user_agent = args.edgar_user_agent === null ? void 0 : String(args.edgar_user_agent);
   }
   if (args.custody_label !== void 0) next.custody_label = external_exports.string().trim().min(1).max(80).parse(args.custody_label);
+  if (args.benchmark && typeof args.benchmark === "object") {
+    next.benchmark = BenchmarkConfigSchema.parse({
+      ...next.benchmark,
+      ...args.benchmark
+    });
+  }
   if (args.tax_profile && typeof args.tax_profile === "object") {
     next.tax_profile = ProfileSchema.shape.tax_profile.parse({
       ...next.tax_profile,
@@ -35758,10 +42383,10 @@ function mergeProfileUpdate(current, args) {
   return ProfileSchema.parse(next);
 }
 var server = new Server(
-  { name: "investment-os-dashboard", version: "0.3.0" },
+  { name: "investment-os-dashboard", version: "0.5.0" },
   {
     capabilities: { tools: {}, resources: {} },
-    instructions: "Personal-CIO portfolio dashboard and local analytics server for Investment OS."
+    instructions: "Quantamental Personal-CIO portfolio dashboard, 3-layer research graph (Themes, Living Dossiers, PIT Ledger), automated SEC/XBRL/Form 4 signal harness, and local analytics server for Investment OS."
   }
 );
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -35773,7 +42398,7 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       uri: APP_URI,
       name: "Investment OS Dashboard",
       title: "Investment OS Sidecar UI",
-      description: "Interactive Personal-CIO sidecar UI (multi-currency holdings, ETF look-through, risk caps, thesis trigger zones, and SEC EDGAR filings).",
+      description: "Interactive Quantamental Personal-CIO sidecar UI (multi-currency holdings, ETF look-through, Priority Sells & Tax Swaps, Macro Strip, Shared Themes, XBRL/Form 4 dossiers, Reverse DCF bridge, dip triage, backtest lab, and SEC EDGAR watchdog).",
       mimeType: APP_MIME,
       _meta: { ui: { prefersBorder: false } }
     }
@@ -35805,12 +42430,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     if (name === "open_dashboard" || name === "app_get_dashboard") {
       const live = Boolean(args.live);
+      const useCache = Boolean(args.use_cache);
       const demo = Boolean(args.demo);
       const tab = typeof args.tab === "string" ? args.tab : "overview";
       const payload = await buildDashboardPayload({
         dataDir: DATA_DIR,
         pluginRoot: PLUGIN_ROOT,
         live,
+        useCache,
         activeTab: tab,
         demo
       });
@@ -35858,6 +42485,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         structuredContent: payload
       };
     }
+    if (name === "update_etf_weights") {
+      const validated = EtfWeightsConfigSchema.parse(args);
+      const saved = saveEtfWeights(DATA_DIR, validated);
+      const payload = await buildDashboardPayload({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        activeTab: "holdings"
+      });
+      const etfCount = Object.keys(saved.etf_weights).length;
+      return {
+        content: [{ type: "text", text: `Updated etf_weights.json (${etfCount} ETF weight maps).
+` + buildSummaryText(payload) }],
+        structuredContent: payload
+      };
+    }
     if (name === "update_external_wealth" || name === "app_save_external_wealth") {
       const profile = loadProfile(DATA_DIR);
       const next = structuredClone(profile);
@@ -35867,6 +42509,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.external_enabled === void 0) {
           next.external_exposure.enabled = val > 0 || next.external_exposure.enabled;
         }
+      }
+      if (args.external_qty !== void 0) {
+        next.external_exposure.qty = args.external_qty === null ? null : external_exports.number().finite().min(0).parse(args.external_qty);
       }
       if (args.external_enabled !== void 0) next.external_exposure.enabled = Boolean(args.external_enabled);
       if (args.external_label !== void 0) next.external_exposure.label = String(args.external_label);
@@ -35895,6 +42540,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const payload = await buildDashboardPayload({
         dataDir: DATA_DIR,
         pluginRoot: PLUGIN_ROOT,
+        useCache: Boolean(args.use_cache),
         activeTab: "overview"
       });
       return {
@@ -35903,7 +42549,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
     if (name === "update_thesis" || name === "app_save_trigger") {
+      const useCache = Boolean(args.use_cache);
       const normalizedArgs = { ...args };
+      delete normalizedArgs.use_cache;
       if (name === "app_save_trigger") {
         if ("buy_zone_low" in args && args.buy_zone_low === null || "buy_zone_high" in args && args.buy_zone_high === null) {
           normalizedArgs.clear_buy_zone = true;
@@ -35918,10 +42566,201 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const payload = await buildDashboardPayload({
         dataDir: DATA_DIR,
         pluginRoot: PLUGIN_ROOT,
+        useCache,
         activeTab: "theses"
       });
       return {
         content: [{ type: "text", text: `Saved ${import_node_path2.default.basename(writtenPath)}.` }],
+        structuredContent: payload
+      };
+    }
+    if (name === "upsert_dossier") {
+      const profile = loadProfile(DATA_DIR);
+      const res = upsertDossier(DATA_DIR, profile, args);
+      const payload = await buildDashboardPayload({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        activeTab: "theses"
+      });
+      const parts = [import_node_path2.default.basename(res.thesisPath)];
+      if (res.savedModel) parts.push(`dossiers/${res.ticker}/model.json`);
+      if (res.savedMemo) parts.push(`dossiers/${res.ticker}/memo.md`);
+      if (res.savedIntel) parts.push(`dossiers/${res.ticker}/intel.json`);
+      return {
+        content: [{ type: "text", text: `Upserted dossier for ${res.ticker}: ${parts.join(", ")}.` }],
+        structuredContent: payload
+      };
+    }
+    if (name === "upsert_theme") {
+      const profile = loadProfile(DATA_DIR);
+      const res = upsertTheme(DATA_DIR, profile, args);
+      const payload = await buildDashboardPayload({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        activeTab: "overview"
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Upserted shared theme "${res.theme.slug}" (${res.theme.title})${res.savedMemo ? " + memo.md" : ""} linking ${res.linkedTickers.length} ticker(s): ${res.linkedTickers.join(", ") || "none"}.`
+          }
+        ],
+        structuredContent: payload
+      };
+    }
+    if (name === "ingest_research_intel") {
+      const res = ingestResearchIntel(DATA_DIR, args);
+      const payload = await buildDashboardPayload({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        activeTab: res.savedPa && !res.savedIntel ? "lab" : "theses"
+      });
+      const notes = [];
+      if (res.savedIntel && res.ticker) notes.push(`dossiers/${res.ticker}/intel.json`);
+      if (res.savedIntelHistory && res.ticker) notes.push(`dossiers/${res.ticker}/intel_history.jsonl`);
+      if (res.savedSeriesCount > 0) notes.push(`${res.savedSeriesCount} history series`);
+      if (res.savedPa) notes.push("pa_performance.json");
+      return {
+        content: [{ type: "text", text: `Ingested research intelligence: ${notes.join(", ")}.` }],
+        structuredContent: payload
+      };
+    }
+    if (name === "sync_fundamentals_xbrl") {
+      const profile = loadProfile(DATA_DIR);
+      let targets = [];
+      if (Array.isArray(args.tickers) && args.tickers.length > 0) {
+        targets = args.tickers.map((t) => normalizeTicker(String(t)));
+      } else if (typeof args.ticker === "string" && args.ticker.trim()) {
+        targets = [normalizeTicker(args.ticker)];
+      } else {
+        targets = collectDefaultEdgarTickers(DATA_DIR);
+      }
+      const edgarCache = loadEdgarCache(DATA_DIR);
+      const { iso } = formatTimestamp(/* @__PURE__ */ new Date(), profile.timezone);
+      const res = await syncFundamentalsXbrl(DATA_DIR, profile, targets, {
+        force: Boolean(args.force),
+        nowIso: iso,
+        edgarFilingsByTicker: edgarCache.filings_by_ticker
+      });
+      const payload = await buildDashboardPayload({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        useCache: true,
+        activeTab: "theses"
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: `SEC XBRL sync complete: updated=[${res.updated.join(", ")}] cached=[${res.cached.join(", ")}] skipped=[${res.skipped.join(", ")}]` + (res.errors.length > 0 ? ` errors=[${res.errors.map((e) => `${e.ticker}: ${e.error}`).join("; ")}]` : "")
+          }
+        ],
+        structuredContent: payload
+      };
+    }
+    if (name === "sync_insiders_form4") {
+      const profile = loadProfile(DATA_DIR);
+      let targets = [];
+      if (Array.isArray(args.tickers) && args.tickers.length > 0) {
+        targets = args.tickers.map((t) => normalizeTicker(String(t)));
+      } else if (typeof args.ticker === "string" && args.ticker.trim()) {
+        targets = [normalizeTicker(args.ticker)];
+      } else {
+        targets = collectDefaultEdgarTickers(DATA_DIR);
+      }
+      const { iso } = formatTimestamp(/* @__PURE__ */ new Date(), profile.timezone);
+      const res = await syncInsidersForm4(DATA_DIR, profile, targets, {
+        force: Boolean(args.force),
+        nowIso: iso
+      });
+      const payload = await buildDashboardPayload({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        useCache: true,
+        activeTab: "theses"
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: `SEC Form 4 sync complete: updated=[${res.updated.join(", ")}] cached=[${res.cached.join(", ")}] skipped=[${res.skipped.join(", ")}]` + (res.errors.length > 0 ? ` errors=[${res.errors.map((e) => `${e.ticker}: ${e.error}`).join("; ")}]` : "")
+          }
+        ],
+        structuredContent: payload
+      };
+    }
+    if (name === "run_watchdog_sweep" || name === "app_run_watchdog") {
+      const tickers = Array.isArray(args.tickers) && args.tickers.length > 0 ? args.tickers.map((t) => normalizeTicker(String(t))) : void 0;
+      const sweep = await runWatchdogSweep(DATA_DIR, PLUGIN_ROOT, {
+        tickers,
+        includeQuotes: args.include_quotes !== void 0 ? Boolean(args.include_quotes) : true,
+        includeMacro: args.include_macro !== void 0 ? Boolean(args.include_macro) : true,
+        includeEdgar: args.include_edgar !== void 0 ? Boolean(args.include_edgar) : true,
+        includeXbrl: args.include_xbrl !== void 0 ? Boolean(args.include_xbrl) : true,
+        includeInsiders: args.include_insiders !== void 0 ? Boolean(args.include_insiders) : true,
+        forceXbrl: Boolean(args.force_xbrl),
+        forceInsiders: Boolean(args.force_insiders)
+      });
+      const tab = typeof args.tab === "string" ? args.tab : "overview";
+      const payload = await buildDashboardPayload({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        live: false,
+        useCache: true,
+        activeTab: tab
+      });
+      return {
+        content: [{ type: "text", text: sweep.summary }],
+        structuredContent: payload
+      };
+    }
+    if (name === "app_get_theme_detail") {
+      const slug = normalizeThemeSlug(String(args.slug ?? ""));
+      const detail = await getThemeDetail({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        slug,
+        demo: Boolean(args.demo),
+        useCache: Boolean(args.use_cache)
+      });
+      return {
+        content: [{ type: "text", text: `Loaded theme detail for ${detail.slug}.` }],
+        structuredContent: detail
+      };
+    }
+    if (name === "app_ack_alert") {
+      const ids = Array.isArray(args.ids) ? args.ids.map((x) => String(x)) : typeof args.id === "string" && args.id.trim() ? [args.id.trim()] : [];
+      const ackRes = ids.length > 0 ? ackWatchdogAlerts(DATA_DIR, ids) : { updated: 0, alerts: [] };
+      const tab = typeof args.tab === "string" ? args.tab : "overview";
+      const payload = await buildDashboardPayload({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        useCache: Boolean(args.use_cache),
+        activeTab: tab
+      });
+      return {
+        content: [{ type: "text", text: `Acknowledged ${ackRes.updated} watchdog alert(s).` }],
+        structuredContent: payload
+      };
+    }
+    if (name === "run_portfolio_backtest") {
+      const { backtest, payload } = await executePortfolioBacktest({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        rawRequest: args
+      });
+      const text = [
+        `Deterministic Backtest: ${backtest.candidate_ticker} @ ${backtest.target_weight_pct}% (funded: ${backtest.funding_source}, band: max(2%, ${backtest.rebalance_band_pct}%), rf=${backtest.rf_pct}%)`,
+        `- Window: ${backtest.overlap_start} to ${backtest.overlap_end} (${backtest.weeks_analyzed}w | External Wealth: ${backtest.include_external_wealth ? "Included" : "Excluded"})`,
+        `- Baseline: CAGR ${backtest.baseline.cagr_pct}% | Max DD ${backtest.baseline.max_drawdown_pct}% | Sharpe ${backtest.baseline.sharpe} \xB1 ${backtest.baseline.sharpe_se} | Rebalances: ${backtest.baseline.rebalance_count}`,
+        `- Simulated: CAGR ${backtest.simulated.cagr_pct}% (${backtest.deltas.cagr_pct >= 0 ? "+" : ""}${backtest.deltas.cagr_pct}%) | Max DD ${backtest.simulated.max_drawdown_pct}% | Sharpe ${backtest.simulated.sharpe} \xB1 ${backtest.simulated.sharpe_se} | Rebalances: ${backtest.simulated.rebalance_count}`,
+        `- Benchmark (${backtest.benchmark_symbol}): CAGR ${backtest.benchmark.cagr_pct}% | Max DD ${backtest.benchmark.max_drawdown_pct}% | Sharpe ${backtest.benchmark.sharpe}`,
+        `- Correlation vs Portfolio: ${backtest.candidate_corr_portfolio ?? "N/A"} | vs Primary Cluster: ${backtest.candidate_corr_cluster ?? "N/A"}`,
+        `- Caveat: ${backtest.caveat}`
+      ].join("\n");
+      return {
+        content: [{ type: "text", text }],
         structuredContent: payload
       };
     }
@@ -35973,18 +42812,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         targets = collectDefaultEdgarTickers(DATA_DIR);
       }
       const { iso } = formatTimestamp(/* @__PURE__ */ new Date(), profile.timezone);
-      const { cache, skippedTickers } = targets.length > 0 ? await pollEdgarFilings(DATA_DIR, profile, targets, catalysts, iso) : {
+      const { cache, skippedTickers, redFlags } = targets.length > 0 ? await pollEdgarFilings(DATA_DIR, profile, targets, catalysts, iso) : {
         cache: { checked_at: iso, gate_evaluations: [], filings_by_ticker: {} },
-        skippedTickers: []
+        skippedTickers: [],
+        redFlags: []
       };
       const payload = await buildDashboardPayload({
         dataDir: DATA_DIR,
         pluginRoot: PLUGIN_ROOT,
+        useCache: Boolean(args.use_cache),
         activeTab: "edgar"
       });
       const gateLines = cache.gate_evaluations.map(
         (g) => `${g.ticker} (${g.form} after ${g.filed_after}): ${g.cleared ? "CLEARED" : "OPEN"} \u2014 ${g.description}`
       );
+      const flagLines = redFlags.slice(0, 8).map((f) => `${f.ticker} [${f.code} \xB7 ${f.filingDate}]: ${f.label}`);
       return {
         content: [
           {
@@ -35992,7 +42834,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             text: `SEC EDGAR checked (${cache.checked_at}) for ${targets.length} ticker(s).` + (skippedTickers.length > 0 ? `
 Non-SEC/Skipped: ${skippedTickers.join(", ")}` : "") + (gateLines.length > 0 ? `
 Gates:
-- ${gateLines.join("\n- ")}` : "")
+- ${gateLines.join("\n- ")}` : "") + (flagLines.length > 0 ? `
+Forensic Red Flags:
+- ${flagLines.join("\n- ")}` : "")
           }
         ],
         structuredContent: payload
@@ -36024,11 +42868,53 @@ Summary: ${record2.summary}`
       const payload = await buildDashboardPayload({
         dataDir: DATA_DIR,
         pluginRoot: PLUGIN_ROOT,
+        useCache: Boolean(args.use_cache),
         activeTab: "theses"
       });
       return {
         content: [{ type: "text", text: `Saved hypothesis in ${import_node_path2.default.basename(writtenPath)}.` }],
         structuredContent: payload
+      };
+    }
+    if (name === "app_get_dossier_detail") {
+      const ticker = normalizeTicker(String(args.ticker ?? ""));
+      const detail = await getDossierDetail({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        ticker,
+        demo: Boolean(args.demo),
+        useCache: Boolean(args.use_cache)
+      });
+      return {
+        content: [{ type: "text", text: `Loaded dossier detail for ${detail.ticker}.` }],
+        structuredContent: detail
+      };
+    }
+    if (name === "app_save_dossier_model") {
+      const profile = loadProfile(DATA_DIR);
+      const ticker = normalizeTicker(String(args.ticker ?? ""));
+      const rationale = typeof args.rationale === "string" ? args.rationale : void 0;
+      saveDossierModelWithAudit(DATA_DIR, profile, ticker, args.model, rationale);
+      const payload = await buildDashboardPayload({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        useCache: Boolean(args.use_cache),
+        activeTab: "theses"
+      });
+      return {
+        content: [{ type: "text", text: `Saved dossiers/${ticker}/model.json.` }],
+        structuredContent: payload
+      };
+    }
+    if (name === "app_run_backtest") {
+      const { backtest } = await executePortfolioBacktest({
+        dataDir: DATA_DIR,
+        pluginRoot: PLUGIN_ROOT,
+        rawRequest: args
+      });
+      return {
+        content: [{ type: "text", text: `Completed backtest for ${backtest.candidate_ticker} (${backtest.weeks_analyzed}w).` }],
+        structuredContent: backtest
       };
     }
     return {

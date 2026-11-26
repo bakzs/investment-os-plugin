@@ -1,75 +1,76 @@
-# Systematic Thesis Testing Methodology
+# Systematic Thesis Testing Methodology (`v0.5`)
 
-Investment research typically breaks down in one of two ways: either thesis documents turn into stale, write-once essays nobody revisits during drawdowns, or portfolio reviews rely on ad-hoc chat prompts that anchor to recent price action and confirm existing bias.
+Investment research breaks down when thesis documents turn into static write-once essays or when ad-hoc chats anchor to recent price action and rationalize away broken assumptions.
 
-**Investment OS (`v0.3`)** enforces a scientific, falsifiable hypothesis workflow directly inside each stock thesis card (`${PLUGIN_DATA}/theses/<TICKER>.md`) backed by an append-only audit ledger (`${PLUGIN_DATA}/test_log.jsonl`).
+**Investment OS (`v0.5`)** enforces a scientific, machine-verifiable falsification loop across each stock dossier (`${PLUGIN_DATA}/theses/<TICKER>.md` + `dossiers/<TICKER>/*`), shared **Theme Objects** (`themes/<slug>.yaml`), and an immutable Point-in-Time audit ledger (`${PLUGIN_DATA}/test_log.jsonl`).
 
-## Anatomy of a Falsifiable Thesis Card
+## Anatomy of a Machine-Verifiable Thesis Card
 
-Each single-stock or core ETF markdown file combines structured YAML frontmatter with narrative synthesis:
-
-- **Execution Guardrails:** `buy_zone_low`, `buy_zone_high`, `trim_zone`, `max_weight_pct`, and `gated` (blocks opportunistic adds until a binary milestone resolves).
+- **Execution Guardrails & Shared Graph Links:** `buy_zone_low`, `buy_zone_high`, `trim_zone`, `max_weight_pct`, `gated`, and `theme_refs[]` (linking Layer-1 themes; whenever a linked theme updates after `last_audited_date`, `provenance.theme_updated_after_audit` flags the stock as `needs_retest`).
 - **Conviction Verdict (`verdict`):**
-  - `HIGH_CONVICTION` — Key hypotheses empirically supported; thesis intact and resilient to bear assumptions.
-  - `WATCH` — Core thesis intact, but one or more hypotheses show mixed evidence or valuation discipline requires patience.
-  - `PROBATION` — Critical hypothesis weakened or macro/execution drift narrows margin of safety; freeze incremental capital.
-  - `EXIT` — Core hypothesis falsified or hard kill-switch triggered; prepare systematic capital exit.
-- **Steelman Bear Case (`bear_case_summary`):** Concise strongest disconfirming argument currently challenging ownership.
-- **Hypotheses (`hypotheses[]`):** Individual falsifiable claims tracked independently:
-  - `id` — Stable kebab-case identifier (e.g., `cloud-margin-floor`) so repeated tests update history cleanly.
-  - `claim` — Concrete causal assertion that future evidence could refute.
-  - `metric` — Quantitative observable pass/fail bar (e.g., `Cloud revenue YoY > 22% with flat+ operating margin`).
-  - `status` — `untested`, `supported`, `weakened`, or `falsified`.
-  - `confidence` — `low`, `medium`, or `high`.
-  - `evidence` — Dated empirical observation or filing reference supporting the current score.
-  - `last_tested` — `YYYY-MM-DD` timestamp of latest verification.
-  - `source_url` — Optional verified `https://` link (such as an SEC filing URL).
+  - `HIGH_CONVICTION` — Core hypotheses supported; thesis intact and resilient to bear stress.
+  - `WATCH` — Thesis intact, but mixed evidence or valuation discipline requires patience.
+  - `PROBATION` — Critical hypothesis weakened or margin of safety compressed; blocked from `READY` dip triage.
+  - `EXIT` — Core hypothesis falsified or kill-switch fired; held shares surface automatically in **Priority Sells & Tax Swaps -> Mandatory Exits** even if `tier === "passed"`.
+- **Machine-Checkable Hypotheses (`hypotheses[]`):**
+  - `id`, `claim`, `metric`, `status` (`untested`/`supported`/`weakened`/`falsified`), `confidence` (`low`/`medium`/`high`), `evidence`, `last_tested`, `source_url`.
+  - `is_core` — Marks structural thesis pillars that require explicit falsification or a dated `waiver_reason` + `waiver_expires` if breached.
+  - `rule` — Optional deterministic predicate evaluated automatically against synced data:
+    ```yaml
+    rule:
+      source: xbrl      # xbrl | edgar | market | insiders
+      metric: dso_days  # e.g., gross_margin_pct, ocf_to_ni_pct, sbc_pct_rev, net_cash_b, filing_10q_on_time, disc_sell_90d_usd
+      op: "<="          # <= | < | >= | > | ==
+      threshold: 65
+      period: latest_q  # latest_q | ttm | latest_fy
+    ```
 
-## The 4-Step Systematic Falsification Protocol
+## Anti-Softening Enforcement & Immutable Rule-Change Ledger
 
-Whenever you click **Run Systematic Thesis Test** in the Stock Inspector (or ask Antigravity to test a holding), the agent executes four disciplined steps:
+1. **Automated Rule Evaluation (`auto_eval`):** Whenever `fundamentals.json` (SEC XBRL), `edgar_latest.json`, `insiders.json` (Form 4), or `market_cache.json` updates, Investment OS evaluates every rule-backed hypothesis deterministically (`AUTO-VERIFIED` vs. `AUTO-BREACHED`).
+2. **Anti-Softening Warnings (`observed_breach_softened`):** If observed primary data breaches a hypothesis's `rule` while its human/agent label remains `supported` or `weakened`, the engine raises a prominent `SOFTENING WARNING` banner so broken metrics cannot be quietly rationalized.
+3. **Rule-Change Audit Events (`event_type: "rule_change"`):** Editing buy/trim zones, toggling `gated`, changing `max_weight_pct`/`reentry_price`, or revising `model.json` valuations automatically appends an immutable `rule_change` line to `test_log.jsonl` (capturing the required 1-line `rationale`), separate from scored `thesis_test` calls.
 
-1. **Primary Evidence Gather:** Pull fresh official filings via `check_sec_edgar` (`10-K`, `10-Q`, `8-K`, `20-F`, `6-K`) alongside primary earnings releases and live price action relative to pre-set buy/trim zones.
-2. **Adversarial Red-Team Challenge:** Construct the sharpest disconfirming bear case from primary evidence—specifically probing working capital cash conversion, capital intensity, competitive erosion, or regulatory exposure without anchoring to historical purchase price.
-3. **Hypothesis Scoring & Audit Persistence:** Evaluate each hypothesis objectively (`supported`, `weakened`, or `falsified`), verify whether any **Hard Kill-Switch** fired, and call `record_thesis_test`. This atomically:
-   - Merges updated `hypotheses[]`, `verdict`, `bear_case_summary`, and `last_tested_date` into `${PLUGIN_DATA}/theses/<TICKER>.md`.
-   - Prepends a timestamped summary bullet to the Markdown `## 4. Decision Log`.
-   - Appends an immutable structured JSON record to `${PLUGIN_DATA}/test_log.jsonl`.
-4. **Sidecar Sync:** Refreshes `open_dashboard` (`tab="theses"`), updating Hypothesis Health counts on thesis cards, Overview's **Thesis & Catalyst Action Queue** alerts, and the drawer's **Test Audit Ledger**.
+## Point-in-Time (`pit_snapshot`) & Matured Scorecard Rules
+
+Every `record_thesis_test` call automatically freezes context at decision time inside `test_log.jsonl`:
+
+- `price_at_test` and exact `benchmark_price_at_test` (never backfilled as `0%` on Day 0).
+- `pit_snapshot`: `vix`, `us10y_pct`, `expected_after_tax_cagr_pct`, `hurdle_cagr_pct`, `implied_revenue_cagr_pct`, `portfolio_weight_pct`, and latest `fundamentals_period`.
+
+When computing the **Forward Judgment Scorecard** (`computeForwardScorecard`):
+
+1. **30-Day Maturity Gate:** Entries with `days_elapsed < 30` are marked `maturity: "PENDING"` and excluded from hit-rate percentages so Day-0 noise never inflates accuracy.
+2. **30-Day Deduplication:** Repeated calls on the same `ticker + verdict` within 30 days are deduplicated chronologically so re-running the same test cannot double-count hits.
+3. **Daily Benchmark Alignment:** Benchmark return uses `benchmark_price_at_test` first, falling back to cached daily benchmark history (`daily:<SYM>`), never hardcoding `benchRet = 0`.
+4. **Directional Hit Rules:**
+   - `HIGH_CONVICTION` / `GO`: Hit when `alpha_pct > 0`.
+   - `EXIT` / `PROBATION` / `PASS`: Hit when `alpha_pct <= 0`.
+   - `WATCH`: Hit when `stock_return_pct <= 0` (patience improved entry price).
+5. **Horizon Buckets & Brier Calibration:** Aggregates matured alpha and hit rates across `90d`, `180d`, and `1Y` horizons, and computes **Hypothesis Brier Calibration** across resolved `supported`/`falsified` claims grouped by `high` (0.80), `medium` (0.60), and `low` (0.40) confidence.
 
 ## Generic Example Walkthrough (`MSFT`)
 
-Suppose an investor holds a sample position in **MSFT** (`Enterprise Compounder`) with buy zone US\$420–455 and trim target US\$530. Before earnings, they define two falsifiable claims—either via chat (`update_thesis`) or directly inside the Inspector Drawer's **Add / Update Hypothesis** form:
-
 ```yaml
 verdict: WATCH
-bear_case_summary: "Rising AI data-center capex outpaces seat-based software ARPU uplift if autonomous agents compress legacy licenses."
-last_tested_date: "2026-11-23"
+theme_refs:
+  - "cloud-capex-vs-software-roi"
 hypotheses:
   - id: azure-ai-margin
-    claim: "Cloud backlog converts into accelerating gross-profit growth above capex depreciation drag"
-    metric: "Cloud revenue YoY > 22% with flat+ operating margin"
+    claim: "Cloud backlog sustains GAAP gross margin >= 65% despite AI capex depreciation"
+    metric: "GAAP gross_margin_pct >= 65%"
     status: supported
     confidence: high
-    evidence: "Quarterly cloud growth held mid-20s with commercial RPO expanding."
-    last_tested: "2026-11-23"
-  - id: seat-pricing-resilience
-    claim: "AI agent workflows expand per-user enterprise revenue rather than cannibalizing seat licenses"
-    metric: "Productivity suite ARPU + net seat retention >= 100%"
-    status: weakened
-    confidence: medium
-    evidence: "Enterprise pilot upgrades show mixed displacement vs. copilot upsell across knowledge workers."
+    is_core: true
+    rule:
+      source: xbrl
+      metric: gross_margin_pct
+      op: ">="
+      threshold: 65
+      period: latest_q
+    evidence: "Latest 10-Q XBRL confirmed 68.8% GAAP gross margin."
     last_tested: "2026-11-23"
 ```
 
-After a quarterly filing drops:
-
-1. `check_sec_edgar` confirms the new `10-Q` is filed on `data.sec.gov`.
-2. The agent challenges both hypotheses against actual cloud gross margins, depreciation growth, and productivity seat counts.
-3. Calling `record_thesis_test` logs whether `seat-pricing-resilience` recovered to `supported` (`verdict: "HIGH_CONVICTION"`) or deteriorated to `falsified` (`verdict: "PROBATION"` or `"EXIT"`), preserving the price at test (`price_at_test: 495`) inside `test_log.jsonl` so hindsight cannot rewrite history later.
-
-## Rules of Discipline
-
-- **Never Edit Logs Retrospectively:** `test_log.jsonl` is append-only. If a thesis pivots, record a new test showing *why* prior beliefs changed.
-- **No Unfalsifiable Claims:** Replace vague statements like *"Strong management team"* with observable hypotheses such as *"ROIC stays above 18% without net debt rising above 1.5x EBITDA."*
-- **Respected Kill-Switches:** When `kill_switch_triggered: true` is recorded alongside a `falsified` core hypothesis, treat the position as `EXIT` or `PROBATION` in Overview's Action Queue until explicitly resolved.
+1. `run_watchdog_sweep` (or `sync_fundamentals_xbrl` + `sync_insiders_form4`) ingests the newly filed `10-Q` and evaluates `azure-ai-margin` mechanically against XBRL facts.
+2. If gross margin drops to `63.5%`, `auto_eval.passed` flips to `false`, raising a `hypothesis_rule_breach` delta alert and an anti-softening warning until a Red-Team audit calls `record_thesis_test` to re-score the hypothesis and log the new Point-in-Time decision.

@@ -1,13 +1,14 @@
 {
   "name": "investment-os",
   "displayName": "Investment OS",
-  "version": "0.3.0",
-  "description": "Personal-CIO sidecar dashboard for multi-currency portfolios: ETF look-through concentration, optional US NRA estate tax (IRC §2101(c)), configurable risk caps, thesis trigger zones, and live SEC EDGAR monitoring.",
+  "version": "0.5.0",
+  "description": "Quantamental Personal-CIO sidecar workstation for multi-currency portfolios: ETF look-through, Priority Sells & Tax Swaps, automated SEC XBRL & Form 4 insider signals, 4-indicator Macro Strip, Shared Themes graph, Reverse DCF attribution bridge, dip triage, FX-aware backtesting, and delta-only Watchdog.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Open my Investment OS dashboard and help me onboard my portfolio",
-    "Refresh live prices and audit my look-through concentration and risk caps",
-    "Poll SEC EDGAR filings for my watchlist and review my thesis trigger zones"
+    "Run a Watchdog sweep and review Priority Sells & Tax Swaps, alerts, and open SEC gates",
+    "Sync XBRL fundamentals and Form 4 insiders, then run a systematic thesis test on a stock",
+    "Create a shared macro/sector theme linking multiple stocks and run a 5-year portfolio-impact backtest"
   ],
   "author": {
     "name": "bakzs",

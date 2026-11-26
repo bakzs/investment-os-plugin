@@ -15,7 +15,7 @@ function findNodeRuntime(): string {
   return process.execPath;
 }
 
-test("bundled dist/server.cjs passes end-to-end stdio MCP App lifecycle", async () => {
+test("bundled dist/server.cjs passes end-to-end v0.5 stdio MCP App lifecycle", async () => {
   const rootDir = path.resolve(process.cwd());
   const serverPath = path.join(rootDir, "dist", "server.cjs");
   assert.equal(fs.existsSync(serverPath), true, "dist/server.cjs must be built before running stdio test");
@@ -28,7 +28,7 @@ test("bundled dist/server.cjs passes end-to-end stdio MCP App lifecycle", async 
   });
 
   const client = new Client(
-    { name: "investment-os-test-client", version: "0.3.0" },
+    { name: "investment-os-test-client", version: "0.5.0" },
     { capabilities: {} },
   );
 
@@ -42,22 +42,40 @@ test("bundled dist/server.cjs passes end-to-end stdio MCP App lifecycle", async 
     const openTool = byName.get("open_dashboard");
     assert.ok(openTool);
     const openMeta = openTool._meta as Record<string, unknown>;
-    assert.deepEqual(openMeta?.ui, { resourceUri: "ui://investment-os/v3/dashboard.html" });
+    assert.deepEqual(openMeta?.ui, { resourceUri: "ui://investment-os/v5/dashboard.html" });
     const agyUi = openMeta?.["com.google.antigravity/ui"] as { entrypoints?: Array<{ type: string; title: string }> };
     assert.equal(agyUi?.entrypoints?.length, 2);
 
-    const recordTool = byName.get("record_thesis_test");
-    assert.ok(recordTool);
-    assert.deepEqual((recordTool._meta as Record<string, unknown>)?.ui, {
-      resourceUri: "ui://investment-os/v3/dashboard.html",
-    });
+    for (const inlineToolName of [
+      "record_thesis_test",
+      "upsert_dossier",
+      "upsert_theme",
+      "ingest_research_intel",
+      "sync_fundamentals_xbrl",
+      "sync_insiders_form4",
+      "run_watchdog_sweep",
+      "update_etf_weights",
+      "run_portfolio_backtest",
+    ]) {
+      const tool = byName.get(inlineToolName);
+      assert.ok(tool, `missing ${inlineToolName}`);
+      assert.deepEqual((tool._meta as Record<string, unknown>)?.ui, {
+        resourceUri: "ui://investment-os/v5/dashboard.html",
+      });
+    }
 
     for (const appToolName of [
       "app_get_dashboard",
       "app_check_edgar",
+      "app_run_watchdog",
+      "app_get_theme_detail",
+      "app_ack_alert",
       "app_save_external_wealth",
       "app_save_trigger",
       "app_upsert_hypothesis",
+      "app_get_dossier_detail",
+      "app_save_dossier_model",
+      "app_run_backtest",
     ]) {
       const appTool = byName.get(appToolName);
       assert.ok(appTool, `missing ${appToolName}`);
@@ -66,17 +84,16 @@ test("bundled dist/server.cjs passes end-to-end stdio MCP App lifecycle", async 
 
     // 2. Verify resource listing and HTML content
     const resList = await client.listResources();
-    assert.equal(resList.resources[0]?.uri, "ui://investment-os/v3/dashboard.html");
+    assert.equal(resList.resources[0]?.uri, "ui://investment-os/v5/dashboard.html");
     assert.equal(resList.resources[0]?.mimeType, "text/html;profile=mcp-app");
 
-    const resRead = await client.readResource({ uri: "ui://investment-os/v3/dashboard.html" });
+    const resRead = await client.readResource({ uri: "ui://investment-os/v5/dashboard.html" });
     const item = resRead.contents[0];
     assert.ok(item && "text" in item);
     assert.equal(item.mimeType, "text/html;profile=mcp-app");
     assert.equal(item.text.includes("Investment OS"), true);
-    assert.equal(item.text.includes("v0.3"), true);
-    assert.equal(item.text.includes("Thesis &amp; Catalyst Action Queue") || item.text.includes("Thesis & Catalyst Action Queue"), true);
-    assert.equal(item.text.includes("<dialog id=\"stock-inspector\""), true);
+    assert.equal(item.text.includes("v0.5"), true);
+    assert.equal(item.text.includes('<dialog id="stock-inspector"'), true);
     assert.equal(Buffer.byteLength(item.text, "utf-8") < 1_000_000, true);
 
     // 3. Empty data directory boots cleanly without initializing files
@@ -85,24 +102,91 @@ test("bundled dist/server.cjs passes end-to-end stdio MCP App lifecycle", async 
     assert.equal(emptyPayload.initialized, false);
     assert.equal(fs.readdirSync(tempDataDir).length, 0);
 
-    // 4. Demo mode renders synthetic preview without writing files
+    // 4. Demo mode renders synthetic v0.5 preview + demo dossier detail + demo theme detail + backtest without writing files
     const demoCall = await client.callTool({ name: "app_get_dashboard", arguments: { demo: true } });
     const demoPayload = demoCall.structuredContent as {
       initialized: boolean;
       is_demo: boolean;
+      macro_regime: { regime_label: string } | null;
+      rotation_queue: { tax_swaps: unknown[]; mandatory_exits: unknown[] };
+      themes: Array<{ slug: string }>;
+      alerts: unknown[];
       portfolio: { positions: unknown[] };
+      lab: { active_count: number; bench_count: number; passed_count: number };
     };
     assert.equal(demoPayload.initialized, true);
     assert.equal(demoPayload.is_demo, true);
-    assert.equal(demoPayload.portfolio.positions.length > 0, true);
+    assert.equal(demoPayload.macro_regime?.regime_label, "CALM");
+    assert.equal(demoPayload.rotation_queue.tax_swaps.length >= 1, true);
+    assert.equal(demoPayload.rotation_queue.mandatory_exits.length >= 1, true);
+    assert.equal(demoPayload.themes.length >= 1, true);
+    assert.equal(demoPayload.alerts.length >= 1, true);
+    assert.equal(demoPayload.lab.active_count, 3);
+    assert.equal(demoPayload.lab.bench_count, 1);
+    assert.equal(demoPayload.lab.passed_count, 1);
+
+    const demoDetailCall = await client.callTool({
+      name: "app_get_dossier_detail",
+      arguments: { ticker: "MSFT", demo: true },
+    });
+    const demoDetail = demoDetailCall.structuredContent as {
+      ticker: string;
+      memo_md: string | null;
+      fundamentals: unknown;
+      insiders: unknown;
+      valuation_bands: unknown;
+      linked_themes: unknown[];
+    };
+    assert.equal(demoDetail.ticker, "MSFT");
+    assert.equal(Boolean(demoDetail.memo_md), true);
+    assert.equal(Boolean(demoDetail.fundamentals), true);
+    assert.equal(Boolean(demoDetail.insiders), true);
+    assert.equal(Boolean(demoDetail.valuation_bands), true);
+    assert.equal(demoDetail.linked_themes.length >= 1, true);
+
+    const demoThemeCall = await client.callTool({
+      name: "app_get_theme_detail",
+      arguments: { slug: "cloud-capex-vs-software-roi", demo: true },
+    });
+    const demoTheme = demoThemeCall.structuredContent as {
+      slug: string;
+      theme: { title: string } | null;
+      memo_md: string | null;
+      linked_theses: unknown[];
+    };
+    assert.equal(demoTheme.slug, "cloud-capex-vs-software-roi");
+    assert.equal(Boolean(demoTheme.theme?.title), true);
+    assert.equal(Boolean(demoTheme.memo_md), true);
+    assert.equal(demoTheme.linked_theses.length >= 1, true);
+
+    const demoBtCall = await client.callTool({
+      name: "app_run_backtest",
+      arguments: { candidate_ticker: "ACME", target_weight_pct: 8, funding_source: "cash", demo: true },
+    });
+    const demoBt = demoBtCall.structuredContent as {
+      candidate_ticker: string;
+      weeks_analyzed: number;
+      baseline: { sharpe_se: number; rebalance_count: number };
+    };
+    assert.equal(demoBt.candidate_ticker, "ACME");
+    assert.equal(demoBt.weeks_analyzed >= 250, true);
+    assert.equal(demoBt.baseline.sharpe_se > 0, true);
     assert.equal(fs.readdirSync(tempDataDir).length, 0);
 
-    // 5. Full agent round-trip persistence
+    // 5. Full v0.5 agent round-trip persistence (themes, etf_weights, dossiers, intel_history, watchdog, ack, tests)
     await client.callTool({
       name: "update_profile",
       arguments: {
         base_currency: "GBP",
         timezone: "Europe/London",
+        benchmark: {
+          ticker: "VWRA",
+          yf_symbol: "VWRA.L",
+          expected_cagr_pct: 8.0,
+          alpha_buffer_pct: 2.5,
+          estate_tax_drag_mode: "hedge",
+          estate_tax_hedge_bps: 35,
+        },
         tax_profile: { country_code: "UK", nra_us_estate_tax_enabled: true },
         external_exposure: { enabled: true, label: "RSU Pool", ticker: "AAPL", amount_base: 25000, us_situs: true },
         liquidity_reserve: { enabled: true, label: "Tax Reserve", amount_base: 5000 },
@@ -122,13 +206,84 @@ test("bundled dist/server.cjs passes end-to-end stdio MCP App lifecycle", async 
     });
 
     await client.callTool({
-      name: "update_thesis",
+      name: "update_etf_weights",
+      arguments: {
+        as_of: "2026-11-25",
+        etf_weights: { VWRA: { AAPL: 0.04, MSFT: 0.038 } },
+        etf_metadata: { VWRA: { domicile: "Ireland", us_situs: false, ocf_pct: 0.22 } },
+      },
+    });
+
+    await client.callTool({
+      name: "upsert_theme",
+      arguments: {
+        slug: "edge-ai-services",
+        title: "Edge AI & Services Monetization",
+        relationship_mode: "structural",
+        summary: "Tracks on-device inference monetization across hardware ecosystems.",
+        exposures: [{ ticker: "AAPL", stance: "beneficiary", note: "High-margin services attach." }],
+        memo_md: "# Edge AI Theme\n\nStdio theme round-trip check.",
+      },
+    });
+
+    await client.callTool({
+      name: "upsert_dossier",
       arguments: {
         ticker: "AAPL",
+        tier: "active",
+        action_verdict: "WAIT",
+        theme_refs: ["edge-ai-services"],
+        takeaway: ["High-margin Services recurring base.", "Await buy zone $190-$215."],
         buy_zone_low: 190,
         buy_zone_high: 215,
         trim_zone: 260,
         decision_log_note: "Round-trip stdio test decision.",
+        memo_md: "# AAPL Memo\n\nStdio round-trip check.",
+        model: {
+          horizon_years: 5,
+          dividend_yield_pct: 0.45,
+          scenarios: {
+            bear: { probability: 0.25, target_price_5y: 180, summary: "Bear" },
+            base: { probability: 0.5, target_price_5y: 340, summary: "Base" },
+            bull: { probability: 0.25, target_price_5y: 420, summary: "Bull" },
+          },
+        },
+      },
+    });
+
+    await client.callTool({
+      name: "ingest_research_intel",
+      arguments: {
+        ticker: "AAPL",
+        intel: {
+          updated_at: "2026-11-25T00:00:00Z",
+          provider: "ibkr",
+          earnings_insight: { period: "Q4 FY26", kind: "recap", headline: "Services beat", summary: "Services +13%." },
+          themes: ["Consumer Ecosystem"],
+        },
+        pa_performance: {
+          updated_at: "2026-11-25T00:00:00Z",
+          provider: "ibkr",
+          base_currency: "GBP",
+          periods: [{ period: "YTD", twr_pct: 12.5 }],
+        },
+      },
+    });
+
+    await client.callTool({
+      name: "app_save_dossier_model",
+      arguments: {
+        ticker: "AAPL",
+        rationale: "Raised base target slightly after Services check.",
+        model: {
+          horizon_years: 5,
+          dividend_yield_pct: 0.5,
+          scenarios: {
+            bear: { probability: 0.25, target_price_5y: 185, summary: "Updated bear" },
+            base: { probability: 0.5, target_price_5y: 350, summary: "Updated base" },
+            bull: { probability: 0.25, target_price_5y: 430, summary: "Updated bull" },
+          },
+        },
       },
     });
 
@@ -158,6 +313,7 @@ test("bundled dist/server.cjs passes end-to-end stdio MCP App lifecycle", async 
           metric: "Services gross margin >= 70%",
           status: "untested",
           confidence: "medium",
+          is_core: true,
         },
       },
     });
@@ -167,6 +323,7 @@ test("bundled dist/server.cjs passes end-to-end stdio MCP App lifecycle", async 
       arguments: {
         ticker: "AAPL",
         verdict: "HIGH_CONVICTION",
+        action_verdict: "GO",
         kill_switch_triggered: false,
         summary: "Services recurring base exceeded margin threshold in Q1.",
         bear_case: "Hardware replacement elongation or App Store regulatory fee compression.",
@@ -179,36 +336,95 @@ test("bundled dist/server.cjs passes end-to-end stdio MCP App lifecycle", async 
             metric: "Services gross margin >= 70%",
             status: "supported",
             confidence: "high",
+            is_core: true,
             evidence: "10-Q confirmed Services gross margin expanded above 72%.",
           },
         ],
       },
     });
 
+    // Offline watchdog sweep (no network calls) + ack tool round-trip
+    const wdCall = await client.callTool({
+      name: "run_watchdog_sweep",
+      arguments: {
+        include_quotes: false,
+        include_macro: false,
+        include_edgar: false,
+        include_xbrl: false,
+        include_insiders: false,
+      },
+    });
+    assert.equal(Boolean(wdCall.isError), false);
+
+    const ackCall = await client.callTool({ name: "app_ack_alert", arguments: { ids: ["*"] } });
+    assert.equal(Boolean(ackCall.isError), false);
+
+    const detailCall = await client.callTool({ name: "app_get_dossier_detail", arguments: { ticker: "AAPL" } });
+    const detail = detailCall.structuredContent as {
+      ticker: string;
+      memo_md: string | null;
+      model: { scenarios?: { base: { target_price_5y: number } } } | null;
+      intel: { themes: string[] } | null;
+      intel_history: unknown[];
+      linked_themes: Array<{ slug: string }>;
+    };
+    assert.equal(detail.ticker, "AAPL");
+    assert.equal(detail.memo_md?.includes("Stdio round-trip check"), true);
+    assert.equal(detail.model?.scenarios?.base.target_price_5y, 350);
+    assert.deepEqual(detail.intel?.themes, ["Consumer Ecosystem"]);
+    assert.equal(detail.intel_history.length, 1);
+    assert.equal(detail.linked_themes[0]?.slug, "edge-ai-services");
+
+    const themeDetailCall = await client.callTool({
+      name: "app_get_theme_detail",
+      arguments: { slug: "edge-ai-services" },
+    });
+    const themeDetail = themeDetailCall.structuredContent as {
+      slug: string;
+      memo_md: string | null;
+      linked_theses: Array<{ ticker: string }>;
+    };
+    assert.equal(themeDetail.slug, "edge-ai-services");
+    assert.equal(themeDetail.memo_md?.includes("Stdio theme round-trip check"), true);
+    assert.equal(themeDetail.linked_theses[0]?.ticker, "AAPL");
+
     const finalCall = await client.callTool({ name: "open_dashboard", arguments: {} });
     const finalPayload = finalCall.structuredContent as {
       initialized: boolean;
       base_currency: string;
+      themes: Array<{ slug: string }>;
       portfolio: { nav_base: number; positions: Array<{ ticker: string }> };
       theses: Array<{
         ticker: string;
         verdict: string | null;
+        has_memo: boolean;
+        has_model: boolean;
+        has_intel: boolean;
         hypothesis_counts: { total: number; supported: number };
         recent_tests: Array<{ verdict: string }>;
+        recent_rule_changes: Array<{ event_type: string }>;
       }>;
       catalysts: Array<{ ticker: string }>;
       edgar: { gate_evaluations: Array<{ ticker: string; cleared: boolean }> };
+      lab: { active_count: number; pa_performance: { periods: Array<{ period: string }> } | null };
     };
     assert.equal(finalPayload.initialized, true);
     assert.equal(finalPayload.base_currency, "GBP");
-    // 100*175*0.8 (14,000) + 50*220*0.8 (8,800) + 10,000 cash = GBP 32,800
     assert.equal(finalPayload.portfolio.nav_base, 32800);
+    assert.equal(finalPayload.themes[0]?.slug, "edge-ai-services");
     assert.equal(finalPayload.theses[0]?.ticker, "AAPL");
     assert.equal(finalPayload.theses[0]?.verdict, "HIGH_CONVICTION");
+    assert.equal(finalPayload.theses[0]?.has_memo, true);
+    assert.equal(finalPayload.theses[0]?.has_model, true);
+    assert.equal(finalPayload.theses[0]?.has_intel, true);
     assert.equal(finalPayload.theses[0]?.hypothesis_counts.total, 1);
     assert.equal(finalPayload.theses[0]?.hypothesis_counts.supported, 1);
     assert.equal(finalPayload.theses[0]?.recent_tests.length, 1);
+    assert.equal(finalPayload.theses[0]?.recent_rule_changes.length, 1);
+    assert.equal(finalPayload.lab.active_count, 1);
+    assert.equal(finalPayload.lab.pa_performance?.periods[0]?.period, "YTD");
     assert.equal(fs.existsSync(path.join(tempDataDir, "test_log.jsonl")), true);
+    assert.equal(fs.existsSync(path.join(tempDataDir, "etf_weights.json")), true);
     assert.equal(finalPayload.catalysts[0]?.ticker, "AAPL");
     assert.equal(finalPayload.edgar.gate_evaluations[0]?.ticker, "AAPL");
     assert.equal(finalPayload.edgar.gate_evaluations[0]?.cleared, false);

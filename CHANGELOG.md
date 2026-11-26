@@ -3,6 +3,54 @@
 All notable changes to **Investment OS** are documented in this file.
 Versions stay aligned across `plugin.json`, `package.json`, and `src/server/index.ts`.
 
+## [0.5.0] - 2026-11-26
+
+### Added
+- **Automated Zero-Key Signal Harness (`src/server/{xbrl,insiders,edgar,market,watchdog}.ts`):**
+  - `sync_fundamentals_xbrl`: Pulls official SEC XBRL `companyfacts` (`16Q + 5FY`), derives YTD-differenced quarterly cash flows and forensic ratios (`gross_margin_pct`, `operating_margin_pct`, `dso_days`, `dio_days`, `ocf_to_ni_pct`, `fcf_margin_pct`, `sbc_pct_rev`, `net_cash_b`, `diluted_shares_yoy_pct`, TTM EPS/FCF/Rev per share), and preserves custom `overrides`.
+  - `sync_insiders_form4`: Parses SEC Form 4 XML and Schedule 13D/13D-A incrementally, separating discretionary open-market buys/sales from Rule 10b5-1 plans across 90D/12M windows with C-suite buy-cluster and heavy-selling flags.
+  - Hardened SEC EDGAR polling retaining **4 periodic + 10 event** filings separately per ticker across all Active/Bench/Passed dossiers plus `extractSecRedFlags` (`NT 10-Q/K`, 8-K items `4.01`, `4.02`, `1.02`, `3.02`, `5.02`).
+  - Extended-hours Yahoo quote capture (`regular_price`, `extended_price`, `market_state`, `quote_time`, 52W range), persisted `fx_rates`, and 4-indicator Macro Regime strip (`^VIX`, `^TNX`, `^IRX`, `HYG`/`IEF`, `DX-Y.NYB` -> `macro/regimes.yaml`).
+  - Quiet delta-only CIO Watchdog (`run_watchdog_sweep`, `app_run_watchdog`, `app_ack_alert`, `alerts_log.jsonl`) detecting newly cleared SEC gates, 8-K/NT red flags, XBRL rule breaches, Passed re-entry hits, `>= 15%` audit drift, insider flags, and newly breached risk caps.
+- **3-Layer Shared Research Graph & Governance (`themes/<slug>.{yaml,md}`):**
+  - `upsert_theme` and `app_get_theme_detail` linking first-class macro/sector themes across stock dossiers (`theme_refs[]`), flagging `theme_updated_after_audit` -> `needs_retest`.
+  - `update_etf_weights` for Zod-validated look-through map updates, append-only `dossiers/<TICKER>/intel_history.jsonl`, Point-in-Time `pit_snapshot` + `benchmark_price_at_test` in `record_thesis_test`, and immutable `event_type: "rule_change"` logging with rationale on trigger/gate/model edits.
+- **Quantitative Engine & Behavioral Discipline Upgrades (`src/server/quant.ts`):**
+  - `computeCapitalRotationQueue`: Ranked **Priority Sells & Tax Swaps** (Tier 1: US-ETF -> UCITS tax-arbitrage swaps with shares, estate tax saved, auto-cured caps; Tier 2: Mandatory Held Exits even when `tier === "passed"`; Tier 3: Cap-driven trims net of swap/exit relief).
+  - `computeValuationBands` (5Y `P/E`, `P/FCF`, `P/S` `p10`/`median`/`p90`) and `evaluateHypothesisRule` (mechanical XBRL/EDGAR/Insiders/Market auto-eval with anti-softening warnings).
+  - Reverse DCF EV (`net_cash_b`) & dilution (`annual_dilution_pct`) 3-part attribution bridge (`Multiple` + `Margin` + `Residual Rev` vs. `Constant-Multiple Baseline`), coupled dividend total-return + accumulating ETF WHT handling, mode-selectable NRA estate-tax drag (`"hedge"` default `35 bps/yr` vs. `"amortized"`), expected-wealth vs. standalone Kelly CAGR separation, and outside-view GIGO `valuation_warnings`.
+  - Dip Triage dual headroom (`single_name_room_pct` vs. `portfolio_cap_room_pct`), direct ETF weight fallback, benchmark `CORE_ANCHOR` exemption, `GATED` prioritized ahead of `CAP_BLOCKED`, funding-paired tranche sizing, and `VIX >= 28` High-Vol Staged annotations.
+  - Matured Forward Judgment Scorecard (`<30d` marked `PENDING`, 30d dedup, daily benchmark history, directional verdict hit signs, `90d`/`180d`/`1Y` buckets, and Hypothesis Brier Calibration).
+  - FX-converted Backtest Lab with hybrid drift rebalance band `max(2%, targetW * band)`, risk-free rate cash yield (`rf_pct`), `sharpe_se`, `rebalance_count`, max 1-week carry-forward gap, incomplete-week drop, and `include_external_wealth` toggle.
+- **Non-Interrupting Background Side-Agent UX:** Sidecar action buttons launch background conversations (`target: "new"`) with silent `updateModelContext()` sync plus an explicit **Discuss Here** option.
+
+### Changed
+- Bumped MCP App resource URI (`APP_URI`) to `ui://investment-os/v5/dashboard.html`, Server version to `0.5.0`, and outbound Yahoo/SEC User-Agent strings to `0.5.0`.
+- Fixed `latest_decision` in `engine.ts` to read the **last** (newest) bullet in `## 4. Decision Log`, fixed `marginalEstateRatePct === 0` falsy fallback bug, and added live external equity marking when `external_exposure.qty` is set.
+- Enriched Demo Mode with generic v0.5 sample Shared Theme (`cloud-capex-vs-software-roi`), XBRL fundamentals, Form 4 insider flows, Macro Strip, Priority Sells & Tax Swaps, and Watchdog alerts.
+
+## [0.4.0] - 2026-11-25
+
+### Added
+- **Living Research Dossiers & Hybrid Vault Storage:** Extended `theses/<TICKER>.md` frontmatter (`tier`: `active`/`bench`/`passed`, `action_verdict`: `GO`/`WAIT`/`PASS`, 3-line `takeaway`, `last_audited_date`, `price_at_audit`, `sources[]`, `rejection_reason`, `reentry_trigger`, `reentry_price`) paired with per-ticker `dossiers/<TICKER>/{model.json, memo.md, intel.json}` sidecars, `history_cache.json`, and `pa_performance.json`.
+- **Deterministic Quant & Backtesting Engine (`src/server/quant.ts`):**
+  - `computeAfterTaxHurdle`: Benchmark CAGR + alpha buffer + dividend WHT drag + amortized US NRA estate-tax drag for US-situs securities.
+  - `computeScenarioSummary`: 5Y Bear/Base/Bull geometric after-tax CAGR expectation and spread vs. benchmark & hurdle.
+  - `computeReverseDcf`: Implied 5Y FCF/EPS and revenue CAGR required at current price to beat the after-tax hurdle, linked to falsifiable hypothesis IDs.
+  - `computeDipTriage`: 4-check readiness engine (Risk-Cap Headroom, Binary/SEC Gate, After-Tax Hurdle, Staged Tranche Plan) plus Passed Re-Entry Trigger alerting.
+  - `computeForwardScorecard`: Evaluates `test_log.jsonl` verdicts against live prices and benchmark returns with per-verdict alpha and hit-rate metrics.
+  - `runDeterministicBacktest`: 5Y weekly portfolio-impact simulator (`cash`, `pro_rata`, or `swap:<TICKER>` funding with threshold drift rebalancing), Sharpe/Sortino/Max-DD/Rolling-3Y metrics, historical regime breakdown, and portfolio/cluster correlations.
+- **New MCP Tools & Lab Tab:**
+  - Agent + UI tools: `upsert_dossier`, `ingest_research_intel`, `run_portfolio_backtest`.
+  - App-Only UI tools: `app_get_dossier_detail` (lazy drawer loading), `app_save_dossier_model`, `app_run_backtest`.
+  - 5th dashboard tab (`lab`) housing the Portfolio-Impact Backtester, 4-Check Dip Triage Queue, and Forward Judgment Scorecard, plus progressive-disclosure `<details>` inspector drawers and Provenance / Needs-Re-Test auditing.
+- **Yahoo Weekly History Cache (`fetchYahooHistory` / `ensureHistorySeries`):** Concurrent 5Y weekly adjusted-close history fetcher preserving fresh broker-ingested (`ibkr`) weekly bars.
+
+### Changed
+- Bumped MCP App resource URI (`APP_URI`) to `ui://investment-os/v4/dashboard.html`, Server version to `0.4.0`, and outbound Yahoo/SEC User-Agent strings to `0.4.0`.
+- Added optional `use_cache` flag on dashboard refresh and save endpoints so UI edits preserve live cached prices during an active live session while maintaining exact snapshot NAV reconciliation on `live: false`.
+- Enriched Demo Mode with tiered Active, Bench (`ACME`), and Passed (`HYPE`, with triggered re-entry alert) dossiers, Reverse DCF + Bear/Base/Bull models, primary-source memos, broker intel, and offline synthetic 5Y weekly histories for instant demo backtesting.
+
 ## [0.3.0] - 2026-11-24
 
 ### Added

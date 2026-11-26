@@ -1,21 +1,43 @@
 # System Architecture & Design
 
-Investment OS is packaged as a zero-dependency **Antigravity MCP App Plugin**. All runtime logic compiles into a single Node CJS bundle (`dist/server.cjs`) paired with a single self-contained HTML application (`dist/dashboard.html`) served over MCP Resources (`ui://investment-os/v3/dashboard.html`).
+Investment OS is packaged as a zero-dependency **Antigravity MCP App Plugin**. All runtime logic compiles into a single Node CJS bundle (`dist/server.cjs`) paired with a single self-contained HTML application (`dist/dashboard.html`) served over MCP Resources (`ui://investment-os/v5/dashboard.html`).
 
-## High-Level Topology
+## High-Level Topology (`v0.5`)
 
 ```mermaid
-flowchart LR
-  User["Investor (Antigravity IDE)"] --> Chat["Antigravity Agent"]
-  User --> Sidecar["MCP App Sidecar (v0.3 Monochrome UI)"]
+flowchart TB
+  subgraph Signals["Automated Zero-Key + Broker Signal Harness"]
+    SEC["SEC EDGAR Submissions + XBRL companyfacts + Form 4 XML"]
+    YF["Yahoo Finance Extended Quotes, 5Y/1D History, FX & 4-Indicator Macro"]
+    IBKR["Connected Broker MCP (Read-Only: IBKR Holdings, Earnings, IV, PA)"]
+  end
 
-  Chat -->|"MCP stdio Tools"| Server["Investment OS Server (dist/server.cjs)"]
-  Sidecar -->|"app.callServerTool (app-only)"| Server
-  Chat -->|"Read-Only Queries"| Broker["Broker MCP (e.g. ibkr-mcp)"]
+  subgraph Vault["Private Local Vault (${PLUGIN_DATA}, 0700/0600)"]
+    L1["Layer 1: Shared Macro & Theme Objects (themes/*.yaml, themes/*.md, macro/regimes.yaml)"]
+    L2["Layer 2: Stock Dossiers (theses/*.md + dossiers/TICKER/{model,fundamentals,insiders,intel,intel_history,memo})"]
+    L3["Layer 3: Portfolio, PIT Ledger & Delta Alerts (portfolio.json, test_log.jsonl, alerts_log.jsonl)"]
+  end
 
-  Server -->|"Zod Validated 0600 I/O"| Vault["Private Data Vault (${PLUGIN_DATA})"]
-  Server -->|"Public Quotes & FX"| Yahoo["Yahoo Finance Chart API"]
-  Server -->|"Public SEC Submissions"| Edgar["SEC EDGAR (data.sec.gov)"]
+  subgraph Engine["Deterministic Quant & Governance Engine (dist/server.cjs)"]
+    Quant["Reverse DCF Bridge, Coupled Scenarios, Priority Sells/Swaps, Dip Triage, FX Backtester, Scorecard"]
+    Watchdog["Hypothesis Auto-Evaluator & Quiet Delta-Only Watchdog (watchdog.ts)"]
+  end
+
+  subgraph UX["Antigravity Sidecar (ui://investment-os/v5/dashboard.html)"]
+    UI["Monochrome Progressive-Disclosure UI (Overview, Holdings, Theses, Catalysts, Lab)"]
+    BgAgent["Background Side-Agent (target: new) + Silent Context Sync (updateModelContext)"]
+  end
+
+  SEC --> Vault
+  YF --> Vault
+  IBKR --> Vault
+  L1 --> L2
+  L2 --> L3
+  Vault --> Engine
+  Engine --> UI
+  UI -->|"Deterministic Checks (callServerTool)"| Engine
+  UI -->|"Deep Red-Team Audits (target: new)"| BgAgent
+  BgAgent -->|"Persists Scored State"| Vault
 ```
 
 ## Runtime & Storage Isolation
@@ -25,66 +47,55 @@ Strict physical separation guarantees the repository can be publicly shared, for
 | Directory | Env / Manifest Mapping | Git Tracked? | Contents & Permissions |
 | :--- | :--- | :--- | :--- |
 | `${PLUGIN_ROOT}` | Plugin install directory | Yes | `plugin.json`, `skills/`, `dist/server.cjs`, `dist/dashboard.html`, `docs/` |
-| `${PLUGIN_DATA}` | `INVESTMENT_OS_DATA_DIR` fallback | **Never** | User data (`0700` dir, `0600` files) listed below |
+| `${PLUGIN_DATA}` | `INVESTMENT_OS_DATA_DIR` fallback | **Never** | Private vault (`0700` dirs, `0600` files) inventoried below |
 
-### `${PLUGIN_DATA}` Schema Inventory
+### 3-Layer `${PLUGIN_DATA}` Schema Inventory
 
-| File | Format | Managed By | Purpose |
-| :--- | :--- | :--- | :--- |
-| `profile.yaml` | YAML (`ProfileSchema`) | `update_profile`, `update_external_wealth` | `base_currency`, timezone, tax settings, external exposure, cash reserve, risk cap rules |
-| `portfolio.json` | JSON (`PortfolioSchema`) | `update_portfolio_positions` | Multi-currency positions, cash/accruals, manual/live FX rates, timestamp |
-| `etf_weights.json` | JSON (`EtfWeightsConfig`) | User / Agent | Optional ETF underlying constituent maps (percentages) for look-through aggregation |
-| `catalysts.yaml` | YAML (`CatalystsFileSchema`) | `manage_catalysts` | Dated catalyst milestones and SEC form gate definitions |
-| `theses/<TICKER>.md` | YAML Frontmatter + Markdown | `update_thesis`, `record_thesis_test`, `app_*` | Buy/trim zones, verdict, bear case summary, falsifiable `hypotheses[]`, kill-switches, dated decision log |
-| `test_log.jsonl` | Append-only JSON Lines | `record_thesis_test` | Immutable chronological record of hypothesis evaluations, prices at test, and verdicts |
-| `market_cache.json` | JSON | Auto (`fetchLiveQuotes`) | Latest Yahoo quotes, 1D/1M deltas, 22-point sparklines, FX rates, VIX |
-| `edgar_cache.json` | JSON | `check_sec_edgar`, `app_check_edgar` | Cached ticker CIKs and recent SEC form metadata (`10-K`, `10-Q`, `8-K`, `20-F`, `6-K`, `DEF 14A`) |
+| Layer | File | Format / Schema | Managed By | Purpose |
+| :--- | :--- | :--- | :--- | :--- |
+| **L1** | `themes/<slug>.yaml` + `.md` | YAML (`ThemeObjectSchema`) + MD | `upsert_theme` | Shared macro/sector theses (`relationship_mode`, `shared_assumptions[]`, `exposures[]`, `signposts[]`, `sources[]`) |
+| **L1** | `macro/regimes.yaml` | YAML (`MacroRegimeSchema`) | `fetchMacroRegime`, `run_watchdog_sweep` | 4-indicator macro strip (`VIX`, `US 10Y`, `3M T-Bill`, `HYG/IEF`, `DXY`, `regime_label`) |
+| **L2** | `theses/<TICKER>.md` | YAML Frontmatter + MD | `update_thesis`, `upsert_dossier`, `record_thesis_test` | Tier, `action_verdict`, `takeaway[]`, `theme_refs[]`, provenance & `sources[]`, triggers, rule-backed `hypotheses[]`, kill-switches, Decision Log |
+| **L2** | `dossiers/<TICKER>/model.json` | JSON (`DossierModelSchema`) | `upsert_dossier`, `app_save_dossier_model` | Reverse DCF (`net_cash_b`, `annual_dilution_pct`), Bear/Base/Bull scenarios, `accumulating`, `dividend_wht_pct`, custom tranches |
+| **L2** | `dossiers/<TICKER>/fundamentals.json` | JSON (`FundamentalsSchema`) | `sync_fundamentals_xbrl`, `run_watchdog_sweep` | 16Q + 5FY GAAP/IFRS XBRL series, derived forensic ratios (`DSO`, `DIO`, `GM%`, `OCF/NI`, `SBC%`, `Net Cash`, TTM per-share), preserved `overrides` |
+| **L2** | `dossiers/<TICKER>/insiders.json` | JSON (`InsidersSchema`) | `sync_insiders_form4`, `run_watchdog_sweep` | Incremental Form 4 & SC 13D/13D-A aggregation (90D/12M discretionary vs. 10b5-1 buys/sales, C-suite cluster flags) |
+| **L2** | `dossiers/<TICKER>/intel.json` + `intel_history.jsonl` | JSON + Append-only JSONL | `ingest_research_intel`, `upsert_dossier` | Broker earnings insights, ATM straddle implied move & IV skew, themes, connections, plus historical numeric snapshots |
+| **L2** | `dossiers/<TICKER>/memo.md` | Markdown | `upsert_dossier` | Primary-source research memo lazy-loaded inside `#stock-inspector` |
+| **L3** | `profile.yaml` | YAML (`ProfileSchema`) | `update_profile`, `update_external_wealth` | Base currency, timezone, benchmark & estate-tax drag mode (`hedge` vs. `amortized`), tax profile, external equity (`amount_base` or live `qty`), cash reserve, risk caps |
+| **L3** | `portfolio.json` | JSON (`PortfolioSchema`) | `update_portfolio_positions` | Multi-currency positions, cash/accruals, FX rates, snapshot timestamp |
+| **L3** | `etf_weights.json` | JSON (`EtfWeightsConfigSchema`) | `update_etf_weights` | Zod-validated ETF look-through constituent maps and residual metadata |
+| **L3** | `catalysts.yaml` | YAML (`CatalystsFileSchema`) | `manage_catalysts` | Dated catalyst milestones and SEC form gate definitions |
+| **L3** | `test_log.jsonl` | Append-only JSONL (`ThesisTestRecordSchema`) | `record_thesis_test`, `saveOrMergeThesis`, `app_save_dossier_model` | Immutable chronological ledger of `thesis_test` (with `pit_snapshot` & `benchmark_price_at_test`) and `rule_change` audit events |
+| **L3** | `alerts_log.jsonl` | Append-only JSONL (`WatchdogAlertSchema`) | `run_watchdog_sweep`, `app_ack_alert` | Delta-only CIO Watchdog alerts (SEC gate clears, 8-K/NT red flags, XBRL breaches, re-entry hits, audit drift, insider signals, cap breaches) |
+| **L3** | `market_cache.json` / `history_cache.json` / `edgar_latest.json` / `pa_performance.json` | Validated JSON caches | Server & Signal Harness | Extended quotes + persisted FX + macro cache; 5Y weekly + FX (`EURUSD=X`) + daily benchmark (`daily:<SYM>`) history; 4 periodic + 10 event SEC filings per ticker; broker PA TWR/MWR |
 
-## MCP Tool Architecture
+## MCP Tool Architecture (`v0.5`)
 
-Tools split cleanly across two visibility tiers using `_meta.ui`:
+All tools are **strictly read-only** with respect to brokerage execution (enforced in CI by `scripts/verify-bundle.mjs`):
 
-1. **Agent + UI Tools (`visibility: ["model", "app"]`):**
-   - `open_dashboard`: Computes full analytics payload and binds the interactive resource `ui://investment-os/v3/dashboard.html`.
-   - `update_profile`: Upserts currency, residency tax toggles, risk cap rules, and optional external/reserve blocks.
-   - `update_portfolio_positions`: Merges position batches, prunes `qty: 0`, infers default domicile/currency/US-situs heuristics, and stamps FX.
-   - `update_external_wealth`: Fast incremental updates to illiquid external holdings and reserve targets.
-   - `update_thesis`: Structured upsert across frontmatter targets (`buy_zone_low`, `buy_zone_high`, `trim_zone`, `gated`, `verdict`, `hypotheses`) and Markdown body sections.
-   - `record_thesis_test`: Validates `ThesisTestRecordSchema`, updates hypothesis statuses/evidence, recomputes frontmatter `last_tested_date` & `bear_case_summary`, appends to the Markdown decision log, and writes a permanent line to `test_log.jsonl`.
-   - `manage_catalysts`: Adds/removes/replaces binary catalysts and optional SEC form gates.
-   - `check_sec_edgar`: Resolves CIKs and evaluates whether target forms (`filed_after`) have cleared on `data.sec.gov`.
+1. **Agent + UI Tools (`visibility: ["model", "app"]`, `resourceUri: "ui://investment-os/v5/dashboard.html"`):**
+   - `open_dashboard`, `update_profile`, `update_portfolio_positions`, `update_etf_weights`, `update_external_wealth`, `update_thesis`, `upsert_dossier`, `upsert_theme`, `ingest_research_intel`, `sync_fundamentals_xbrl`, `sync_insiders_form4`, `run_watchdog_sweep`, `run_portfolio_backtest`, `manage_catalysts`, `check_sec_edgar`, `record_thesis_test`.
 2. **App-Only UI Tools (`visibility: ["app"]`):**
-   - `app_get_dashboard`: Switches tabs, toggles live Yahoo quote refreshes, or toggles sandboxed in-memory Sample Demo Preview.
-   - `app_save_external_wealth`: Persists slider adjustments from the Stress-Tester back into `profile.yaml`.
-   - `app_save_trigger`: Persists trigger zone and gate edits from the Stock Inspector drawer into `theses/<TICKER>.md`.
-   - `app_upsert_hypothesis`: Adds or updates an individual falsifiable claim directly from the Stock Inspector UI.
-   - `app_check_edgar`: Triggers on-demand SEC EDGAR submission polling from the Catalysts & SEC tab.
+   - `app_get_dashboard`, `app_check_edgar`, `app_run_watchdog`, `app_get_theme_detail`, `app_ack_alert`, `app_save_external_wealth`, `app_save_trigger`, `app_upsert_hypothesis`, `app_get_dossier_detail`, `app_save_dossier_model`, `app_run_backtest`.
 
-## Quantitative Financial Engine (`src/server/engine.ts`)
+## Background Side-Agent UX Pattern
 
-1. **Currency Normalization:** Every position computes market value in its trading currency (`qty * price`), converts to USD via live or cached FX rates, and translates into `profile.base_currency` (`usd_to_base_fx`), separating trading performance from FX translation effects.
-2. **Look-Through Aggregation:** For every ETF in `portfolio.json` matching an entry in `etf_weights.json`, underlying constituent USD exposure is summed alongside direct single-stock holdings. The engine outputs unified `pct_nav` and `direct_usd` vs. `via_etfs_usd` attribution.
-3. **Configurable Risk Guardrails:** Rules in `profile.risk_caps` (`RiskCapRuleSchema`) support four evaluation kinds:
-   - `single_name_max`: Maximum look-through NAV % of any single holding.
-   - `ticker`: Portfolio look-through NAV % of a named `ticker`.
-   - `bucket`: Aggregate look-through NAV % across `tickers[]` (and optional `include_etf_residual_key`), also evaluated on a total-wealth basis when paired with `external_exposure`.
-   - `us_situs`: Share of portfolio NAV held in US-situs securities.
-4. **Optional US NRA Estate Tax (`computeUsEstateTaxNra`):** When `tax_profile.nra_us_estate_tax_enabled` is `true`, calculates progressive statutory rates (`18%`–`40%`) after the IRC §2101(c) US\$13,000 unified credit (~US\$60,000 exemption equivalent) across US-situs assets, alongside counterfactual non-US-situs UCITS wrapper savings.
+Interactive research actions inside the sidecar (`Run Systematic Test`, `Refine / Challenge`, `Sync`) never interrupt the user's active conversation by default:
 
-## Frontend Design System & Modern Web Compliance
+1. **Fast Deterministic Actions** (Refresh Live, Run Watchdog, Ack Alert, Save Trigger, Save Model, Run Backtest) execute directly against the local MCP server via `app.callServerTool(...)` with zero chat turns.
+2. **Deep Agent Audits** default to `mode: "background"`, invoking `app.sendMessage({ role: "user", content: [...], _meta: { "com.google.antigravity/message": { target: "new" } } })` and immediately calling `app.updateModelContext(...)` so the main conversation learns about the background run passively on the user's next turn.
+3. **Explicit Main-Thread Escalation:** A secondary **Discuss Here** button sends the prompt into the current conversation when the user actively wants to debate a thesis inline.
 
-- **Monochrome Surface Hierarchy:** Built strictly on semantic custom properties with `color-scheme: light dark`, `light-dark()`, and perceptual OKLab color mixing (`color-mix(in oklab, ...)`). Syncs dynamically with host Antigravity themes via `applyDocumentTheme` and `applyHostStyleVariables`.
-- **Single Highlight Signal Rule:** Structural tables, sparklines, look-through stacks, and risk cap meters use neutral slate/steel tones (`--viz-1` .. `--viz-8`). Muted sage green (`--ok`) and desaturated crimson (`--bad`) are reserved strictly for financial deltas, trigger hits, cap breaches, and falsified claims.
-- **Native Modern Platform Primitives:**
-  - `html { container-type: scroll-state; }` auto-hides the sticky header cleanly when scrolling deeper into long tables.
-  - Declarative `focusgroup="tablist nomemory"` keyboard tab navigation paired with `hidden="until-found"` panels (allowing browser Ctrl/Cmd+F find-in-page across inactive tabs).
-  - Container-queried tables (`@container (width < 520px)`) collapse seamlessly from institutional spreadsheets into mobile-clean stacked cards inside narrow right-hand sidecars.
-  - Top-layer slide-over drawer (`<dialog id="stock-inspector">`) with `overscroll-behavior: contain`, `closedby="any"` + pointer fallback, `@starting-style`, and discrete `transition-behavior: allow-discrete`.
-  - Full Windows High Contrast (`@media (forced-colors: active)`) and `prefers-reduced-motion` support.
+## Quantitative Financial Engine (`src/server/quant.ts` & `src/server/engine.ts`)
 
-## Security Boundaries
+1. **After-Tax Hurdle & Coupled Scenarios:** Adds `+dividend_yield_pct` into `gross_cagr_pct` for distributing securities (`!accumulating`) before deducting dividend WHT (supporting per-dossier `dividend_wht_pct` overrides and 0 extra drag on accumulating UCITS ETFs). Supports `estate_tax_drag_mode: "hedge"` (default `35 bps/yr`) vs. `"amortized"` (`20Y`), fixes `marginalEstateRatePct === 0` exemption handling, separates expected-wealth CAGR from standalone Kelly CAGR + dispersion drag bps, and emits deterministic outside-view GIGO `valuation_warnings`.
+2. **Reverse DCF 3-Part Attribution & 5Y Valuation Bands:** Adjusts EV by `net_cash_b` and terminal share count by `annual_dilution_pct`, outputting `multiple_expansion_cagr_pct`, `margin_expansion_cagr_pct`, `residual_revenue_cagr_pct`, and `constant_mult_margin_rev_cagr_pct`, paired with 5Y historical `P/E`, `P/FCF`, and `P/S` percentile bands (`p10`/`median`/`p90`).
+3. **Priority Sells & Tax Swaps (`computeCapitalRotationQueue`) + Dual-Headroom Dip Triage:** Ranks US-ETF -> UCITS tax swaps (with auto-cured caps), mandatory held exits (even when `tier === "passed"`), and net cap trims. Feeds freed proceeds directly into Dip Triage alongside deployable cash, prioritizes `GATED` ahead of `CAP_BLOCKED`, exempts the benchmark ETF as `CORE_ANCHOR`, blocks `UNMODELED`/`PROBATION`/`EXIT`/kill-switch tickers from `READY`, and annotates `VIX >= 28` High-Vol Staged tranches.
+4. **FX-Converted Portfolio-Impact Backtester:** Applies weekly FX conversion (`EURUSD=X`, etc.), hybrid drift rebalance band `Math.max(0.02, targetW * bandFrac)`, drops incomplete current weeks, caps carry-forward gaps at 1 week, credits cash with `rf_pct` (cached 3M T-bill or `4.0%`), reports `sharpe_se` and `rebalance_count`, and supports `include_external_wealth` (default `true`).
+5. **Matured Forward Judgment Scorecard & Brier Calibration:** Marks `<30d` entries `PENDING`, deduplicates same ticker+verdict within 30 days, uses `benchmark_price_at_test` + daily benchmark history, scores directional verdict signs cleanly (`HIGH_CONVICTION`/`GO` vs. `EXIT`/`PROBATION`/`PASS` vs. `WATCH`), aggregates `90d`/`180d`/`1Y` buckets, and computes Brier calibration over resolved hypotheses.
 
-- **Content Security Policy:** `dist/dashboard.html` runs completely offline inside its MCP App sandbox with zero third-party `<script>` or CSS CDNs (`connectDomains` empty; zero inline external scripts).
-- **Path Containment & Input Validation:** Ticker symbols are normalized and regex-checked (`/^[A-Z0-9][A-Z0-9._-]{0,14}$/`, rejecting `..`) and every storage read/write verifies canonical containment inside `DATA_DIR`.
-- **Strict Outbound Link Policy:** UI `app.openLink` handlers permit strictly verified `https://` URLs (and `https://www.sec.gov/` for filings).
-- **Automated Privacy Gate:** `scripts/privacy-check.mjs` runs as a first-class npm check to ensure neither workspace sources nor staged plugin builds contain local OS paths, secrets, or sensitive personal identifiers.
+## Security & Frontend Guardrails
+
+- **CSP & Self-Contained Bundle:** `dist/dashboard.html` runs strictly offline (`< 1 MB` budget, zero CDN scripts/styles, `light-dark()` + `color-mix(in oklab, ...)` monochrome palette, zero banned rainbow hexes).
+- **Path Containment & `0700`/`0600` Permissions:** All ticker (`TICKER_REGEX`) and theme slug (`THEME_SLUG_REGEX`) paths resolve strictly through `safeResolve` inside `DATA_DIR` with atomic `0600` writes.
+- **Automated Verification Gates:** `npm run verify` runs `typecheck`, `build`, `verify-bundle`, `test`, and `privacy-check`.
