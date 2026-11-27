@@ -6,7 +6,8 @@ Thank you for contributing to Investment OS!
 
 1. **Zero Personal Particulars:** Never commit personal account balances, quantities, broker account IDs, tax filings, private employer names, or local machine home-directory paths.
 2. **Read-Only Brokerage Design:** This plugin never implements order placement, cancellation, modification, or funds-transfer tools. Pull requests adding execution/trading capabilities will be rejected.
-3. **Runtime State Lives Outside the Repo:** All mutable user data (`profile.yaml`, `portfolio.json`, `theses/*.md`, caches) must live under `${PLUGIN_DATA}` (or `INVESTMENT_OS_DATA_DIR`), never inside `${PLUGIN_ROOT}`.
+3. **Runtime State Lives Outside the Repo:** All mutable user data (`profile.yaml`, `portfolio.json`, `dossiers/`, `themes/`, `macro/`, `theses/*.md`, caches) must live under `${PLUGIN_DATA}` (or `INVESTMENT_OS_DATA_DIR`), never inside `${PLUGIN_ROOT}`.
+4. **Local Personal Denylist (`privacy-denylist.json`):** Keep personal regex guards inside `${PLUGIN_DATA}/privacy-denylist.json` (`0600` mode, `{ "rules": [{ "name", "pattern", "flags?" }] }`, never committed to Git). `npm run privacy-check` loads it automatically alongside the built-in generic path/credential/account-ID rules.
 
 ## Development Workflow
 
